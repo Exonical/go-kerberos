@@ -33,6 +33,37 @@ func TestFASTStructuresRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFASTChoicesUseExplicitContextTags(t *testing.T) {
+	request, err := asn1.Marshal(PAFXFastRequest{ArmoredData: KrbFastArmoredReq{
+		ReqChecksum: Checksum{ChecksumType: 16, Checksum: []byte{1}},
+		EncFastReq:  EncryptedData{EType: 18, Cipher: []byte{2}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request) == 0 || request[0] != 0xa0 {
+		t.Fatalf("FAST request choice tag = 0x%x, want 0xa0", request[0])
+	}
+	var decodedRequest PAFXFastRequest
+	if err := asn1.Unmarshal(request, &decodedRequest); err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := asn1.Marshal(PAFXFastReply{ArmoredData: KrbFastArmoredRep{
+		EncFastRep: EncryptedData{EType: 18, Cipher: []byte{3}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply) == 0 || reply[0] != 0xa0 {
+		t.Fatalf("FAST reply choice tag = 0x%x, want 0xa0", reply[0])
+	}
+	var decodedReply PAFXFastReply
+	if err := asn1.Unmarshal(reply, &decodedReply); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplicationTagNumbers(t *testing.T) {
 	tests := map[string]int{
 		"Ticket":        TagTicket,
