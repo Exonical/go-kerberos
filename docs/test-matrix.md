@@ -20,7 +20,7 @@ when absent.
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
-| KDB persistence (MIT dump) | unit + golden | MIT pass | read-only |
+| KDB persistence (MIT dump) | unit + golden | MIT pass (master enctypes 17/18/19/20) | read-only |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
@@ -33,6 +33,13 @@ requested; a non-nil policy clears disallowed flags, matching MIT's
 flag restrictions per principal, while this implementation exposes
 server-level knobs. Renewable, postdated, and validation behavior is covered
 by unit and MIT integration tests.
+
+MIT dump persistence decrypts database key data with AES master-key enctypes
+17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). The K/M principal's enctype is
+used when that record is present; ordinary MIT dumps omit K/M, so the loader
+tries the supported enctypes and accepts the first integrity-checked result.
+The K/M salt follows MIT's `krb5_principal2salt` rule for `K/M@REALM`:
+`REALMKM`. Writes and kadmin operations remain out of scope.
 
 `DefaultRenewableLife` is an opt-in Go server default for renewable requests
 without an explicit `rtime` (including the epoch maximum sentinel), followed

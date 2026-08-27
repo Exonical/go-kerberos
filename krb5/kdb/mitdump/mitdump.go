@@ -45,9 +45,9 @@ func Load(path string) (*FileStore, error) {
 }
 
 // LoadWithMasterPassword reads an MIT dump whose key data is encrypted under
-// the default AES256-SHA1 K/M master key. MIT's dump format stores key data
-// encrypted under the database master key; the password is needed to make
-// those records usable by a Go KDC.
+// an AES Kerberos K/M master key. MIT's dump format stores key data encrypted
+// under the database master key; the password is needed to make those records
+// usable by a Go KDC.
 func LoadWithMasterPassword(path, password string) (*FileStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -110,7 +110,8 @@ func Parse(data []byte) (*FileStore, error) {
 }
 
 // ParseWithMasterPassword parses an MIT dump and decrypts its key data using
-// the database master password. It also accepts plaintext key data, which is
+// the database master password. It supports the AES Kerberos master-key
+// enctypes 17, 18, 19, and 20. It also accepts plaintext key data, which is
 // useful for synthetic test dumps.
 func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 	store, err := Parse(data)
@@ -120,16 +121,72 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 	if password == "" {
 		return nil, fmt.Errorf("MIT dump master password is empty")
 	}
-	masterEType, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+
+	masterEnctype, identified, err := dumpMasterEnctype(store)
 	if err != nil {
-		return nil, fmt.Errorf("MIT dump master enctype: %w", err)
+		return nil, err
 	}
-	masterKey, err := masterEType.StringToKey([]byte(password),
-		[]byte(store.Realm+"KM"), nil)
-	if err != nil {
-		return nil, fmt.Errorf("MIT dump master key: %w", err)
+	candidates := []int32{
+		crypto.EnctypeAES128SHA1,
+		crypto.EnctypeAES256SHA1,
+		crypto.EnctypeAES128SHA256,
+		crypto.EnctypeAES256SHA384,
 	}
-	for name, record := range store.records {
+	if identified {
+		candidates = []int32{masterEnctype}
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		masterEType, err := crypto.NewRegistry().Get(candidate)
+		if err != nil {
+			lastErr = fmt.Errorf("MIT dump master enctype %d: %w", candidate, err)
+			continue
+		}
+		masterKey, err := masterEType.StringToKey([]byte(password),
+			[]byte(store.Realm+"KM"), nil)
+		if err != nil {
+			lastErr = fmt.Errorf("MIT dump master key: %w", err)
+			continue
+		}
+		records, err := decryptRecords(store.records, masterEType, masterKey)
+		if err == nil {
+			store.records = records
+			return store, nil
+		}
+		lastErr = err
+	}
+	if identified {
+		return nil, fmt.Errorf("MIT dump master enctype %d: %w", masterEnctype, lastErr)
+	}
+	return nil, fmt.Errorf("MIT dump master key: no supported enctype decrypted key data: %w", lastErr)
+}
+
+func dumpMasterEnctype(store *FileStore) (int32, bool, error) {
+	for _, record := range store.records {
+		if record.Name.Realm != store.Realm ||
+			len(record.Name.Components) != 2 ||
+			record.Name.Components[0] != "K" ||
+			record.Name.Components[1] != "M" {
+			continue
+		}
+		if len(record.Keys) != 1 {
+			return 0, false, fmt.Errorf("MIT dump K/M principal has invalid key data")
+		}
+		for enctype := range record.Keys {
+			if _, err := crypto.NewRegistry().Get(enctype); err != nil {
+				return 0, false, fmt.Errorf("unsupported MIT dump master enctype %d", enctype)
+			}
+			return enctype, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func decryptRecords(records map[string]kdb.PrincipalRecord, masterEType crypto.EType,
+	masterKey []byte) (map[string]kdb.PrincipalRecord, error) {
+	decrypted := make(map[string]kdb.PrincipalRecord, len(records))
+	for name, record := range records {
+		record.Keys = copyKeys(record.Keys)
 		for enctype, key := range record.Keys {
 			etype, err := crypto.NewRegistry().Get(enctype)
 			if err != nil {
@@ -155,9 +212,9 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 			key.Key = append([]byte(nil), plain[:keyLength]...)
 			record.Keys[enctype] = key
 		}
-		store.records[name] = record
+		decrypted[name] = record
 	}
-	return store, nil
+	return decrypted, nil
 }
 
 // Lookup implements kdb.Store.
