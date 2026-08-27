@@ -24,7 +24,9 @@ func encodeTransited(realms []string) ([]byte, error) {
 		if previous != "" {
 			if strings.HasPrefix(realm, previous) && strings.HasPrefix(realm[len(previous):], "/") {
 				field = realm[len(previous):]
-			} else if strings.HasSuffix(realm, previous) {
+			} else if len(realm) > len(previous) &&
+				strings.HasSuffix(realm, previous) &&
+				realm[len(realm)-len(previous)-1] == '.' {
 				field = strings.TrimSuffix(realm, previous)
 				if !strings.HasSuffix(field, ".") {
 					field += "."

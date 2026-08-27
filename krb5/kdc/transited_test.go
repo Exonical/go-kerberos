@@ -14,6 +14,7 @@ func TestTransitedCompression(t *testing.T) {
 		{name: "empty"},
 		{name: "domain child", realms: []string{"EDU", "MIT.EDU"}, want: "EDU,MIT."},
 		{name: "domain literals", realms: []string{"REALM.A", "REALM.B"}, want: "REALM.A,REALM.B"},
+		{name: "domain suffix boundary", realms: []string{"EXAMPLE.COM", "MYEXAMPLE.COM"}, want: "EXAMPLE.COM,MYEXAMPLE.COM"},
 		{name: "x500 child", realms: []string{"/C=US/O=MIT", "/C=US/O=MIT/OU=KRB"}, want: "/C=US/O=MIT,/OU=KRB"},
 	}
 	for _, test := range tests {
