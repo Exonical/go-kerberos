@@ -1,7 +1,9 @@
 # Client test matrix
 
-All listed Phase 0 cells now have RED test coverage. Production behavior and
-MIT-generated fixtures are intentionally deferred to later handoffs.
+All listed cells have RED test coverage. MIT-generated keytab and FILE ccache
+fixtures are now checked in; parser assertions remain RED until their
+implementations land. Packet captures are still deferred and skip explicitly
+when absent.
 
 | Feature | Go client -> MIT KDC | MIT-generated fixture -> Go | Go-generated artifact -> MIT |
 | --- | --- | --- | --- |
