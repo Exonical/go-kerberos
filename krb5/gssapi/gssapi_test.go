@@ -1,0 +1,253 @@
+package gssapi
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
+	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
+)
+
+func TestInitialTokenFraming(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(time.Unix(1700000000, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) < 2 || token[0] != 0x60 || !bytes.Contains(token, append(append([]byte(nil), kerberosOID...), 0x01, 0x00)) {
+		t.Fatalf("unexpected initial token framing: %x", token[:min(len(token), 16)])
+	}
+	_, mutual, err := NewAcceptor(kt).Accept(token, time.Unix(1700000000, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mutual) == 0 || !bytes.Contains(mutual, []byte{0x02, 0x00}) {
+		t.Fatalf("missing AP-REP token id: %x", mutual)
+	}
+}
+
+func TestContextAndPerMessageRoundTrip(t *testing.T) {
+	for _, etypeID := range []int32{
+		crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
+		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
+	} {
+		t.Run(cryptoName(etypeID), func(t *testing.T) {
+			creds, kt := syntheticCredentials(t, etypeID)
+			now := time.Unix(1700000000+int64(etypeID), 0).UTC()
+			initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag|GSSConfidentialityFlag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := initiator.InitialToken(now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			acceptor := NewAcceptor(kt)
+			acceptorContext, mutual, err := acceptor.Accept(token, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := initiator.VerifyToken(mutual); err != nil {
+				t.Fatal(err)
+			}
+			plain := []byte("gss-api sealed message")
+			wrapped, err := initiator.Wrap(plain, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := acceptorContext.Unwrap(wrapped)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Fatalf("unwrapped = %q, want %q", got, plain)
+			}
+			unsealed, err := initiator.Wrap(plain, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err = acceptorContext.Unwrap(unsealed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, plain) {
+				t.Fatalf("unwrapped integrity token = %q, want %q", got, plain)
+			}
+			mic, err := initiator.MIC(plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := acceptorContext.VerifyMIC(plain, mic); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPerMessageRejectsTamperingDirectionAndReplay(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700010000, 0).UTC()
+	initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptorContext, mutual, err := NewAcceptor(kt).Accept(token, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := initiator.Wrap([]byte("message"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acceptorContext.Unwrap(append([]byte(nil), wrapped...)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acceptorContext.Unwrap(wrapped); err == nil {
+		t.Fatal("replayed token unexpectedly accepted")
+	}
+	next, err := initiator.Wrap([]byte("tamper"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := append([]byte(nil), next...)
+	tampered[len(tampered)-1] ^= 1
+	if _, err := acceptorContext.Unwrap(tampered); err == nil || !isIntegrity(err) {
+		t.Fatalf("tampered token error = %v", err)
+	}
+	if _, err := initiator.Unwrap(wrapped); err == nil {
+		t.Fatal("wrong direction token unexpectedly accepted")
+	}
+}
+
+func TestPerMessageRRCIsRotatedOnReceive(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES128SHA1)
+	now := time.Unix(1700020000, 0).UTC()
+	initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptorContext, mutual, err := NewAcceptor(kt).Accept(token, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := initiator.Wrap([]byte("rotation"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := rotateTokenData(t, wrapped, 3)
+	plain, err := acceptorContext.Unwrap(rotated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "rotation" {
+		t.Fatalf("rotated token payload = %q", plain)
+	}
+}
+
+func syntheticCredentials(t *testing.T, etypeID int32) (*client.Credentials, *keytab.Keytab) {
+	t.Helper()
+	etype, err := crypto.NewRegistry().Get(etypeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPrincipal := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	servicePrincipal := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"host", "service.test"}}
+	sessionKey := bytes.Repeat([]byte{0x31}, etype.KeySize())
+	serviceKey := bytes.Repeat([]byte{0x52}, etype.KeySize())
+	now := time.Unix(1700000000, 0).UTC()
+	end := types.KerberosTime{Time: time.Unix(2000000000, 0).UTC(), Present: true}
+	ticketPart, err := asn1.Marshal(protocol.EncTicketPart{
+		Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionKey},
+		CRealm:   clientPrincipal.Realm,
+		CName:    protocol.PrincipalName{NameType: int32(clientPrincipal.NameType), NameString: clientPrincipal.Components},
+		AuthTime: types.KerberosTime{Time: now, Present: true},
+		EndTime:  end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticketCipher, err := etype.Encrypt(serviceKey, 2, ticketPart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kvno := uint32(2)
+	ticket, err := asn1.Marshal(protocol.Ticket{
+		TktVNO: 5, Realm: servicePrincipal.Realm,
+		SName:   protocol.PrincipalName{NameType: int32(servicePrincipal.NameType), NameString: servicePrincipal.Components},
+		EncPart: protocol.EncryptedData{EType: etypeID, KVNO: &kvno, Cipher: ticketCipher},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &client.Credentials{
+			Client: clientPrincipal, Server: servicePrincipal,
+			Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionKey},
+			AuthTime: types.KerberosTime{Time: now, Present: true}, EndTime: end, Ticket: ticket,
+		}, &keytab.Keytab{Entries: []keytab.Entry{{
+			Principal: servicePrincipal, KVNO: kvno, Enctype: etypeID, Key: serviceKey,
+		}}}
+}
+
+func rotateTokenData(t *testing.T, token []byte, rrc int) []byte {
+	t.Helper()
+	if len(token) < 16 {
+		t.Fatal("short token")
+	}
+	rotated := append([]byte(nil), token...)
+	binary.BigEndian.PutUint16(rotated[6:8], uint16(rrc))
+	data := append([]byte(nil), rotated[16:]...)
+	rrc %= len(data)
+	copy(rotated[16:], append(data[len(data)-rrc:], data[:len(data)-rrc]...))
+	return rotated
+}
+
+func isIntegrity(err error) bool {
+	return errors.Is(err, krberrors.ErrIntegrity)
+}
+
+func cryptoName(id int32) string {
+	switch id {
+	case crypto.EnctypeAES128SHA1:
+		return "aes128-sha1"
+	case crypto.EnctypeAES256SHA1:
+		return "aes256-sha1"
+	case crypto.EnctypeAES128SHA256:
+		return "aes128-sha256"
+	default:
+		return "aes256-sha384"
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
