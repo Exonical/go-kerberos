@@ -52,6 +52,8 @@ type Server struct {
 	// DefaultTicketLife applies when a request omits its maximum till time.
 	DefaultTicketLife time.Duration
 	MaxRenewableLife  time.Duration
+	// DefaultRenewableLife applies when RENEWABLE omits its rtime.
+	DefaultRenewableLife time.Duration
 	// DisablePreauth disables the server-wide preauthentication requirement.
 	// MIT normally configures this per principal with requires_preauth.
 	DisablePreauth bool
@@ -1061,15 +1063,24 @@ func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.K
 func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTime, till types.KerberosTime, start, end time.Time) *types.KerberosTime {
 	renewable := options&types.KDCRenewable != 0
 	hasTill := ticketTillSet(till)
+	hasRequested := requested != nil && ticketTillSet(*requested)
 	if !renewable && (options&types.KDCRenewableOK == 0 || (hasTill && !till.Time.After(end))) {
 		return nil
 	}
 	target := start.Add(s.MaxRenewableLife)
-	if hasTill {
+	if renewable {
+		switch {
+		case hasRequested:
+			target = requested.Time
+		case s.DefaultRenewableLife > 0:
+			target = start.Add(s.DefaultRenewableLife)
+		case hasTill:
+			target = till.Time
+		}
+	} else if hasTill {
 		target = till.Time
-	}
-	if renewable && requested != nil && requested.Present {
-		target = requested.Time
+	} else if s.DefaultRenewableLife > 0 {
+		target = start.Add(s.DefaultRenewableLife)
 	}
 	if !target.After(end) && !renewable {
 		return nil

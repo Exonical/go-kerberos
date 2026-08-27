@@ -24,14 +24,22 @@ when absent.
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
-The KDC supports optional server-wide preauthentication disablement, a
-default lifetime for requests with an omitted maximum `till`, and optional
-forwardable/renewable/proxiable flag policy. A nil policy preserves permissive
-issuance, including proxiable tickets when requested; a non-nil policy clears
-disallowed flags, matching MIT's `get_ticket_flags` behavior. MIT normally
-configures preauthentication and flag restrictions per principal, while this
-implementation exposes server-level knobs. Renewable, postdated, and
-validation behavior is covered by unit and MIT integration tests.
+The KDC supports optional server-wide preauthentication disablement, default
+ticket and renewable lifetimes for requests with omitted maximum `till` or
+`rtime`, and optional forwardable/renewable/proxiable flag policy. A nil
+policy preserves permissive issuance, including proxiable tickets when
+requested; a non-nil policy clears disallowed flags, matching MIT's
+`get_ticket_flags` behavior. MIT normally configures preauthentication and
+flag restrictions per principal, while this implementation exposes
+server-level knobs. Renewable, postdated, and validation behavior is covered
+by unit and MIT integration tests.
+
+`DefaultRenewableLife` is an opt-in Go server default for renewable requests
+without an explicit `rtime` (including the epoch maximum sentinel), followed
+by the `MaxRenewableLife` cap. MIT's `kdc_get_ticket_renewtime` treats an
+omitted `rtime` as infinity and applies `max_renewable_life`; the Go knob
+provides a shorter default while retaining the same maximum cap. The default
+also applies to `RENEWABLE-OK` requests whose `till` is omitted.
 
 Cross-realm clients follow ordered `[capaths]` paths (up to ten hops), with
 direct trust as the fallback. KDC tickets use RFC 4120
