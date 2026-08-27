@@ -14,6 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -137,6 +138,136 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, etypeID, key, now)
 	}
 	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, now)
+}
+
+// ASExchangeFAST obtains initial credentials using an RFC 6113 armor TGT.
+func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.Principal, password string, armorTGT *Credentials) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("FAST AS exchange: nil client")
+	}
+	if armorTGT == nil {
+		return nil, fmt.Errorf("FAST AS exchange: nil armor TGT")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("FAST AS exchange: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("FAST AS exchange: %w", err)
+	}
+	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
+		return nil, fmt.Errorf("FAST AS exchange: invalid client principal")
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		return nil, err
+	}
+	request, err := c.newASReq(clientPrincipal, now)
+	if err != nil {
+		return nil, err
+	}
+	registry := crypto.NewRegistry()
+	var initialETypeID int32
+	var initialEType crypto.EType
+	for _, candidate := range request.ReqBody.EType {
+		initialEType, err = registry.Get(candidate)
+		if err == nil {
+			initialETypeID = candidate
+			break
+		}
+	}
+	if initialEType == nil {
+		return nil, fmt.Errorf("FAST AS exchange: %w", krberrors.ErrUnsupportedEType)
+	}
+	initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
+	initialKey, err := initialEType.StringToKey([]byte(password), initialSalt, nil)
+	if err != nil {
+		return nil, fmt.Errorf("FAST AS exchange string-to-key: %w", err)
+	}
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{fastData}
+	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		if kerberosError.Code != 25 {
+			return nil, kerberosError
+		}
+		fastReply, err := armor.UnwrapReply(errorMethodData(kerberosError), nil, request.ReqBody.Nonce)
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
+		}
+		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry)
+		if err != nil {
+			return nil, err
+		}
+		etype, err := registry.Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		clientKey, err := etype.StringToKey([]byte(password), salt, params)
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange string-to-key: %w", err)
+		}
+		timestamp, err := preauth.BuildEncryptedTimestamp(etype, clientKey, now, 0)
+		if err != nil {
+			return nil, err
+		}
+		fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{timestamp})
+		if err != nil {
+			return nil, err
+		}
+		request.PAData = protocol.MethodData{fastData}
+		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+		if err != nil {
+			return nil, err
+		}
+		return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, etypeID, clientKey, armor, now)
+	}
+	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, armor, now)
+}
+
+func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principal, nonce uint32, etypeID int32, key []byte, armor *fast.Armor, now time.Time) (*Credentials, error) {
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(data, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(data); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("FAST AS exchange AS-REP: %w", err)
+	}
+	ticket, err := asn1.Marshal(reply.Ticket)
+	if err != nil {
+		return nil, fmt.Errorf("FAST AS exchange ticket: %w", err)
+	}
+	fastReply, err := armor.UnwrapReply(reply.PAData, ticket, nonce)
+	if err != nil {
+		return nil, err
+	}
+	replyKey, err := armor.ReplyKey(protocol.EncryptionKey{KeyType: etypeID, KeyValue: key}, fastReply.StrengthenKey)
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeASRep(data, clientPrincipal, nonce, replyKey.KeyType, replyKey.KeyValue, now)
+}
+
+func errorMethodData(value *krberrors.KRBError) protocol.MethodData {
+	if value == nil || len(value.ErrorData()) == 0 {
+		return nil
+	}
+	var data protocol.MethodData
+	if asn1.Unmarshal(value.ErrorData(), &data) != nil {
+		return nil
+	}
+	return data
 }
 
 // TGSExchange obtains a service ticket using an existing TGT.

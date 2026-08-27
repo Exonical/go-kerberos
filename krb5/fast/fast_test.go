@@ -121,4 +121,37 @@ func TestArmorRejectsReplyNonceAndFinishedChecksum(t *testing.T) {
 	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 1); err == nil {
 		t.Fatal("nonce mismatch unexpectedly accepted")
 	}
+
+	ticketChecksum, err := etype.Checksum(armor.Key, UsageFinished, []byte("ticket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseDER, err = asn1.Marshal(protocol.KrbFastResponse{
+		Finished: &protocol.KrbFastFinished{
+			Timestamp:      types.KerberosTime{Time: time.Unix(1, 0).UTC(), Present: true},
+			CRealm:         "TEST.REALM",
+			CName:          protocol.PrincipalName{NameType: 1, NameString: []string{"alice"}},
+			TicketChecksum: protocol.Checksum{ChecksumType: checksumType(etype.ID()), Checksum: ticketChecksum},
+		},
+		Nonce: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err = etype.Encrypt(armor.Key, UsageRep, responseDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err = asn1.Marshal(protocol.KrbFastArmoredRep{EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = asn1.WrapContext(0, wrapper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value[len(value)-1] ^= 1
+	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 2); err == nil {
+		t.Fatal("tampered FAST reply unexpectedly accepted")
+	}
 }

@@ -178,6 +178,74 @@ func (e aesEType) VerifyChecksum(key []byte, usage uint32, data, checksum []byte
 	return nil
 }
 
+// PRF computes the enctype-specific Kerberos pseudorandom function.
+func PRF(etype EType, key, input []byte) ([]byte, error) {
+	if etype == nil {
+		return nil, fmt.Errorf("PRF: nil enctype")
+	}
+	aes, ok := etype.(aesEType)
+	if !ok {
+		return nil, krberrors.ErrUnsupportedEType
+	}
+	if err := validateKey(key, aes.keySize); err != nil {
+		return nil, err
+	}
+	if aes.sha2 {
+		return kdfSHA2(aes.hash, key, []byte("prf"), input, aes.hash().Size()*8)
+	}
+	dkey, err := dkAES(key, []byte("prf"), aes.keySize)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha1.Sum(input)
+	block := digest[:16]
+	return aescts.Encrypt(dkey, make([]byte, 16), block)
+}
+
+// CF2 combines two keys using the RFC 6113 KRB-FX-CF2 construction.
+func CF2(etype EType, key1, key2, pepper1, pepper2 []byte) ([]byte, error) {
+	if etype == nil {
+		return nil, fmt.Errorf("CF2: nil enctype")
+	}
+	if len(key1) != etype.KeySize() || len(key2) != etype.KeySize() {
+		return nil, fmt.Errorf("CF2: invalid key length")
+	}
+	first, err := prfPlus(etype, key1, pepper1, etype.KeySize())
+	if err != nil {
+		return nil, err
+	}
+	second, err := prfPlus(etype, key2, pepper2, etype.KeySize())
+	if err != nil {
+		return nil, err
+	}
+	if len(first) != len(second) || len(first) != etype.KeySize() {
+		return nil, fmt.Errorf("CF2: invalid PRF output length")
+	}
+	out := make([]byte, len(first))
+	for i := range out {
+		out[i] = first[i] ^ second[i]
+	}
+	return out, nil
+}
+
+func prfPlus(etype EType, key, sharedInfo []byte, size int) ([]byte, error) {
+	out := make([]byte, 0, size)
+	for counter := byte(1); len(out) < size; counter++ {
+		input := make([]byte, 1, 1+len(sharedInfo))
+		input[0] = counter
+		input = append(input, sharedInfo...)
+		part, err := PRF(etype, key, input)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, part...)
+		if counter == 0 {
+			return nil, fmt.Errorf("CF2: shared info too long")
+		}
+	}
+	return out[:size], nil
+}
+
 func (e aesEType) deriveEncryptionKeys(key []byte, usage uint32) ([]byte, []byte, error) {
 	_, ke, ki, err := e.deriveKeys(key, usage)
 	return ke, ki, err

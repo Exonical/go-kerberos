@@ -41,6 +41,32 @@ func Marshal(value any) ([]byte, error) {
 	return encoded, nil
 }
 
+// WrapContext wraps an already encoded value in an explicit context tag.
+func WrapContext(tag int, encoded []byte) ([]byte, error) {
+	if tag < 0 || tag > 30 {
+		return nil, fmt.Errorf("context tag out of range")
+	}
+	if len(encoded) == 0 {
+		return nil, fmt.Errorf("empty context value")
+	}
+	return encodeTLV(0xa0|byte(tag), encoded), nil
+}
+
+// UnwrapContext removes an explicit context tag and returns its encoded value.
+func UnwrapContext(data []byte, tag int) ([]byte, error) {
+	if tag < 0 || tag > 30 {
+		return nil, fmt.Errorf("context tag out of range")
+	}
+	actual, content, end, err := readTLV(data)
+	if err != nil {
+		return nil, err
+	}
+	if end != len(data) || actual != 0xa0|byte(tag) {
+		return nil, fmt.Errorf("unexpected context tag")
+	}
+	return append([]byte(nil), content...), nil
+}
+
 // Unmarshal decodes a Kerberos ASN.1 value from canonical DER.
 func Unmarshal(data []byte, value any) error {
 	if value == nil {
