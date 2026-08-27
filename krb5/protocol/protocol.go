@@ -11,7 +11,11 @@ type HostAddress struct{}
 type HostAddresses struct{}
 type AuthorizationData struct{}
 type PAData struct{}
-type EncryptedData struct{}
+type EncryptedData struct {
+	EType  int32
+	KVNO   *uint32
+	Cipher []byte
+}
 type EncryptionKey struct{}
 type Checksum struct{}
 type Ticket struct{}

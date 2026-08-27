@@ -95,13 +95,36 @@ func TestFlagBitPositions(t *testing.T) {
 }
 
 func TestFlagsGoldenBITString(t *testing.T) {
-	got, err := EncodeFlags(uint32(KDCForwardable | KDCProxiable | KDCRenewable))
-	if err != nil {
-		t.Fatalf("EncodeFlags: %v", err)
+	tests := []struct {
+		name  string
+		flags uint32
+		want  []byte
+	}{
+		{
+			"forwardable-proxiable-renewable",
+			uint32(KDCForwardable | KDCProxiable | KDCRenewable),
+			// DER BIT STRING: tag 03, length 05, zero unused bits;
+			// bit 1 is 0x40, bit 3 is 0x10 in octet one (0x50),
+			// and bit 8 is 0x80 in octet two.
+			[]byte{0x03, 0x05, 0x00, 0x50, 0x80, 0x00, 0x00},
+		},
+		{
+			"canonicalize-last-octet",
+			uint32(KDCCanonicalize),
+			// Bit 15 is the low bit of the third flag octet:
+			// 03 05 00 [octet1] [octet2] [octet3] [octet4].
+			[]byte{0x03, 0x05, 0x00, 0x00, 0x01, 0x00, 0x00},
+		},
 	}
-	// RFC 4120 BIT STRING is at least 32 bits, with bit 0 first on the wire.
-	want := []byte{0x03, 0x05, 0x00, 0x4a, 0x00, 0x00, 0x00}
-	if string(got) != string(want) {
-		t.Fatalf("flags DER = %x, want %x", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := EncodeFlags(tt.flags)
+			if err != nil {
+				t.Fatalf("EncodeFlags: %v", err)
+			}
+			if string(got) != string(tt.want) {
+				t.Fatalf("flags DER = %x, want %x", got, tt.want)
+			}
+		})
 	}
 }

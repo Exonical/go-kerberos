@@ -23,7 +23,8 @@ func TestPrimitiveGoldenDER(t *testing.T) {
 			0x1b, 0x05, 0x61, 0x6c, 0x69, 0x63, 0x65,
 		}},
 		// RFC 4120 EncryptedData with etype 17 and a two-octet cipher.
-		{"EncryptedData", protocol.EncryptedData{}, []byte{
+		// The optional kvno [1] field is absent.
+		{"EncryptedData", protocol.EncryptedData{EType: 17, Cipher: []byte{1, 2}}, []byte{
 			0x30, 0x0b, 0xa0, 0x03, 0x02, 0x01, 0x11, 0xa2, 0x04, 0x04, 0x02, 0x01, 0x02,
 		}},
 	}

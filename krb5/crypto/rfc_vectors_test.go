@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestRFC3962StringToKeyVectorsAreTranscribed(t *testing.T) {
 			{EnctypeAES128SHA1, vector.key128},
 			{EnctypeAES256SHA1, vector.key256},
 		} {
-			t.Run(vector.name+"/"+string(rune(profile.id)), func(t *testing.T) {
+			t.Run(vector.name+"/"+strconv.Itoa(int(profile.id)), func(t *testing.T) {
 				etype, err := registry.Get(profile.id)
 				if err != nil {
 					t.Fatal(err)
