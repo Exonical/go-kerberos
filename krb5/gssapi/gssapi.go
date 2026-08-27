@@ -1,6 +1,8 @@
 package gssapi
 
 import (
+	"bytes"
+	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -40,6 +42,7 @@ const (
 )
 
 var kerberosOID = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02}
+var kerberosOldOID = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02}
 
 // Initiator establishes a Kerberos GSS security context.
 type Initiator struct {
@@ -56,11 +59,12 @@ type Acceptor struct {
 
 // Context is an established Kerberos GSS security context.
 type Context struct {
-	key       protocol.EncryptionKey
-	initiator bool
-	flags     uint32
-	sendSeq   uint64
-	recvSeq   uint64
+	key            protocol.EncryptionKey
+	initiator      bool
+	flags          uint32
+	acceptorSubkey bool
+	sendSeq        uint64
+	recvSeq        uint64
 }
 
 // NewInitiator creates an initiator for the supplied service credentials.
@@ -78,11 +82,44 @@ func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 
 // InitialToken creates the RFC 2743 initial context token.
 func (i *Initiator) InitialToken(now time.Time) ([]byte, error) {
+	return i.initialToken(now, false, nil)
+}
+
+// InitialTokenWithChannelBindings creates an initial token bound to the
+// supplied initiator and acceptor IPv4 address bytes.
+func (i *Initiator) InitialTokenWithChannelBindings(now time.Time, initiatorAddress, acceptorAddress []byte) ([]byte, error) {
+	var binding bytes.Buffer
+	var addressType [4]byte
+	binary.LittleEndian.PutUint32(addressType[:], 2)
+	binding.Write(addressType[:])
+	writeAddress := func(address []byte) {
+		var length [4]byte
+		binary.LittleEndian.PutUint32(length[:], uint32(len(address)))
+		binding.Write(length[:])
+		binding.Write(address)
+	}
+	writeAddress(initiatorAddress)
+	binding.Write(addressType[:])
+	writeAddress(acceptorAddress)
+	var zero [4]byte
+	binding.Write(zero[:])
+	sum := md5.Sum(binding.Bytes())
+	return i.initialToken(now, false, sum[:])
+}
+
+func (i *Initiator) initialToken(now time.Time, legacy bool, channelBindings []byte) ([]byte, error) {
 	if i == nil || i.creds == nil {
 		return nil, fmt.Errorf("GSS initiator: incomplete context")
 	}
-	checksumData := make([]byte, 20)
-	binary.LittleEndian.PutUint32(checksumData[16:], i.flags)
+	checksumData := make([]byte, 24)
+	binary.LittleEndian.PutUint32(checksumData, 16)
+	if len(channelBindings) != 0 {
+		if len(channelBindings) != 16 {
+			return nil, fmt.Errorf("GSS initial token: invalid channel bindings")
+		}
+		copy(checksumData[4:], channelBindings)
+	}
+	binary.LittleEndian.PutUint32(checksumData[20:], i.flags)
 	checksum := &protocol.Checksum{ChecksumType: 0x8003, Checksum: checksumData}
 	opts := types.APOptions(0)
 	if i.flags&GSSMutualFlag != 0 {
@@ -99,6 +136,9 @@ func (i *Initiator) InitialToken(now time.Time) ([]byte, error) {
 		flags:     i.flags,
 		sendSeq:   sequenceValue(state.SeqNumber),
 	}
+	if legacy {
+		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
+	}
 	return frameToken([]byte{0x01, 0x00}, apDER), nil
 }
 
@@ -107,12 +147,20 @@ func (i *Initiator) VerifyToken(token []byte) error {
 	if i == nil || i.state == nil {
 		return fmt.Errorf("GSS initiator: context is not established")
 	}
-	inner, err := unframeToken(token, []byte{0x02, 0x00})
+	inner, err := unframeTokenAnyOID(token, []byte{0x02, 0x00})
 	if err != nil {
 		return err
 	}
-	if err := ap.VerifyAPRep(i.state, inner); err != nil {
+	details, err := ap.VerifyAPRepWithDetails(i.state, inner)
+	if err != nil {
 		return fmt.Errorf("GSS AP-REP: %w", err)
+	}
+	if details.SubKey != nil {
+		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
+		i.ctx.acceptorSubkey = true
+	}
+	if details.SeqNumber != nil {
+		i.ctx.recvSeq = sequenceValue(details.SeqNumber)
 	}
 	return nil
 }
@@ -181,6 +229,24 @@ func (i *Initiator) VerifyMIC(data, token []byte) error {
 	return i.ctx.verifyMIC(data, token)
 }
 
+// Context returns the established security context for protocol adapters that
+// need to use the underlying GSS per-message tokens.
+func (i *Initiator) Context() (*Context, error) {
+	if i == nil || i.ctx == nil {
+		return nil, fmt.Errorf("GSS initiator: context is not established")
+	}
+	return i.ctx, nil
+}
+
+// SequenceNumber returns the authenticator sequence used by the initial
+// AP-REQ, for protocol adapters sharing the GSS per-message sequence space.
+func (i *Initiator) SequenceNumber() (uint32, bool) {
+	if i == nil || i.state == nil || i.state.SeqNumber == nil {
+		return 0, false
+	}
+	return *i.state.SeqNumber, true
+}
+
 // Wrap protects a message with an RFC 4121 MIC or encrypted token.
 func (c *Context) Wrap(data []byte, sealed bool) ([]byte, error) {
 	return c.wrap(data, sealed)
@@ -189,6 +255,38 @@ func (c *Context) Wrap(data []byte, sealed bool) ([]byte, error) {
 // Unwrap verifies and decodes a message from the peer.
 func (c *Context) Unwrap(token []byte) ([]byte, error) {
 	return c.unwrap(token)
+}
+
+// UnwrapInitial verifies the first peer message when its sequence number is
+// established by the protocol rather than by the AP exchange.
+func (c *Context) UnwrapInitial(token []byte) ([]byte, error) {
+	header, _, err := parseMessage(token, []byte{0x05, 0x04})
+	if err != nil {
+		return nil, err
+	}
+	c.recvSeq = binary.BigEndian.Uint64(header[8:])
+	plain, err := c.unwrap(token)
+	if err != nil {
+		return nil, err
+	}
+	c.recvSeq++
+	return plain, nil
+}
+
+// SetSendSequence synchronizes the outgoing token sequence with protocols
+// which establish their own sequence number after the GSS context handshake.
+func (c *Context) SetSendSequence(sequence uint64) {
+	if c != nil {
+		c.sendSeq = sequence
+	}
+}
+
+// SetReceiveSequence synchronizes the expected incoming token sequence with
+// protocols that carry their own sequence space.
+func (c *Context) SetReceiveSequence(sequence uint64) {
+	if c != nil {
+		c.recvSeq = sequence
+	}
 }
 
 // MIC creates an RFC 4121 integrity token.
@@ -212,6 +310,9 @@ func (c *Context) wrap(data []byte, sealed bool) ([]byte, error) {
 	flags := byte(0)
 	if !c.initiator {
 		flags |= tokenFlagSentByAcceptor
+	}
+	if c.acceptorSubkey {
+		flags |= tokenFlagAcceptorSubkey
 	}
 	if sealed {
 		flags |= tokenFlagSealed
@@ -237,12 +338,14 @@ func (c *Context) wrap(data []byte, sealed bool) ([]byte, error) {
 	}
 	header := messageHeader([]byte{0x05, 0x04}, flags, ec, 0, seq)
 	if !sealed {
-		signUsage := uint32(25)
+		signUsage := uint32(24)
 		if !c.initiator {
-			signUsage = 23
+			signUsage = 22
 		}
-		canonical := messageHeader(header[:2], header[2], ec, 0, seq)
-		signed := append(append([]byte(nil), data...), canonical...)
+		checksumHeader := append([]byte(nil), header...)
+		checksumHeader[4], checksumHeader[5] = 0, 0
+		checksumHeader[6], checksumHeader[7] = 0, 0
+		signed := append(append([]byte(nil), data...), checksumHeader...)
 		mac, err := etype.Checksum(c.key.KeyValue, signUsage, signed)
 		if err != nil {
 			return nil, fmt.Errorf("GSS wrap checksum: %w", err)
@@ -299,12 +402,16 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 		return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 	}
 	data, mac := payload[:len(payload)-ec], payload[len(payload)-ec:]
-	canonical := messageHeader(header[:2], header[2], ec, 0, binary.BigEndian.Uint64(header[8:]))
-	signUsage := uint32(25)
+	signUsage := uint32(24)
 	if c.initiator {
-		signUsage = 23
+		signUsage = 22
+	} else {
+		signUsage = 24
 	}
-	signed := append(append([]byte(nil), data...), canonical...)
+	checksumHeader := append([]byte(nil), header...)
+	checksumHeader[4], checksumHeader[5] = 0, 0
+	checksumHeader[6], checksumHeader[7] = 0, 0
+	signed := append(append([]byte(nil), data...), checksumHeader...)
 	if err := etype.VerifyChecksum(c.key.KeyValue, signUsage, signed, mac); err != nil {
 		return nil, fmt.Errorf("GSS unwrap: %w", err)
 	}
@@ -323,6 +430,9 @@ func (c *Context) mic(data []byte) ([]byte, error) {
 	flags := byte(0)
 	if !c.initiator {
 		flags |= tokenFlagSentByAcceptor
+	}
+	if c.acceptorSubkey {
+		flags |= tokenFlagAcceptorSubkey
 	}
 	seq := c.sendSeq
 	c.sendSeq++
@@ -363,6 +473,8 @@ func (c *Context) verifyMIC(data, token []byte) error {
 	usage := uint32(25)
 	if c.initiator {
 		usage = 23
+	} else {
+		usage = 25
 	}
 	signed := append(append([]byte(nil), data...), canonical...)
 	if err := etype.VerifyChecksum(c.key.KeyValue, usage, signed, payload); err != nil {
@@ -387,7 +499,7 @@ func (c *Context) validateIncoming(header []byte) error {
 		return fmt.Errorf("GSS token: invalid filler")
 	}
 	if binary.BigEndian.Uint64(header[8:]) != c.recvSeq {
-		return fmt.Errorf("GSS token: unexpected sequence number")
+		return fmt.Errorf("GSS token: unexpected sequence number (got %d, want %d)", binary.BigEndian.Uint64(header[8:]), c.recvSeq)
 	}
 	return nil
 }
@@ -403,6 +515,9 @@ func checksumFlags(checksum *protocol.Checksum) (uint32, error) {
 	if checksum == nil || checksum.ChecksumType != 0x8003 || len(checksum.Checksum) < 20 {
 		return 0, fmt.Errorf("GSS authenticator: missing RFC 4121 checksum")
 	}
+	if len(checksum.Checksum) >= 24 && binary.LittleEndian.Uint32(checksum.Checksum[:4]) == 16 {
+		return binary.LittleEndian.Uint32(checksum.Checksum[20:24]), nil
+	}
 	return binary.LittleEndian.Uint32(checksum.Checksum[16:20]), nil
 }
 
@@ -414,7 +529,11 @@ func sequenceValue(value *uint32) uint64 {
 }
 
 func frameToken(tokenID, inner []byte) []byte {
-	content := append(append([]byte(nil), kerberosOID...), tokenID...)
+	return frameTokenWithOID(kerberosOID, tokenID, inner)
+}
+
+func frameTokenWithOID(oid, tokenID, inner []byte) []byte {
+	content := append(append([]byte(nil), oid...), tokenID...)
 	content = append(content, inner...)
 	return append([]byte{0x60}, appendDERLength(content)...)
 }
@@ -431,7 +550,15 @@ func appendDERLength(content []byte) []byte {
 }
 
 func unframeToken(token, tokenID []byte) ([]byte, error) {
-	if len(token) < 2+len(kerberosOID)+len(tokenID) || token[0] != 0x60 {
+	return unframeTokenWithOIDs(token, tokenID, kerberosOID)
+}
+
+func unframeTokenAnyOID(token, tokenID []byte) ([]byte, error) {
+	return unframeTokenWithOIDs(token, tokenID, kerberosOID, kerberosOldOID)
+}
+
+func unframeTokenWithOIDs(token, tokenID []byte, oids ...[]byte) ([]byte, error) {
+	if len(token) < 2+len(tokenID) || token[0] != 0x60 {
 		return nil, fmt.Errorf("GSS token: invalid framing")
 	}
 	offset, err := derLength(token[1:])
@@ -439,15 +566,22 @@ func unframeToken(token, tokenID []byte) ([]byte, error) {
 		return nil, err
 	}
 	contentStart := 1 + offset
-	if contentStart > len(token) || len(token)-contentStart < len(kerberosOID)+len(tokenID) ||
+	if contentStart > len(token) || len(token)-contentStart < len(tokenID) ||
 		len(token)-contentStart != derLengthValue(token[1:]) {
 		return nil, fmt.Errorf("GSS token: invalid framing")
 	}
 	content := token[contentStart:]
-	if string(content[:len(kerberosOID)]) != string(kerberosOID) {
+	var oid []byte
+	for _, candidate := range oids {
+		if len(content) >= len(candidate) && string(content[:len(candidate)]) == string(candidate) {
+			oid = candidate
+			break
+		}
+	}
+	if len(oid) == 0 {
 		return nil, fmt.Errorf("GSS token: unexpected mechanism")
 	}
-	content = content[len(kerberosOID):]
+	content = content[len(oid):]
 	if string(content[:len(tokenID)]) != string(tokenID) {
 		return nil, fmt.Errorf("GSS token: unexpected token id")
 	}

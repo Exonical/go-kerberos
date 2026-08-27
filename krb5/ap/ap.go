@@ -56,6 +56,12 @@ type VerifiedAPReq struct {
 	Checksum          *protocol.Checksum
 }
 
+// APRepDetails contains optional keying material asserted by an AP-REP.
+type APRepDetails struct {
+	SubKey    *protocol.EncryptionKey
+	SeqNumber *uint32
+}
+
 var replayCache = struct {
 	sync.Mutex
 	entries map[string]struct{}
@@ -267,36 +273,52 @@ func buildAPRepWithTime(request *VerifiedAPReq, ctime time.Time) ([]byte, error)
 
 // VerifyAPRep verifies an AP-REP against the initiator AP-REQ state.
 func VerifyAPRep(request *APReq, der []byte) error {
-	if request == nil {
-		return fmt.Errorf("verify AP-REP: nil request")
-	}
-	if request.APOptions&types.APMutualRequired == 0 {
-		return fmt.Errorf("verify AP-REP: mutual authentication was not requested")
-	}
-	var reply protocol.APRep
-	if err := asn1.Unmarshal(der, &reply); err != nil {
-		return fmt.Errorf("verify AP-REP: %w", err)
-	}
-	if reply.PVNO != 5 || reply.MsgType != 15 || reply.EncPart.EType != request.SessionKey.KeyType {
-		return fmt.Errorf("verify AP-REP: %w", krberrors.ErrIntegrity)
-	}
-	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
+	details, err := VerifyAPRepWithDetails(request, der)
 	if err != nil {
 		return err
 	}
+	if details.SubKey != nil {
+		request.SubKey = copyEncryptionKeyPointer(details.SubKey)
+	}
+	return nil
+}
+
+// VerifyAPRepWithDetails verifies an AP-REP and returns its optional subkey
+// and acceptor sequence number without changing the initiator state.
+func VerifyAPRepWithDetails(request *APReq, der []byte) (APRepDetails, error) {
+	if request == nil {
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: nil request")
+	}
+	if request.APOptions&types.APMutualRequired == 0 {
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: mutual authentication was not requested")
+	}
+	var reply protocol.APRep
+	if err := asn1.Unmarshal(der, &reply); err != nil {
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: %w", err)
+	}
+	if reply.PVNO != 5 || reply.MsgType != 15 || reply.EncPart.EType != request.SessionKey.KeyType {
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: %w", krberrors.ErrIntegrity)
+	}
+	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
+	if err != nil {
+		return APRepDetails{}, err
+	}
 	plain, err := etype.Decrypt(request.SessionKey.KeyValue, apRepUsage, reply.EncPart.Cipher)
 	if err != nil {
-		return fmt.Errorf("verify AP-REP encrypted part: %w", err)
+		return APRepDetails{}, fmt.Errorf("verify AP-REP encrypted part: %w", err)
 	}
 	var part protocol.EncAPRepPart
 	if err := asn1.Unmarshal(plain, &part); err != nil {
-		return fmt.Errorf("verify AP-REP encrypted part: %w", krberrors.ErrIntegrity)
+		return APRepDetails{}, fmt.Errorf("verify AP-REP encrypted part: %w", krberrors.ErrIntegrity)
 	}
 	if !part.Ctime.Present || !part.Ctime.Time.Equal(request.AuthenticatorTime.Truncate(time.Second)) ||
 		part.Cusec != request.Cusec {
-		return fmt.Errorf("verify AP-REP: authenticator time mismatch")
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: authenticator time mismatch")
 	}
-	return nil
+	return APRepDetails{
+		SubKey:    copyEncryptionKeyPointer(part.SubKey),
+		SeqNumber: uint32PointerValue(part.SeqNumber),
+	}, nil
 }
 
 func findServiceEntry(kt *keytab.Keytab, ticket protocol.Ticket) (keytab.Entry, error) {
