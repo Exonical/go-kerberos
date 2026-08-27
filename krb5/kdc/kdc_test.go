@@ -633,6 +633,144 @@ func TestStubStoreServesASEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCrossRealmTGSExchange(t *testing.T) {
+	now := time.Unix(2000001200, 0).UTC()
+	realmA, realmB := "REALM.A", "REALM.B"
+	dbA := kdb.NewDatabase(realmA)
+	for _, entry := range []struct {
+		name, password string
+	}{
+		{"alice@" + realmA, "alice-password"},
+		{"krbtgt/" + realmA, "realm-a-tgt"},
+		{"krbtgt/" + realmB + "@" + realmA, "shared-password"},
+	} {
+		if err := dbA.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbB := kdb.NewDatabase(realmB)
+	for _, entry := range []struct {
+		name, password string
+	}{
+		{"krbtgt/" + realmB, "realm-b-tgt"},
+		{"krbtgt/" + realmB + "@" + realmA, "shared-password"},
+		{"host/backend@" + realmB, "backend-password"},
+	} {
+		if err := dbB.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serverA := &Server{Realm: realmA, DB: dbA, Now: func() time.Time { return now }}
+	serverB := &Server{Realm: realmB, DB: dbB, Now: func() time.Time { return now }}
+	kclient := &client.Client{
+		Now: func() time.Time { return now },
+		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
+			switch realm {
+			case realmA:
+				return serverA.HandleMessage(payload), nil
+			case realmB:
+				return serverB.HandleMessage(payload), nil
+			default:
+				t.Fatalf("unexpected exchange realm %q", realm)
+				return nil, errors.New("unexpected realm")
+			}
+		},
+	}
+	user := principal.Principal{Realm: realmA, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("AS exchange: %v", err)
+	}
+	service := principal.Principal{
+		Realm: realmB, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	}
+	credentials, err := kclient.TGSExchange(context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("cross-realm TGS exchange: %v", err)
+	}
+	if credentials.Server.Realm != realmB || credentials.Server.Components[0] != "host" ||
+		credentials.Server.Components[1] != "backend" {
+		t.Fatalf("service credentials = %#v", credentials)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(credentials.Ticket, &ticket); err != nil {
+		t.Fatalf("ticket: %v", err)
+	}
+	record, ok, err := dbB.Lookup(principal.Principal{
+		Realm: realmB, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v %v", err, ok)
+	}
+	key, ok := record.Keys[credentials.Key.KeyType]
+	if !ok {
+		t.Fatalf("service key enctype %d missing", credentials.Key.KeyType)
+	}
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := etype.Decrypt(key.Key, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt service ticket: %v", err)
+	}
+	var part protocol.EncTicketPart
+	if err := asn1.Unmarshal(plaintext, &part); err != nil {
+		t.Fatalf("service ticket part: %v", err)
+	}
+	if part.CRealm != realmA || len(part.CName.NameString) != 1 || part.CName.NameString[0] != "alice" {
+		t.Fatalf("foreign client = %s/%#v", part.CRealm, part.CName)
+	}
+	if part.Transited.TrType != 1 {
+		t.Fatalf("transited type = %d, want DOMAIN-X500-COMPRESS (1)", part.Transited.TrType)
+	}
+}
+
+func TestCrossRealmTGSRequiresSharedTGTKey(t *testing.T) {
+	now := time.Unix(2000001210, 0).UTC()
+	realmA, realmB := "REALM.A", "REALM.B"
+	dbA := kdb.NewDatabase(realmA)
+	for _, entry := range []struct{ name, password string }{
+		{"alice@" + realmA, "alice-password"},
+		{"krbtgt/" + realmA, "realm-a-tgt"},
+	} {
+		if err := dbA.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbB := kdb.NewDatabase(realmB)
+	for _, entry := range []struct{ name, password string }{
+		{"krbtgt/" + realmB, "realm-b-tgt"},
+		{"host/backend@" + realmB, "backend-password"},
+	} {
+		if err := dbB.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serverA := &Server{Realm: realmA, DB: dbA, Now: func() time.Time { return now }}
+	serverB := &Server{Realm: realmB, DB: dbB, Now: func() time.Time { return now }}
+	kclient := &client.Client{
+		Now: func() time.Time { return now },
+		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
+			if realm == realmA {
+				return serverA.HandleMessage(payload), nil
+			}
+			return serverB.HandleMessage(payload), nil
+		},
+	}
+	user := principal.Principal{Realm: realmA, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = kclient.TGSExchange(context.Background(), tgt, principal.Principal{
+		Realm: realmB, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err == nil || !hasKRBCode(err, 7) {
+		t.Fatalf("missing cross-realm key error = %v, want code 7", err)
+	}
+}
+
 type delegatingStore struct{ db *kdb.Database }
 
 func (d delegatingStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool, error) {
