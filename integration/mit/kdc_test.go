@@ -146,6 +146,9 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	}
 	kvno := k.run(t, "", "/usr/bin/kvno", "host/service.test")
 	t.Logf("MIT kvno output:\n%s", kvno)
+	if !strings.Contains(kvno, "Encoding request body and padata into FAST") {
+		t.Fatalf("MIT kvno did not send a FAST-armored TGS request:\n%s", kvno)
+	}
 	if !strings.Contains(kvno, "kvno = 1") {
 		t.Fatalf("kvno output unexpected:\n%s", kvno)
 	}

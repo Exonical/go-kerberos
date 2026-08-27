@@ -43,11 +43,11 @@ configuration interface is not implemented.
 FAST-armored TGS exchanges use the implicit RFC 6113 armor derived from the
 PA-TGS-REQ authenticator subkey and TGT session key. The Go client and Go KDC
 cover request unwrapping, strengthened replies, finished checksums, and
-negative cases end to end. MIT `kvno` obtains service tickets successfully
-from the Go KDC, but the pinned MIT client source shows its ordinary
-`krb5_get_credentials` path does not expose or request FAST armor for TGS;
-therefore that live test does not claim MIT FAST-TGS wire coverage. MIT FAST
-AS interoperability remains covered by `kinit -T`.
+negative cases end to end. The MIT integration harness also confirms live
+MIT `kvno` FAST-TGS interoperability: its trace contains
+`Encoding request body and padata into FAST` and the resulting service ticket
+is accepted by the Go KDC. MIT FAST AS interoperability remains covered by
+`kinit -T`.
 
 The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
 using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.
