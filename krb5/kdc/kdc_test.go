@@ -634,6 +634,117 @@ func TestASPostdatedTicketRequiresValidation(t *testing.T) {
 	}
 }
 
+func TestTGSRejectsRenewalOfNonrenewableTicket(t *testing.T) {
+	now := time.Unix(2000001300, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, now, types.KDCRenew))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("renew response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrBadOption {
+		t.Fatalf("renew error code = %d, want %d", kerberosError.ErrorCode, kdcErrBadOption)
+	}
+}
+
+func TestTGSRejectsExpiredRenewal(t *testing.T) {
+	now := time.Unix(2000001400, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := issueASTicket(t, server, user, now, types.KDCRenewable, now.Add(30*time.Minute))
+	expired := now.Add(31 * time.Minute)
+	server.Now = func() time.Time { return expired }
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, expired, types.KDCRenew))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("expired renew response: %v", err)
+	}
+	if kerberosError.ErrorCode != krbAPErrTktExpired {
+		t.Fatalf("expired renew error code = %d, want %d", kerberosError.ErrorCode, krbAPErrTktExpired)
+	}
+}
+
+func TestTGSValidateRequiresInvalidTicket(t *testing.T) {
+	now := time.Unix(2000001500, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, now, types.KDCValidate))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("validate response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrBadOption {
+		t.Fatalf("validate error code = %d, want %d", kerberosError.ErrorCode, kdcErrBadOption)
+	}
+}
+
+func TestASRejectsUnauthorizedPostdate(t *testing.T) {
+	now := time.Unix(2000001600, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 1)
+	request.ReqBody.KDCOptions = types.KDCPostdated
+	from := kerberosTime(now.Add(time.Hour))
+	request.ReqBody.From = &from
+	request.ReqBody.Till = kerberosTime(now.Add(2 * time.Hour))
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := etype.StringToKey([]byte("alice-password"), []byte("TEST.REALMalice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := mustMarshal(t, preauth.EncTimestamp{PATimestamp: kerberosTime(now)})
+	timestampCipher, err := etype.Encrypt(key, 1, timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{{PADataType: paEncTimestamp, PADataValue: timestampCipher}}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("postdate response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrCannotPostdate {
+		t.Fatalf("postdate error code = %d, want %d", kerberosError.ErrorCode, kdcErrCannotPostdate)
+	}
+}
+
+func TestReplayCacheExpiresEntries(t *testing.T) {
+	now := time.Unix(2000001700, 0).UTC()
+	server, _ := testServer(t, now)
+	authenticator := protocol.Authenticator{
+		Ctime:    kerberosTime(now),
+		Cusec:    7,
+		Checksum: &protocol.Checksum{ChecksumType: 15, Checksum: []byte{1, 2, 3}},
+	}
+	name := protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}}
+	if server.replayed("TEST.REALM", name, authenticator) {
+		t.Fatal("first authenticator incorrectly classified as replay")
+	}
+	if !server.replayed("TEST.REALM", name, authenticator) {
+		t.Fatal("duplicate authenticator was not classified as replay")
+	}
+	server.Now = func() time.Time { return now.Add(server.skew() + time.Second) }
+	if server.replayed("TEST.REALM", name, authenticator) {
+		t.Fatal("expired authenticator incorrectly classified as replay")
+	}
+}
+
 func issueASTicket(t *testing.T, server *Server, user principal.Principal, now time.Time, options types.KDCOptions, rtime time.Time) *client.Credentials {
 	t.Helper()
 	service := principal.Principal{Realm: user.Realm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", user.Realm}}
