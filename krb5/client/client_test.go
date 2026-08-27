@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,16 +99,57 @@ func TestASExchangePreauthRetry(t *testing.T) {
 
 func TestASExchangeRejectsWrongNonce(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	exchange := func(_ context.Context, _ string, _ []byte) ([]byte, error) {
-		return asn1.Marshal(protocol.KRBError{
-			PVNO: 5, MsgType: 30, STime: kerberosTime(now), ErrorCode: 25,
-			Realm: testRealm, SName: protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", testRealm}},
-			EData: mustMarshal(t, protocol.MethodData{{PADataType: 19, PADataValue: mustMarshal(t, protocol.ETypeInfo2{{EType: crypto.EnctypeAES256SHA1}})}}),
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.ASReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		calls++
+		if calls == 1 {
+			return asn1.Marshal(protocol.KRBError{
+				PVNO: 5, MsgType: 30, STime: kerberosTime(now), ErrorCode: 25,
+				Realm: testRealm, SName: protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", testRealm}},
+				EData: mustMarshal(t, protocol.MethodData{{PADataType: 19, PADataValue: mustMarshal(t, protocol.ETypeInfo2{{EType: crypto.EnctypeAES256SHA1}})}}),
+			})
+		}
+		key, err := profile.StringToKey([]byte("password"), []byte(testRealm+"alice"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encodedPart := mustMarshal(t, protocol.EncASRepPart{
+			Key:      protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+			Nonce:    request.ReqBody.Nonce + 1,
+			AuthTime: kerberosTime(now),
+			EndTime:  kerberosTime(now.Add(time.Hour)),
+			SRealm:   testRealm,
+			SName:    protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+		})
+		cipher, err := profile.Encrypt(key, 3, encodedPart)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return asn1.Marshal(protocol.ASRep{
+			PVNO: 5, MsgType: 11, CRealm: testRealm,
+			CName: protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
+			Ticket: protocol.Ticket{
+				TktVNO: 5, Realm: testRealm,
+				SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+				EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+			},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
 		})
 	}
-	_, err := (&Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(context.Background(), principal.Principal{Realm: testRealm, Components: []string{"alice"}}, "password")
+	_, err = (&Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(context.Background(), principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}, "password")
 	if err == nil {
-		t.Fatal("missing second exchange unexpectedly succeeded")
+		t.Fatal("wrong nonce unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "nonce mismatch") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
