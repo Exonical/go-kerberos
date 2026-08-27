@@ -1211,6 +1211,113 @@ func TestASIssuesRenewableTicketAndTGSRenewsIt(t *testing.T) {
 	}
 }
 
+func TestASDefaultRenewableLife(t *testing.T) {
+	now := time.Unix(2000001150, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DefaultRenewableLife = 4 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 78)
+	request.ReqBody.KDCOptions = types.KDCRenewable
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	request.ReqBody.RTime = &types.KerberosTime{Time: time.Unix(0, 0).UTC(), Present: true}
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(4*time.Hour)) {
+		t.Fatalf("renew-till = %v, want %v", part.RenewTill, now.Add(4*time.Hour))
+	}
+}
+
+func TestASExplicitRenewableLifeHonorsRequestedRTime(t *testing.T) {
+	now := time.Unix(2000001175, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DefaultRenewableLife = 4 * time.Hour
+	server.MaxRenewableLife = 10 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 79)
+	request.ReqBody.KDCOptions = types.KDCRenewable
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	request.ReqBody.RTime = &types.KerberosTime{Time: now.Add(8 * time.Hour), Present: true}
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(8*time.Hour)) {
+		t.Fatalf("renew-till = %v, want %v", part.RenewTill, now.Add(8*time.Hour))
+	}
+}
+
+func TestASDefaultRenewableLifeCappedByMaximum(t *testing.T) {
+	now := time.Unix(2000001200, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DefaultRenewableLife = 20 * time.Hour
+	server.MaxRenewableLife = 10 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 80)
+	request.ReqBody.KDCOptions = types.KDCRenewable
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	request.ReqBody.RTime = nil
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(10*time.Hour)) {
+		t.Fatalf("renew-till = %v, want %v", part.RenewTill, now.Add(10*time.Hour))
+	}
+}
+
+func TestASZeroDefaultRenewableLifePreservesTillBehavior(t *testing.T) {
+	now := time.Unix(2000001225, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 81)
+	request.ReqBody.KDCOptions = types.KDCRenewable
+	request.ReqBody.Till = kerberosTime(now.Add(6 * time.Hour))
+	request.ReqBody.RTime = nil
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(6*time.Hour)) {
+		t.Fatalf("renew-till = %v, want %v", part.RenewTill, now.Add(6*time.Hour))
+	}
+}
+
+func TestASDefaultRenewableLifeAppliesToRenewableOK(t *testing.T) {
+	now := time.Unix(2000001250, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DefaultTicketLife = time.Hour
+	server.DefaultRenewableLife = 4 * time.Hour
+	server.MaxRenewableLife = 10 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 82)
+	request.ReqBody.KDCOptions = types.KDCRenewableOK
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	request.ReqBody.RTime = nil
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(4*time.Hour)) {
+		t.Fatalf("renew-till = %v, want %v", part.RenewTill, now.Add(4*time.Hour))
+	}
+}
+
+func TestTGSDefaultRenewableLife(t *testing.T) {
+	now := time.Unix(2000001275, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DefaultRenewableLife = 4 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := issueASTicket(t, server, user, now, types.KDCRenewable, now.Add(8*time.Hour))
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	response := server.HandleMessage(rawTGSRequestWithTill(t, tgt, service, now, kerberosTime(time.Unix(0, 0).UTC()), types.KDCRenewable))
+	part := tgsReplyPart(t, response, tgt.Key)
+	if part.RenewTill == nil || !part.RenewTill.Time.Equal(now.Add(4*time.Hour)) {
+		t.Fatalf("TGS renew-till = %v, want %v", part.RenewTill, now.Add(4*time.Hour))
+	}
+}
+
 func TestASPostdatedTicketRequiresValidation(t *testing.T) {
 	now := time.Unix(2000001200, 0).UTC()
 	server, _ := testServer(t, now)
