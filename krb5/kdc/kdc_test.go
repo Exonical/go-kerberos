@@ -76,6 +76,47 @@ func TestServerFASTTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerFASTTGSRejectsBadChecksumAndGarbage(t *testing.T) {
+	now := time.Unix(2000000056, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	for _, mutate := range []func(protocol.TGSReq) protocol.TGSReq{
+		func(request protocol.TGSReq) protocol.TGSReq {
+			var wrapper protocol.PAFXFastRequest
+			if err := asn1.Unmarshal(request.PAData[1].PADataValue, &wrapper); err != nil {
+				t.Fatalf("decode FAST request: %v", err)
+			}
+			wrapper.ArmoredData.ReqChecksum.Checksum[0] ^= 0xff
+			request.PAData[1].PADataValue = mustMarshal(t, wrapper)
+			return request
+		},
+		func(request protocol.TGSReq) protocol.TGSReq {
+			request.PAData[1].PADataValue = []byte{0x01, 0x02, 0x03}
+			return request
+		},
+	} {
+		badClient := &client.Client{
+			Now: func() time.Time { return now },
+			Exchange: func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+				var request protocol.TGSReq
+				if err := asn1.Unmarshal(payload, &request); err != nil {
+					t.Fatalf("decode TGS request: %v", err)
+				}
+				request = mutate(request)
+				return server.HandleMessage(mustMarshal(t, request)), nil
+			},
+		}
+		if _, err := badClient.TGSExchangeFAST(context.Background(), tgt, service); err == nil {
+			t.Fatal("malformed FAST TGS request unexpectedly succeeded")
+		}
+	}
+}
+
 func TestServerFASTRejectsMalformedArmor(t *testing.T) {
 	now := time.Unix(2000000060, 0).UTC()
 	server, kclient := testServer(t, now)
