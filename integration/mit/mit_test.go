@@ -333,7 +333,7 @@ func TestGoGSSAPIExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse realm config: %v", err)
 	}
-	now := time.Now().UTC().Truncate(time.Second)
+	now := time.Now().UTC()
 	clientPrincipal := principal.Principal{
 		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
 	}
