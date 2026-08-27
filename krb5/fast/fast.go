@@ -98,6 +98,31 @@ func NewArmor(tgt TGT, now time.Time) (*Armor, error) {
 	return &Armor{EType: etype, Key: armorKey, APReq: apReq}, nil
 }
 
+// NewTGSArmor constructs the FAST armor key from a TGS authenticator subkey
+// and the header ticket session key. TGS FAST uses the implicit armor form
+// and therefore does not carry an AP-REQ in KrbFastArmor.
+func NewTGSArmor(tgt TGT, subkey protocol.EncryptionKey) (*Armor, error) {
+	if len(tgt.Key.KeyValue) == 0 || len(subkey.KeyValue) == 0 {
+		return nil, fmt.Errorf("FAST TGS armor: incomplete key")
+	}
+	if tgt.Key.KeyType != subkey.KeyType {
+		return nil, fmt.Errorf("FAST TGS armor: enctype mismatch")
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		return nil, fmt.Errorf("FAST TGS armor: %w", err)
+	}
+	if len(tgt.Key.KeyValue) != etype.KeySize() || len(subkey.KeyValue) != etype.KeySize() {
+		return nil, fmt.Errorf("FAST TGS armor: invalid key")
+	}
+	armorKey, err := crypto.CF2(etype, subkey.KeyValue, tgt.Key.KeyValue,
+		[]byte("subkeyarmor"), []byte("ticketarmor"))
+	if err != nil {
+		return nil, fmt.Errorf("FAST TGS armor key: %w", err)
+	}
+	return &Armor{EType: etype, Key: armorKey}, nil
+}
+
 // WrapASReq wraps an AS request body and inner padata in PA-FX-FAST.
 func (a *Armor) WrapASReq(body protocol.KDCReqBody, inner protocol.MethodData) (protocol.PAData, error) {
 	if a == nil || a.EType == nil || len(a.Key) == 0 || len(a.APReq) == 0 {
@@ -126,6 +151,37 @@ func (a *Armor) WrapASReq(body protocol.KDCReqBody, inner protocol.MethodData) (
 	}})
 	if err != nil {
 		return protocol.PAData{}, fmt.Errorf("FAST request armor: %w", err)
+	}
+	return protocol.PAData{PADataType: PAFXFast, PADataValue: armored}, nil
+}
+
+// WrapTGSReq wraps a TGS request body and inner padata in PA-FX-FAST.
+// checksummedData is the encoded PA-TGS-REQ value for the outer request.
+func (a *Armor) WrapTGSReq(body protocol.KDCReqBody, inner protocol.MethodData, checksummedData []byte) (protocol.PAData, error) {
+	if a == nil || a.EType == nil || len(a.Key) == 0 {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request: incomplete armor")
+	}
+	if len(checksummedData) == 0 {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request: missing checksum data")
+	}
+	innerDER, err := asn1.Marshal(protocol.KrbFastReq{FastOptions: 0, PAData: inner, ReqBody: body})
+	if err != nil {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request: %w", err)
+	}
+	cipher, err := a.EType.Encrypt(a.Key, UsageReq, innerDER)
+	if err != nil {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request encryption: %w", err)
+	}
+	checksum, err := a.EType.Checksum(a.Key, UsageReqChecksum, checksummedData)
+	if err != nil {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request checksum: %w", err)
+	}
+	armored, err := asn1.Marshal(protocol.PAFXFastRequest{ArmoredData: protocol.KrbFastArmoredReq{
+		ReqChecksum: protocol.Checksum{ChecksumType: checksumType(a.EType.ID()), Checksum: checksum},
+		EncFastReq:  protocol.EncryptedData{EType: a.EType.ID(), Cipher: cipher},
+	}})
+	if err != nil {
+		return protocol.PAData{}, fmt.Errorf("FAST TGS request armor: %w", err)
 	}
 	return protocol.PAData{PADataType: PAFXFast, PADataValue: armored}, nil
 }
