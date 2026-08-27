@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/internal/testenv"
+	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -226,7 +227,54 @@ func TestGoClientTGSExchange(t *testing.T) {
 }
 
 func TestGoClientAPExchange(t *testing.T) {
-	t.Skip("Go AP exchange is not implemented")
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	kclient := &client.Client{
+		Config: cfg, Now: func() time.Time { return now },
+	}
+	tgt, err := kclient.ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go AS exchange: %v", err)
+	}
+	servicePrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	}
+	serviceTicket, err := kclient.TGSExchange(context.Background(), tgt, servicePrincipal)
+	if err != nil {
+		t.Fatalf("Go TGS exchange: %v", err)
+	}
+	request, _, err := ap.BuildAPReq(serviceTicket, 0, now)
+	if err != nil {
+		t.Fatalf("Go AP request: %v", err)
+	}
+	keytabFile, err := os.Open(realm.Keytab)
+	if err != nil {
+		t.Fatalf("open service keytab: %v", err)
+	}
+	defer keytabFile.Close()
+	serviceKeytab, err := keytab.Read(keytabFile)
+	if err != nil {
+		t.Fatalf("read service keytab: %v", err)
+	}
+	verified, err := ap.VerifyAPReq(serviceKeytab, request.DER, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("verify Go AP request: %v", err)
+	}
+	if verified.Client != clientPrincipal {
+		t.Fatalf("verified client = %#v, want %#v", verified.Client, clientPrincipal)
+	}
 }
 
 func TestFixturePathsRemainStable(t *testing.T) {
