@@ -327,6 +327,9 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	options := request.ReqBody.KDCOptions
 	if options&types.KDCRenew != 0 {
+		if code, ok := s.ticketValidity(ticketPart); !ok {
+			return s.errorResponse(code, request.ReqBody.SName)
+		}
 		if ticketPart.Flags&types.TicketRenewable == 0 {
 			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
 		}
@@ -337,9 +340,11 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		if ticketPart.Flags&types.TicketInvalid == 0 {
 			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
 		}
-		if ticketPart.StartTime != nil && ticketPart.StartTime.Present &&
-			s.now().Before(ticketPart.StartTime.Time) {
+		if ticketPart.StartTime != nil && ticketPart.StartTime.Present && s.now().Before(ticketPart.StartTime.Time) {
 			return s.errorResponse(krbAPErrTktNYV, request.ReqBody.SName)
+		}
+		if code, ok := s.ticketValidityWithInvalid(ticketPart); !ok {
+			return s.errorResponse(code, request.ReqBody.SName)
 		}
 	} else if code, ok := s.ticketValidity(ticketPart); !ok {
 		return s.errorResponse(code, request.ReqBody.SName)
@@ -567,8 +572,16 @@ func (s *Server) now() time.Time {
 // ticketValidity reports whether a presented ticket is usable now, returning
 // the KRB_ERROR code to send when it is not.
 func (s *Server) ticketValidity(ticket protocol.EncTicketPart) (int32, bool) {
+	return s.ticketValidityWithInvalidMode(ticket, false)
+}
+
+func (s *Server) ticketValidityWithInvalid(ticket protocol.EncTicketPart) (int32, bool) {
+	return s.ticketValidityWithInvalidMode(ticket, true)
+}
+
+func (s *Server) ticketValidityWithInvalidMode(ticket protocol.EncTicketPart, allowInvalid bool) (int32, bool) {
 	now := s.now()
-	if ticket.Flags&types.TicketInvalid != 0 {
+	if !allowInvalid && ticket.Flags&types.TicketInvalid != 0 {
 		return krbAPErrTktNYV, false
 	}
 	if ticket.StartTime != nil && ticket.StartTime.Present && now.Add(s.skew()).Before(ticket.StartTime.Time) {
