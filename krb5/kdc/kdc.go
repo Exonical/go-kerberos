@@ -3,6 +3,8 @@ package kdc
 
 import (
 	"context"
+	stdcrypto "crypto"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -23,23 +26,24 @@ import (
 )
 
 const (
-	maxReplayEntries      = 10000
-	paTGSReq              = 1
-	paEncTimestamp        = 2
-	kdcErrCPrincipal      = 6
-	kdcErrSPrincipal      = 7
-	kdcErrPreauthFailed   = 24
-	kdcErrPreauthRequired = 25
-	kdcErrGeneric         = 60
-	kdcErrBadOption       = 13
-	kdcErrPolicy          = 12
-	kdcErrCannotPostdate  = 10
-	krbAPErrBadIntegrity  = 31
-	krbAPErrTktExpired    = 32
-	krbAPErrTktNYV        = 33
-	krbAPErrRepeat        = 34
-	krbAPErrSkew          = 37
-	krbAPErrInKeyUsage    = 44
+	maxReplayEntries       = 10000
+	paTGSReq               = 1
+	paEncTimestamp         = 2
+	kdcErrCPrincipal       = 6
+	kdcErrSPrincipal       = 7
+	kdcErrPreauthFailed    = 24
+	kdcErrPreauthRequired  = 25
+	kdcErrGeneric          = 60
+	kdcErrBadOption        = 13
+	kdcErrPolicy           = 12
+	kdcErrCannotPostdate   = 10
+	kdcErrClientNotTrusted = 62
+	krbAPErrBadIntegrity   = 31
+	krbAPErrTktExpired     = 32
+	krbAPErrTktNYV         = 33
+	krbAPErrRepeat         = 34
+	krbAPErrSkew           = 37
+	krbAPErrInKeyUsage     = 44
 )
 
 // Server is a Kerberos KDC backed by a pluggable principal store.
@@ -61,6 +65,11 @@ type Server struct {
 	Policy *Policy
 	// Capaths optionally configures permitted server-side transited paths.
 	Capaths map[string]map[string][]string
+	// PKINITCertificate and PKINITSigner identify the KDC for PKINIT replies.
+	PKINITCertificate *x509.Certificate
+	PKINITSigner      stdcrypto.Signer
+	// PKINITClientCAs trusts client certificates for PKINIT authentication.
+	PKINITClientCAs *x509.CertPool
 
 	replayMu sync.Mutex
 	replays  map[string]time.Time
@@ -215,10 +224,37 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.errorResponse(14, request.ReqBody.SName)
 	}
 	timestampPA := findPA(request.PAData, paEncTimestamp)
+	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
+	if pkinitPA != nil {
+		if s.PKINITCertificate == nil || s.PKINITSigner == nil || s.PKINITClientCAs == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		bodyDER, err := asn1.FieldContent(raw, protocol.TagASReq, 4)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		verified, err := pkinit.VerifyPAASReqForKDC(pkinitPA.PADataValue, bodyDER)
+		if err != nil || verified.Authenticator.Nonce != request.ReqBody.Nonce ||
+			!verified.Authenticator.CTime.IsZero() && !s.withinSkew(verified.Authenticator.CTime) {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
+			clientName.Realm, clientName.Components); err != nil {
+			return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
+		}
+		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
+			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, &paRep)
+	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-				etypeID, clientKey, serviceKey, armor, false)
+				etypeID, clientKey, serviceKey, armor, false, nil, nil)
 		}
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp, PADataValue: []byte{}},
@@ -229,6 +265,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 					Salt:  stringPointer(principalSalt(clientKey, clientName)),
 				}}),
 			},
+		}
+		if s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
+			methodData = append(methodData, protocol.PAData{PADataType: protocol.PADataPKASReq})
 		}
 		if armor != nil {
 			if cookie := findPA(request.PAData, fast.PAFXCookie); cookie != nil {
@@ -264,7 +303,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-		etypeID, clientKey, serviceKey, armor, true)
+		etypeID, clientKey, serviceKey, armor, true, nil, nil)
 }
 
 func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.ASReq, *fastContext, int32) {
@@ -376,7 +415,7 @@ func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.A
 	return request, armor, 0
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool) []byte {
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPA *protocol.PAData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -446,7 +485,12 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		SRealm: request.ReqBody.Realm, SName: *request.ReqBody.SName,
 	}
 	replyPlain := marshalDER(part)
-	replyCipher, err := encryptWithKey(clientKey, 3, replyPlain)
+	replyKey := clientKey
+	if replyEncryptionKey != nil {
+		replyKey = *replyEncryptionKey
+		replyKey.Enctype = etypeID
+	}
+	replyCipher, err := encryptWithKey(replyKey, 3, replyPlain)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
@@ -457,10 +501,13 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		Ticket:  ticket,
 		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
 	}
+	if replyPA != nil {
+		reply.PAData = protocol.MethodData{*replyPA}
+	}
 	if armor == nil {
 		return marshalDER(reply)
 	}
-	return s.wrapFASTASRep(reply, clientKey, armor)
+	return s.wrapFASTASRep(reply, replyKey, armor)
 }
 
 func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext) []byte {

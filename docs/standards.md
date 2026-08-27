@@ -51,7 +51,7 @@ requirements.
 | Principal canonicalization and referrals | RFC 6806 | later client phase | not started | not started |
 | Kerberos GSS-API mechanism | RFC 4121 | later client phase | not started | not started |
 | GSS channel bindings | RFC 6542 | later client phase | not started | not started |
-| PKINIT | RFC 4556 | later client phase | not started | not started |
+| PKINIT | RFC 4556 | client and Go KDC Diffie-Hellman profile (group 14) | implemented | unit + MIT interoperability |
 
 ## Core RFC set
 

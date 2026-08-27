@@ -48,6 +48,14 @@ type PKAuthenticator struct {
 	PAChecksum []byte
 }
 
+// VerifiedPAASReq contains the authenticated PKINIT request data needed by a
+// KDC. Certificate trust and principal authorization are checked separately.
+type VerifiedPAASReq struct {
+	Authenticator PKAuthenticator
+	PublicValue   []byte
+	Certificate   *x509.Certificate
+}
+
 // Client is an ephemeral PKINIT DH exchange state.
 type Client struct {
 	Certificate *x509.Certificate
@@ -106,22 +114,113 @@ func BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32, cert *x509.Certif
 // VerifyPAASReq verifies the CMS and paChecksum in PA-PK-AS-REQ and returns
 // the decoded authenticator. It does not authenticate the client certificate.
 func VerifyPAASReq(data, bodyDER []byte) (PKAuthenticator, error) {
+	verified, err := VerifyPAASReqForKDC(data, bodyDER)
+	if err != nil {
+		return PKAuthenticator{}, err
+	}
+	return verified.Authenticator, nil
+}
+
+// VerifyPAASReqForKDC verifies the CMS and paChecksum in PA-PK-AS-REQ and
+// returns the request certificate and client DH value. It does not trust or
+// authorize the certificate.
+func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if err := requireSingleTLV(data); err != nil {
-		return PKAuthenticator{}, err
+		return VerifiedPAASReq{}, err
 	}
-	content, _, err := verifyCMSChoice(data, nil)
+	content, cert, err := verifyCMSChoice(data, nil)
 	if err != nil {
-		return PKAuthenticator{}, err
+		return VerifiedPAASReq{}, err
 	}
-	auth, _, err := parseAuthPack(content)
+	auth, publicValue, err := parseAuthPack(content)
 	if err != nil {
-		return PKAuthenticator{}, err
+		return VerifiedPAASReq{}, err
 	}
 	sum := sha1.Sum(bodyDER)
 	if len(auth.PAChecksum) != len(sum) || subtle.ConstantTimeCompare(auth.PAChecksum, sum[:]) != 1 {
-		return PKAuthenticator{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
+		return VerifiedPAASReq{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
 	}
-	return auth, nil
+	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, Certificate: cert}, nil
+}
+
+// ValidateClientCertificate verifies a PKINIT client certificate chain,
+// id-pkinit-KPClientAuth EKU, and its id-pkinit-san principal.
+func ValidateClientCertificate(cert *x509.Certificate, anchors *x509.CertPool, realm string, components []string) error {
+	if cert == nil {
+		return errors.New("pkinit: missing client certificate")
+	}
+	if anchors == nil {
+		return errors.New("pkinit: client certificate trust roots are required")
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots: anchors, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return errors.New("pkinit: client certificate is not trusted")
+	}
+	clientEKU := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4}
+	hasClientEKU := false
+	for _, oid := range cert.UnknownExtKeyUsage {
+		if oid.Equal(clientEKU) {
+			hasClientEKU = true
+			break
+		}
+	}
+	if !hasClientEKU {
+		return errors.New("pkinit: client certificate lacks id-pkinit-KPClientAuth EKU")
+	}
+	gotRealm, gotComponents, err := clientSAN(cert)
+	if err != nil {
+		return err
+	}
+	if gotRealm != realm || len(gotComponents) != len(components) {
+		return errors.New("pkinit: client certificate SAN principal mismatch")
+	}
+	for i := range components {
+		if gotComponents[i] != components[i] {
+			return errors.New("pkinit: client certificate SAN principal mismatch")
+		}
+	}
+	return nil
+}
+
+func clientSAN(cert *x509.Certificate) (string, []string, error) {
+	const sanOID = "1.3.6.1.5.2.2"
+	const extensionOID = "2.5.29.17"
+	for _, ext := range cert.Extensions {
+		if ext.Id.String() != extensionOID {
+			continue
+		}
+		fields, err := sequenceFields(ext.Value)
+		if err != nil {
+			return "", nil, errors.New("pkinit: malformed client subject alternative name")
+		}
+		for _, field := range fields {
+			if len(field) == 0 || field[0] != 0xa0 {
+				continue
+			}
+			other, err := collectionFields(derSeq(mustContent(field)))
+			if err != nil || len(other) != 2 {
+				continue
+			}
+			var oid asn1.ObjectIdentifier
+			if _, err := asn1.Unmarshal(other[0], &oid); err != nil || oid.String() != sanOID {
+				continue
+			}
+			value, err := tlvContent(other[1])
+			if err != nil {
+				return "", nil, errors.New("pkinit: malformed client subject alternative name")
+			}
+			principal, err := parseKRB5SANPrincipal(value)
+			if err != nil {
+				return "", nil, err
+			}
+			if len(principal) < 2 {
+				return "", nil, errors.New("pkinit: malformed client principal SAN")
+			}
+			return principal[len(principal)-1], principal[:len(principal)-1], nil
+		}
+	}
+	return "", nil, errors.New("pkinit: client certificate has no id-pkinit-san SAN")
 }
 
 // ParseAuthPack decodes an AuthPack DER value.
@@ -155,6 +254,68 @@ func (c *Client) SharedKeyWithNonces(serverPublic []byte, enctype int32, clientN
 	copy(padded[len(padded)-len(shared):], shared)
 	z := append(append(padded, clientNonce...), serverNonce...)
 	return octetString2Key(z, enctype)
+}
+
+// BuildPAASRep constructs the DH profile of PA-PK-AS-REP for a client
+// public value. The returned key is the RFC 4556 reply key used to encrypt
+// the AS-REP.
+func BuildPAASRep(clientPublic []byte, enctype int32, nonce uint32, cert *x509.Certificate, signer crypto.Signer) (protocol.PAData, []byte, error) {
+	if cert == nil || signer == nil {
+		return protocol.PAData{}, nil, errors.New("pkinit: certificate and signer are required")
+	}
+	if err := validateKDC(nil, cert); err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
+		return protocol.PAData{}, nil, errors.New("pkinit: only RSA signing keys are supported")
+	}
+	clientY, err := parseSPKIPublicValue(clientPublic)
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	private, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Sub(group14P, big.NewInt(2)))
+	if err != nil {
+		return protocol.PAData{}, nil, fmt.Errorf("pkinit: generate DH private value: %w", err)
+	}
+	private.Add(private, big.NewInt(2))
+	serverY := new(big.Int).Exp(group14G, private, group14P)
+	shared := new(big.Int).Exp(clientY, private, group14P).Bytes()
+	padded := make([]byte, (group14P.BitLen()+7)/8)
+	copy(padded[len(padded)-len(shared):], shared)
+	replyKey, err := octetString2Key(padded, enctype)
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	dhInfo := derSeq(
+		derExplicit(0, derBitString(derIntBig(serverY))),
+		derExplicit(1, derInt(int64(nonce))),
+	)
+	signed, err := signCMSWithContentType(dhInfo,
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 2}, cert, signer)
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	return protocol.PAData{
+		PADataType:  PADataASRep,
+		PADataValue: derExplicit(0, derSeq(derImplicitOctet(0, signed))),
+	}, replyKey, nil
+}
+
+func parseSPKIPublicValue(data []byte) (*big.Int, error) {
+	fields, err := sequenceFields(data)
+	if err != nil || len(fields) != 2 {
+		return nil, errors.New("pkinit: malformed client DH public value")
+	}
+	bits, err := tlvContent(fields[1])
+	if err != nil || len(bits) < 2 || bits[0] != 0 {
+		return nil, errors.New("pkinit: malformed client DH public value")
+	}
+	integerDER := bits[1:]
+	value, err := parseInteger(integerDER)
+	if err != nil || value.Sign() <= 0 || value.Cmp(group14P) >= 0 {
+		return nil, errors.New("pkinit: invalid client DH public value")
+	}
+	return value, nil
 }
 
 // VerifyPAASRep verifies a PA-PK-AS-REP and derives its DH reply key.
@@ -306,9 +467,15 @@ func marshalSPKI(y *big.Int) []byte {
 }
 
 func signCMS(content []byte, cert *x509.Certificate, signer crypto.Signer) ([]byte, error) {
+	return signCMSWithContentType(content,
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}, cert, signer)
+}
+
+func signCMSWithContentType(content []byte, contentType asn1.ObjectIdentifier,
+	cert *x509.Certificate, signer crypto.Signer) ([]byte, error) {
 	contentDigest := sha256.Sum256(content)
 	attrs := derSet(
-		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}), derSet(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}))),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}), derSet(derOID(contentType))),
 		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 4}), derSet(derOctet(contentDigest[:]))),
 	)
 	h := sha256.Sum256(attrs)
@@ -319,7 +486,7 @@ func signCMS(content []byte, cert *x509.Certificate, signer crypto.Signer) ([]by
 	issuerSerial := derSeq(cert.RawIssuer, derIntBig(cert.SerialNumber))
 	// IssuerAndSerialNumber requires CMS SignerInfo version 1.
 	signerInfo := derSeq(derInt(1), issuerSerial, derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull()), derExplicitImplicit(0, attrs[2:]), derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}), derNull()), derOctet(sig))
-	signed := derSeq(derInt(3), derSet(derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull())), derSeq(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}), derExplicit(0, derOctet(content))), derExplicitImplicit(0, cert.Raw), derSet(signerInfo))
+	signed := derSeq(derInt(3), derSet(derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull())), derSeq(derOID(contentType), derExplicit(0, derOctet(content))), derExplicitImplicit(0, cert.Raw), derSet(signerInfo))
 	return derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}), derExplicit(0, signed)), nil
 }
 
@@ -630,6 +797,7 @@ func derSet(v ...[]byte) []byte {
 func derSetContent(v []byte) []byte                { return der(0x31, v) }
 func derExplicit(tag int, v []byte) []byte         { return der(0xa0|byte(tag), v) }
 func derExplicitImplicit(tag int, v []byte) []byte { return der(0xa0|byte(tag), v) }
+func derImplicitOctet(tag int, v []byte) []byte    { return der(0x80|byte(tag), v) }
 func derOctet(v []byte) []byte                     { return der(0x04, v) }
 func derNull() []byte                              { return []byte{0x05, 0x00} }
 func derInt(v int64) []byte                        { return derIntBig(big.NewInt(v)) }
