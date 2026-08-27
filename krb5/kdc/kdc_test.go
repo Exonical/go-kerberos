@@ -122,8 +122,23 @@ func TestServerFASTRejectsBadChecksumAndGarbage(t *testing.T) {
 	request.PAData = protocol.MethodData{fastData}
 	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
 
+	fastData, err = armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("rewrap FAST request: %v", err)
+	}
+	if err := asn1.Unmarshal(fastData.PADataValue, &wrapper); err != nil {
+		t.Fatalf("decode fresh FAST request: %v", err)
+	}
+	wrapper.ArmoredData.Armor.ArmorValue[len(wrapper.ArmoredData.Armor.ArmorValue)-1] ^= 0xff
 	request.PAData[0].PADataValue = mustMarshal(t, wrapper)
-	request.PAData[0].PADataValue[len(request.PAData[0].PADataValue)-1] ^= 0xff
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	fastData, err = armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("rewrap FAST request: %v", err)
+	}
+	fastData.PADataValue[len(fastData.PADataValue)-1] ^= 0xff
+	request.PAData[0].PADataValue = fastData.PADataValue
 	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
 
 	request.PAData[0].PADataValue = []byte{0x01, 0x02, 0x03}
