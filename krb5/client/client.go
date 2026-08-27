@@ -136,6 +136,256 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, now)
 }
 
+// TGSExchange obtains a service ticket using an existing TGT.
+func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("TGS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("TGS exchange: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("TGS exchange: %w", err)
+	}
+	if tgt == nil {
+		return nil, fmt.Errorf("TGS exchange: nil TGT")
+	}
+	if len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
+		return nil, fmt.Errorf("TGS exchange: incomplete TGT")
+	}
+	if len(service.Components) == 0 {
+		return nil, fmt.Errorf("TGS exchange: invalid service principal")
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		return nil, err
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
+		return nil, fmt.Errorf("TGS exchange ticket: %w", err)
+	}
+	realm := service.Realm
+	if realm == "" {
+		realm = tgt.Server.Realm
+	}
+	if realm == "" {
+		realm = tgt.Client.Realm
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("TGS exchange: missing service realm")
+	}
+	service = serviceWithRealm(service, realm)
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	nonceBytes := make([]byte, 4)
+	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
+		return nil, fmt.Errorf("TGS exchange nonce: %w", err)
+	}
+	body := protocol.KDCReqBody{
+		KDCOptions: types.KDCRenewableOK,
+		Realm:      realm,
+		SName: &protocol.PrincipalName{
+			NameType: int32(service.NameType), NameString: append([]string(nil), service.Components...),
+		},
+		Till:  types.KerberosTime{Time: now.Add(c.ticketLifetime()), Present: true},
+		Nonce: randomNonce(nonceBytes),
+		EType: c.requestEnctypes(),
+	}
+	bodyDER, err := asn1.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange request body: %w", err)
+	}
+	checksum, err := etype.Checksum(tgt.Key.KeyValue, 6, bodyDER)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange request checksum: %w", err)
+	}
+	usec := int32(now.Nanosecond() / 1000)
+	authenticatorDER, err := asn1.Marshal(protocol.Authenticator{
+		AuthenticatorVNO: 5,
+		CRealm:           tgt.Client.Realm,
+		CName:            *protocolPrincipal(tgt.Client),
+		Checksum: &protocol.Checksum{
+			ChecksumType: checksumType(tgt.Key.KeyType),
+			Checksum:     checksum,
+		},
+		Cusec: usec,
+		Ctime: types.KerberosTime{Time: now, Microseconds: usec, Present: true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange authenticator: %w", err)
+	}
+	encryptedAuthenticator, err := etype.Encrypt(tgt.Key.KeyValue, 7, authenticatorDER)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange authenticator encryption: %w", err)
+	}
+	apReqDER, err := asn1.Marshal(protocol.APReq{
+		PVNO:    5,
+		MsgType: 14,
+		Ticket:  ticket,
+		Authenticator: protocol.EncryptedData{
+			EType:  tgt.Key.KeyType,
+			Cipher: encryptedAuthenticator,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange AP-REQ: %w", err)
+	}
+	request := protocol.TGSReq{
+		PVNO:    5,
+		MsgType: 12,
+		PAData:  protocol.MethodData{{PADataType: 1, PADataValue: apReqDER}},
+		ReqBody: body,
+	}
+	response, err := c.exchangePayload(ctx, realm, request, "TGS exchange request")
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		return nil, kerberosError
+	}
+	return c.decodeTGSRep(response, tgt.Client, service, body.Nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+}
+
+func (c *Client) decodeTGSRep(data []byte, clientPrincipal, service principal.Principal, nonce uint32, keyType int32, key []byte, now time.Time) (*Credentials, error) {
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(data, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(data); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("TGS exchange TGS-REP: %w", err)
+	}
+	if reply.MsgType != 13 {
+		return nil, fmt.Errorf("TGS exchange: unexpected message type %d", reply.MsgType)
+	}
+	if reply.CRealm != clientPrincipal.Realm || !samePrincipal(reply.CName, clientPrincipal) {
+		return nil, fmt.Errorf("TGS exchange: TGS-REP client principal mismatch")
+	}
+	if reply.Ticket.Realm != service.Realm || !sameProtocolPrincipal(reply.Ticket.SName, service) {
+		return nil, fmt.Errorf("TGS exchange: TGS-REP service principal mismatch")
+	}
+	if reply.EncPart.EType != keyType {
+		return nil, fmt.Errorf("TGS exchange TGS-REP enctype %d: %w", reply.EncPart.EType, krberrors.ErrUnsupportedEType)
+	}
+	etype, err := crypto.NewRegistry().Get(keyType)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := etype.Decrypt(key, 8, reply.EncPart.Cipher)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange decrypt TGS-REP: %w", err)
+	}
+	if len(plaintext) > 0 && plaintext[0] == 0x79 {
+		plaintext = append([]byte(nil), plaintext...)
+		plaintext[0] = 0x7a
+	}
+	var part protocol.EncTGSRepPart
+	if err := asn1.Unmarshal(plaintext, &part); err != nil {
+		return nil, fmt.Errorf("TGS exchange EncTGSRepPart: %w", err)
+	}
+	if part.Nonce != nonce {
+		return nil, fmt.Errorf("TGS exchange: TGS-REP nonce mismatch")
+	}
+	if part.SRealm != service.Realm || !sameProtocolPrincipal(part.SName, service) {
+		return nil, fmt.Errorf("TGS exchange: encrypted service principal mismatch")
+	}
+	if !validTimes(part.AuthTime, part.StartTime, part.EndTime, now, c.clockSkew()) {
+		return nil, fmt.Errorf("TGS exchange: %w", krberrors.ErrClockSkew)
+	}
+	ticket, err := asn1.Marshal(reply.Ticket)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange ticket: %w", err)
+	}
+	return &Credentials{
+		Client: clientPrincipal, Server: service, Key: part.Key, Flags: part.Flags,
+		AuthTime: part.AuthTime, StartTime: part.StartTime, EndTime: part.EndTime,
+		RenewTill: part.RenewTill, Ticket: ticket,
+	}, nil
+}
+
+func (c *Client) exchangePayload(ctx context.Context, realm string, request any, label string) ([]byte, error) {
+	payload, err := asn1.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	if c.Exchange != nil {
+		response, err := c.Exchange(ctx, realm, payload)
+		if err != nil {
+			return nil, fmt.Errorf("TGS exchange transport: %w", err)
+		}
+		return response, nil
+	}
+	if c.Config == nil {
+		return nil, fmt.Errorf("TGS exchange: no configuration or exchange function")
+	}
+	endpoint, ok := configuredKDC(c.Config, realm)
+	if !ok {
+		return nil, fmt.Errorf("TGS exchange: no KDC configured for realm %q", realm)
+	}
+	address, err := net.ResolveUDPAddr("udp", endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange KDC address: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		return nil, fmt.Errorf("TGS exchange UDP socket: %w", err)
+	}
+	defer conn.Close()
+	exchange := transport.Exchange{
+		Dialer: c.Dialer, Timeout: 5 * time.Second, UDPPreferenceLimit: 1,
+	}
+	if c.Config.UDPPreferenceLimit > 0 {
+		exchange.UDPPreferenceLimit = c.Config.UDPPreferenceLimit
+	}
+	return exchange.Request(ctx, conn, address, payload)
+}
+
+func (c *Client) ticketLifetime() time.Duration {
+	if c.Config != nil && c.Config.TicketLifetime > 0 {
+		return c.Config.TicketLifetime
+	}
+	return 10 * time.Hour
+}
+
+func (c *Client) requestEnctypes() []int32 {
+	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
+		return append([]int32(nil), c.Config.DefaultTKTEnctypes...)
+	}
+	return []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
+}
+
+func checksumType(etype int32) int32 {
+	switch etype {
+	case crypto.EnctypeAES128SHA1:
+		return crypto.ChecksumHMACSHA196AES128
+	case crypto.EnctypeAES256SHA1:
+		return crypto.ChecksumHMACSHA196AES256
+	case crypto.EnctypeAES128SHA256:
+		return crypto.ChecksumHMACSHA256128AES128
+	case crypto.EnctypeAES256SHA384:
+		return crypto.ChecksumHMACSHA384192AES256
+	default:
+		return 0
+	}
+}
+
+func sameProtocolPrincipal(value protocol.PrincipalName, expected principal.Principal) bool {
+	return value.NameType == int32(expected.NameType) && slicesEqual(value.NameString, expected.Components)
+}
+
+func serviceWithRealm(value principal.Principal, realm string) principal.Principal {
+	if value.Realm != "" {
+		return value
+	}
+	value.Realm = realm
+	return value
+}
+
+func randomNonce(value []byte) uint32 {
+	return binary.BigEndian.Uint32(value) & 0x7fffffff
+}
+
 func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (protocol.ASReq, error) {
 	nonceBytes := make([]byte, 4)
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
@@ -168,7 +418,7 @@ func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (p
 				NameString: []string{"krbtgt", clientPrincipal.Realm},
 			},
 			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
-			Nonce: binary.BigEndian.Uint32(nonceBytes),
+			Nonce: randomNonce(nonceBytes),
 			EType: enctypes,
 		},
 	}, nil
