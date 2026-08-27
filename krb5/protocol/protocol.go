@@ -208,6 +208,14 @@ type APRep struct {
 
 func (APRep) ApplicationTag() int { return TagAPRep }
 
+type KRBPriv struct {
+	PVNO    int32         `krb5:"tag:0"`
+	MsgType int32         `krb5:"tag:1"`
+	EncPart EncryptedData `krb5:"tag:3"`
+}
+
+func (KRBPriv) ApplicationTag() int { return TagKRBPriv }
+
 type EncAPRepPart struct {
 	Ctime     types.KerberosTime `krb5:"tag:0"`
 	Cusec     int32              `krb5:"tag:1"`
@@ -216,6 +224,17 @@ type EncAPRepPart struct {
 }
 
 func (EncAPRepPart) ApplicationTag() int { return TagEncAPRepPart }
+
+type EncKRBPrivPart struct {
+	UserData  []byte              `krb5:"tag:0"`
+	Timestamp *types.KerberosTime `krb5:"tag:1,optional"`
+	Usec      *int32              `krb5:"tag:2,optional"`
+	SeqNumber *uint32             `krb5:"tag:3,optional"`
+	SAddress  HostAddress         `krb5:"tag:4"`
+	RAddress  *HostAddress        `krb5:"tag:5,optional"`
+}
+
+func (EncKRBPrivPart) ApplicationTag() int { return TagEncKRBPrivPart }
 
 type KRBError struct {
 	PVNO      int32               `krb5:"tag:0"`
@@ -347,19 +366,21 @@ type TransitedEncoding struct {
 
 // RFC 4120 application tag numbers (section 5.10).
 const (
-	TagTicket        = 1
-	TagAuthenticator = 2
-	TagEncTicketPart = 3
-	TagASReq         = 10
-	TagASRep         = 11
-	TagTGSReq        = 12
-	TagTGSRep        = 13
-	TagAPReq         = 14
-	TagAPRep         = 15
-	TagEncASRepPart  = 25
-	TagEncTGSRepPart = 26
-	TagEncAPRepPart  = 27
-	TagKRBError      = 30
+	TagTicket         = 1
+	TagAuthenticator  = 2
+	TagEncTicketPart  = 3
+	TagASReq          = 10
+	TagASRep          = 11
+	TagTGSReq         = 12
+	TagTGSRep         = 13
+	TagAPReq          = 14
+	TagAPRep          = 15
+	TagKRBPriv        = 21
+	TagEncASRepPart   = 25
+	TagEncTGSRepPart  = 26
+	TagEncAPRepPart   = 27
+	TagEncKRBPrivPart = 28
+	TagKRBError       = 30
 )
 
 // PKINIT padata types defined by RFC 4556.

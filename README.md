@@ -13,6 +13,8 @@ disposable integration test environments.
   `kinit` equivalent), including RFC 6113 **FAST** armored exchanges.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
+- **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and
+  KRB-PRIV framing on the kpasswd service port.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
@@ -91,7 +93,9 @@ notes, and the full test matrix.
 ## Roadmap
 
 S4U (constrained delegation), PKINIT, KDC replay cache and renewals,
-kdb persistence, and server-side FAST.
+kdb persistence, server-side FAST, and RFC 3244 password changes are
+implemented. The larger MIT kadm5 administrative RPC (ONC-RPC/GSS-RPC) is
+not implemented; this project does not claim general kadmin RPC support.
 
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
