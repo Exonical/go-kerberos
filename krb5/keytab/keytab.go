@@ -5,12 +5,13 @@ import (
 	"io"
 
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 const Version uint16 = 0x0502
 
 type Entry struct {
-	Principal string
+	Principal principal.Principal
 	Timestamp int64
 	KVNO      uint32
 	Enctype   int32
@@ -31,7 +32,7 @@ func Write(w io.Writer, kt *Keytab) error {
 	return fmt.Errorf("write keytab: %w", krberrors.ErrNotImplemented)
 }
 
-func (kt *Keytab) LookupPrincipal(name string) ([]Entry, error) {
+func (kt *Keytab) LookupPrincipal(name principal.Principal) ([]Entry, error) {
 	_ = name
 	return nil, fmt.Errorf("lookup keytab principal: %w", krberrors.ErrNotImplemented)
 }

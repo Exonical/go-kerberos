@@ -5,6 +5,7 @@ import (
 	"io"
 
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 const Version uint16 = 0x0504
@@ -15,18 +16,33 @@ type Header struct {
 }
 
 type Credential struct {
-	Client       string
-	Server       string
+	Client       principal.Principal
+	Server       principal.Principal
 	TicketFlags  uint32
-	Addresses    []string
-	AuthData     []string
+	AuthTime     uint32
+	StartTime    uint32
+	EndTime      uint32
+	RenewTill    uint32
+	IsSKey       bool
+	Addresses    []Address
+	AuthData     []AuthData
 	Ticket       []byte
 	SecondTicket []byte
 }
 
+type Address struct {
+	Type uint16
+	Data []byte
+}
+
+type AuthData struct {
+	Type uint16
+	Data []byte
+}
+
 type Cache struct {
 	Header           Header
-	DefaultPrincipal string
+	DefaultPrincipal principal.Principal
 	Credentials      []Credential
 }
 
