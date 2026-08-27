@@ -738,10 +738,21 @@ func parseExplicitBitStringInteger(v []byte) (*big.Int, error) {
 	if err != nil || len(bits) < 1 || bits[0] != 0 {
 		return nil, errors.New("invalid DH bit string")
 	}
-	if len(bits)-1 > (group14P.BitLen()+7)/8 {
+	integerDER := bits[1:]
+	_, integerBytes, err := tlv(integerDER)
+	if err != nil {
+		return nil, errors.New("invalid DH public integer")
+	}
+	// The DER INTEGER may include one leading sign octet for a 2048-bit
+	// public value whose high bit is set.
+	if len(integerBytes) > (group14P.BitLen()+7)/8+1 {
 		return nil, errors.New("DH public value is too large")
 	}
-	return parseInteger(bits[1:])
+	value, err := parseInteger(integerDER)
+	if err != nil || value.Sign() <= 0 || value.Cmp(group14P) >= 0 {
+		return nil, errors.New("invalid DH public value")
+	}
+	return value, nil
 }
 
 func parseExplicitInteger(v []byte) (*big.Int, error) {
