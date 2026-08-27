@@ -108,7 +108,7 @@ func (c *Client) ChangePasswordWithCredentials(ctx context.Context, changepw *cl
 	if c.Kerberos.Now != nil {
 		now = c.Kerberos.Now().UTC()
 	}
-	apState, apDER, err := ap.BuildAPReq(changepw, types.APUseSubkey|types.APMutualRequired, now)
+	apState, apDER, err := ap.BuildAPReq(changepw, types.APMutualRequired, now)
 	if err != nil {
 		return fmt.Errorf("password change AP-REQ: %w", err)
 	}

@@ -98,7 +98,6 @@ const (
 type APOptions uint32
 
 const (
-	APUseSubkey      APOptions = 1 << 0
 	APUseSessionKey  APOptions = 1 << 1
 	APMutualRequired APOptions = 1 << 2
 )
