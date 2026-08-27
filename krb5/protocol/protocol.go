@@ -361,3 +361,25 @@ const (
 	TagEncAPRepPart  = 27
 	TagKRBError      = 30
 )
+
+// PKINIT padata types defined by RFC 4556.
+const (
+	PADataPKASReq int32 = 16
+	PADataPKASRep int32 = 17
+)
+
+// PKAuthenticator is the Kerberos PKINIT authenticator. Its fields are
+// context-tagged by the repository ASN.1 codec.
+type PKAuthenticator struct {
+	Cusec      int32              `krb5:"tag:0"`
+	CTime      types.KerberosTime `krb5:"tag:1"`
+	Nonce      int32              `krb5:"tag:2"`
+	PAChecksum []byte             `krb5:"tag:3,optional"`
+}
+
+// AuthPack is the Kerberos portion of a PKINIT request.
+type AuthPack struct {
+	PKAuthenticator   PKAuthenticator `krb5:"tag:0"`
+	ClientPublicValue []byte          `krb5:"tag:1,optional"`
+	ClientDHNonce     []byte          `krb5:"tag:3,optional"`
+}

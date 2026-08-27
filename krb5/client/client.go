@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	stdcrypto "crypto"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -837,4 +840,76 @@ func unixOptional(value *types.KerberosTime) uint32 {
 		return 0
 	}
 	return unixTime(*value)
+}
+
+// ASExchangePKINIT obtains initial credentials with the RFC 4556 Diffie-Hellman
+// certificate preauthentication exchange. The password ASExchange path is
+// unchanged; cert must contain the client's signing certificate and key must
+// correspond to cert.
+func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal.Principal, cert *x509.Certificate, key stdcrypto.Signer, anchors *x509.CertPool) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("PKINIT AS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("PKINIT AS exchange: nil context")
+	}
+	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
+		return nil, fmt.Errorf("PKINIT AS exchange: invalid client principal")
+	}
+	pk, err := pkinit.NewClient(cert, key)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, err := c.newASReq(clientPrincipal, now)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		if kerberosError.Code != 25 {
+			return nil, kerberosError
+		}
+		bodyDER, err := asn1.Marshal(request.ReqBody)
+		if err != nil {
+			return nil, fmt.Errorf("PKINIT AS request body: %w", err)
+		}
+		pa, err := pk.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce)
+		if err != nil {
+			return nil, err
+		}
+		request.PAData = protocol.MethodData{pa}
+		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(response); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("PKINIT AS exchange AS-REP: %w", err)
+	}
+	var pkReply []byte
+	for _, pa := range reply.PAData {
+		if pa.PADataType == pkinit.PADataASRep {
+			pkReply = pa.PADataValue
+			break
+		}
+	}
+	if len(pkReply) == 0 {
+		return nil, fmt.Errorf("PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
+	}
+	replyKey, err := pk.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
 }
