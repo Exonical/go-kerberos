@@ -32,6 +32,7 @@ const (
 	kdcErrPreauthRequired = 25
 	kdcErrGeneric         = 60
 	kdcErrBadOption       = 13
+	kdcErrPolicy          = 12
 	kdcErrCannotPostdate  = 10
 	krbAPErrBadIntegrity  = 31
 	krbAPErrTktExpired    = 32
@@ -49,6 +50,8 @@ type Server struct {
 	ClockSkew        time.Duration
 	MaxTicketLife    time.Duration
 	MaxRenewableLife time.Duration
+	// Capaths optionally configures permitted server-side transited paths.
+	Capaths map[string]map[string][]string
 
 	replayMu sync.Mutex
 	replays  map[string]time.Time
@@ -604,6 +607,19 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := sessionEType.VerifyChecksum(ticketPart.Key.KeyValue, 6, body, authenticator.Checksum.Checksum); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
+	if apRequest.Ticket.Realm != s.Realm {
+		if (ticketPart.Transited.TrType == 0 && len(ticketPart.Transited.Contents) != 0) ||
+			(ticketPart.Transited.TrType != 0 && ticketPart.Transited.TrType != domainX500Compress) {
+			return s.errorResponse(14, request.ReqBody.SName)
+		}
+		contents, err := appendTransited(ticketPart.Transited.Contents, apRequest.Ticket.Realm)
+		if err != nil {
+			return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		ticketPart.Transited = protocol.TransitedEncoding{
+			TrType: domainX500Compress, Contents: contents,
+		}
+	}
 	if s.replayed(ticketPart.CRealm, ticketPart.CName, authenticator) {
 		return s.errorResponse(krbAPErrRepeat, request.ReqBody.SName)
 	}
@@ -715,6 +731,14 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if ticketPart.CRealm != s.Realm || crossRealmTGT {
 		ticketPart.Transited.TrType = 1
 	}
+	if !crossRealmTGT && len(ticketPart.Transited.Contents) > 0 {
+		if !transitedPermitted(ticketPart.Transited.Contents, ticketPart.CRealm,
+			serviceName.Realm, s.Capaths) {
+			return s.errorResponse(kdcErrPolicy, request.ReqBody.SName)
+		}
+		flags |= types.TicketTransited
+	}
+	ticketPart.Flags = flags
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
