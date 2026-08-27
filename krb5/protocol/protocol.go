@@ -38,6 +38,13 @@ type EncryptionKey struct {
 	KeyValue []byte `krb5:"tag:1"`
 }
 
+// ChangePasswdData is the RFC 3244 set-password KRB-PRIV user-data.
+type ChangePasswdData struct {
+	NewPassword []byte         `krb5:"tag:0"`
+	TargetName  *PrincipalName `krb5:"tag:1,optional"`
+	TargetRealm *string        `krb5:"tag:2,optional"`
+}
+
 type Checksum struct {
 	ChecksumType int32  `krb5:"tag:0"`
 	Checksum     []byte `krb5:"tag:1"`
