@@ -124,6 +124,14 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	if !strings.Contains(klist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
 		t.Fatalf("klist does not show TGT:\n%s", klist)
 	}
+	armorCache := filepath.Join(filepath.Dir(k.cache), "armor-ccache")
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-c", armorCache, "alice")
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-T", armorCache, "alice")
+	fastKlist := k.run(t, "", "/usr/bin/klist")
+	t.Logf("MIT klist after FAST kinit:\n%s", fastKlist)
+	if !strings.Contains(fastKlist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
+		t.Fatalf("klist after FAST kinit does not show TGT:\n%s", fastKlist)
+	}
 	k.run(t, "alice-password\n", "/usr/bin/kinit", "-r", "20h", "alice")
 	renewable := k.run(t, "", "/usr/bin/klist")
 	t.Logf("MIT klist after renewable kinit:\n%s", renewable)
