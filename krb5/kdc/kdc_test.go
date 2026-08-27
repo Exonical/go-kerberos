@@ -769,6 +769,18 @@ func TestCrossRealmTGSRequiresSharedTGTKey(t *testing.T) {
 	if err == nil || !hasKRBCode(err, 7) {
 		t.Fatalf("missing cross-realm key error = %v, want code 7", err)
 	}
+	if err := dbA.AddPrincipal("krbtgt/"+realmB+"@"+realmA, "shared-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbB.AddPrincipal("krbtgt/"+realmB+"@"+realmA, "wrong-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	_, err = kclient.TGSExchange(context.Background(), tgt, principal.Principal{
+		Realm: realmB, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err == nil || !hasKRBCode(err, 31) {
+		t.Fatalf("wrong cross-realm key error = %v, want code 31", err)
+	}
 }
 
 type delegatingStore struct{ db *kdb.Database }
