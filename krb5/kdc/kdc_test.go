@@ -381,3 +381,39 @@ func TestTGSUsesAuthenticatorSubkeyAtUsage9(t *testing.T) {
 		t.Fatalf("nonce = %d, want 42", part.Nonce)
 	}
 }
+
+func TestTGSRejectsExpiredAndPostdatedTickets(t *testing.T) {
+	now := time.Unix(2000000900, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+
+	for _, testCase := range []struct {
+		name  string
+		shift time.Duration
+		code  int32
+	}{
+		{"expired", 11 * time.Hour, 32},
+		{"not yet valid", -24 * time.Hour, 33},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			later := now.Add(testCase.shift)
+			server.Now = func() time.Time { return later }
+			defer func() { server.Now = func() time.Time { return now } }()
+			shifted := &client.Client{
+				Now: func() time.Time { return later },
+				Exchange: func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+					return server.HandleMessage(payload), nil
+				},
+			}
+			_, err := shifted.TGSExchange(context.Background(), tgt, service)
+			if err == nil || !hasKRBCode(err, testCase.code) {
+				t.Fatalf("TGS error = %v, want code %d", err, testCase.code)
+			}
+		})
+	}
+}

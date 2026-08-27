@@ -27,6 +27,8 @@ const (
 	kdcErrPreauthRequired = 25
 	kdcErrGeneric         = 60
 	krbAPErrBadIntegrity  = 31
+	krbAPErrTktExpired    = 32
+	krbAPErrTktNYV        = 33
 	krbAPErrSkew          = 37
 	krbAPErrInKeyUsage    = 44
 )
@@ -290,6 +292,9 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
+	if code, ok := s.ticketValidity(ticketPart); !ok {
+		return s.errorResponse(code, request.ReqBody.SName)
+	}
 	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -441,7 +446,23 @@ func (s *Server) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (s *Server) withinSkew(value time.Time) bool {
+// ticketValidity reports whether a presented ticket is usable now, returning
+// the KRB_ERROR code to send when it is not.
+func (s *Server) ticketValidity(ticket protocol.EncTicketPart) (int32, bool) {
+	now := s.now()
+	if ticket.Flags&types.TicketInvalid != 0 {
+		return krbAPErrTktNYV, false
+	}
+	if ticket.StartTime != nil && ticket.StartTime.Present && now.Add(s.skew()).Before(ticket.StartTime.Time) {
+		return krbAPErrTktNYV, false
+	}
+	if ticket.EndTime.Present && now.Add(-s.skew()).After(ticket.EndTime.Time) {
+		return krbAPErrTktExpired, false
+	}
+	return 0, true
+}
+
+func (s *Server) skew() time.Duration {
 	skew := s.ClockSkew
 	if skew < 0 {
 		skew = -skew
@@ -449,6 +470,11 @@ func (s *Server) withinSkew(value time.Time) bool {
 	if skew == 0 {
 		skew = 5 * time.Minute
 	}
+	return skew
+}
+
+func (s *Server) withinSkew(value time.Time) bool {
+	skew := s.skew()
 	difference := value.Sub(s.now())
 	if difference < 0 {
 		difference = -difference
