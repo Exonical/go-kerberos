@@ -58,6 +58,24 @@ func TestServerFASTASExchange(t *testing.T) {
 	}
 }
 
+func TestServerFASTTGSExchange(t *testing.T) {
+	now := time.Unix(2000000055, 0).UTC()
+	_, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	credentials, err := kclient.TGSExchangeFAST(context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("FAST TGSExchange: %v", err)
+	}
+	if !samePrincipal(credentials.Client, user) || !samePrincipal(credentials.Server, service) {
+		t.Fatalf("FAST TGS credentials = %#v", credentials)
+	}
+}
+
 func TestServerFASTRejectsMalformedArmor(t *testing.T) {
 	now := time.Unix(2000000060, 0).UTC()
 	server, kclient := testServer(t, now)

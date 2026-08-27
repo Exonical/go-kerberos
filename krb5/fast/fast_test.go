@@ -146,3 +146,51 @@ func TestArmorRejectsReplyNonceAndFinishedChecksum(t *testing.T) {
 		t.Fatal("tampered FAST reply unexpectedly accepted")
 	}
 }
+
+func TestTGSArmorWrapsRequestWithoutExplicitArmor(t *testing.T) {
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgtKey := bytes.Repeat([]byte{0x11}, etype.KeySize())
+	subkey := protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: bytes.Repeat([]byte{0x22}, etype.KeySize())}
+	armor, err := NewTGSArmor(TGT{
+		Client: principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		Key:    protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: tgtKey},
+	}, subkey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := protocol.KDCReqBody{
+		Realm: "TEST.REALM",
+		SName: &protocol.PrincipalName{NameType: int32(principal.NTSrvHst), NameString: []string{"host", "service.test"}},
+		Till:  types.KerberosTime{Time: time.Unix(2000000000, 0).UTC(), Present: true},
+		Nonce: 9, EType: []int32{etype.ID()},
+	}
+	checksummed := []byte{0x6c, 0x03, 0x01, 0x02, 0x03}
+	pa, err := armor.WrapTGSReq(body, nil, checksummed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapped protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(pa.PADataValue, &wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if wrapped.ArmoredData.Armor != nil {
+		t.Fatal("TGS FAST request unexpectedly contains explicit armor")
+	}
+	plaintext, err := etype.Decrypt(armor.Key, UsageReq, wrapped.ArmoredData.EncFastReq.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inner protocol.KrbFastReq
+	if err := asn1.Unmarshal(plaintext, &inner); err != nil {
+		t.Fatal(err)
+	}
+	if inner.ReqBody.Nonce != body.Nonce {
+		t.Fatalf("inner nonce = %d, want %d", inner.ReqBody.Nonce, body.Nonce)
+	}
+	if err := etype.VerifyChecksum(armor.Key, UsageReqChecksum, checksummed, wrapped.ArmoredData.ReqChecksum.Checksum); err != nil {
+		t.Fatalf("TGS request checksum: %v", err)
+	}
+}
