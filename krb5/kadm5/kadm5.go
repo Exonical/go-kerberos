@@ -41,7 +41,17 @@ const (
 	getPrincipal     = 5
 	createPrincipal  = 1
 	deletePrincipal  = 2
+	modifyPrincipal  = 3
+	renamePrincipal  = 4
 	chpassPrincipal  = 6
+	chrandPrincipal  = 7
+	createPolicy     = 8
+	deletePolicy     = 9
+	modifyPolicy     = 10
+	getPolicy        = 11
+	getPrivs         = 12
+	getPrincs        = 14
+	getPolicies      = 15
 )
 
 var xidCounter uint32 = uint32(time.Now().UnixNano())
@@ -49,12 +59,92 @@ var xidCounter uint32 = uint32(time.Now().UnixNano())
 // ErrNotFound indicates that the requested principal does not exist.
 var ErrNotFound = errors.New("kadm5: principal not found")
 
+// Common MIT kadm5 operation errors.
+var (
+	ErrDuplicate     = errors.New("kadm5: principal or policy already exists")
+	ErrUnknownPolicy = errors.New("kadm5: policy not found")
+	ErrPolicyInUse   = errors.New("kadm5: policy is in use")
+)
+
+const (
+	// Principal entry field masks from kadm5/admin.h.
+	KADM5Principal        int32 = 0x000001
+	KADM5PrincExpireTime  int32 = 0x000002
+	KADM5PWExpiration     int32 = 0x000004
+	KADM5LastPwdChange    int32 = 0x000008
+	KADM5Attributes       int32 = 0x000010
+	KADM5MaxLife          int32 = 0x000020
+	KADM5ModTime          int32 = 0x000040
+	KADM5ModName          int32 = 0x000080
+	KADM5KVNO             int32 = 0x000100
+	KADM5MKVNO            int32 = 0x000200
+	KADM5AuxAttributes    int32 = 0x000400
+	KADM5Policy           int32 = 0x000800
+	KADM5PolicyClear      int32 = 0x001000
+	KADM5MaxRenewableLife int32 = 0x002000
+	KADM5LastSuccess      int32 = 0x004000
+	KADM5LastFailed       int32 = 0x008000
+	KADM5FailAuthCount    int32 = 0x010000
+	KADM5KeyData          int32 = 0x020000
+	KADM5TLData           int32 = 0x040000
+
+	// Policy entry field masks from kadm5/admin.h.
+	KADM5PWMaxLife              int32 = 0x004000
+	KADM5PWMinLife              int32 = 0x008000
+	KADM5PWMinLength            int32 = 0x010000
+	KADM5PWMinClasses           int32 = 0x020000
+	KADM5PWHistoryNum           int32 = 0x040000
+	KADM5RefCount               int32 = 0x080000
+	KADM5PWMaxFailure           int32 = 0x100000
+	KADM5PWFailureCountInterval int32 = 0x200000
+	KADM5PWLockoutDuration      int32 = 0x400000
+	KADM5PolicyAttributes       int32 = 0x800000
+	KADM5PolicyMaxLife          int32 = 0x01000000
+	KADM5PolicyMaxRenewableLife int32 = 0x02000000
+	KADM5PolicyAllowedKeysalts  int32 = 0x04000000
+	KADM5PolicyTLData           int32 = 0x08000000
+)
+
 // PrincipalEntry is the safe subset of a kadm5 principal entry returned by
 // GET_PRINCIPAL.  The wire record contains additional administrative fields.
 type PrincipalEntry struct {
-	Principal  principal.Principal
-	Attributes int32
-	KVNO       uint32
+	Principal        principal.Principal
+	PrincExpireTime  int32
+	LastPwdChange    int32
+	PWExpiration     int32
+	MaxLife          int32
+	Attributes       int32
+	KVNO             uint32
+	MKVNO            uint32
+	Policy           string
+	AuxAttributes    int32
+	MaxRenewableLife int32
+	LastSuccess      int32
+	LastFailed       int32
+	FailAuthCount    uint32
+}
+
+// Key is a keyblock returned by RandKey. Key material is returned to the
+// caller and is never logged by this package.
+type Key struct {
+	Enctype int32
+	Key     []byte
+}
+
+// Policy is the safe common subset of an MIT kadm5 policy entry.
+type Policy struct {
+	Name                 string
+	MinLife              int32
+	MaxLife              int32
+	MinLength            int32
+	MinClasses           int32
+	HistoryNum           int32
+	MaxFailure           uint32
+	FailureCountInterval int32
+	LockoutDuration      int32
+	Attributes           int32
+	MaxTicketLife        int32
+	MaxRenewableLife     int32
 }
 
 // Client is a pure-Go client for the MIT kadmind RPC service.
@@ -109,7 +199,8 @@ func (c *Client) GetPrincipal(ctx context.Context, p principal.Principal) (Princ
 	body := xdrWriter{}
 	body.u32(c.API)
 	body.principal(p)
-	body.i32(0x000001 | 0x000010)
+	body.i32(KADM5Principal | KADM5PrincExpireTime | KADM5Attributes |
+		KADM5MaxLife | KADM5MaxRenewableLife | KADM5Policy)
 	reply, err := c.call(ctx, getPrincipal, body.bytes())
 	if err != nil {
 		return PrincipalEntry{}, err
@@ -127,10 +218,7 @@ func (c *Client) GetPrincipal(ctx context.Context, p principal.Principal) (Princ
 		return PrincipalEntry{}, fmt.Errorf("kadm5: unsupported reply API %#x", api)
 	}
 	if code != 0 {
-		if code == 43787529 || code == 43787532 || code == 43787534 || code == 43787535 {
-			return PrincipalEntry{}, ErrNotFound
-		}
-		return PrincipalEntry{}, fmt.Errorf("kadm5: GET_PRINCIPAL failed with code %d", code)
+		return PrincipalEntry{}, operationError("GET_PRINCIPAL", code)
 	}
 	entry, err := decodeEntry(&r, c.API)
 	if err != nil {
@@ -187,7 +275,7 @@ func (c *Client) genericCall(ctx context.Context, proc uint32, body []byte) erro
 		return fmt.Errorf("kadm5: unsupported reply API %#x", api)
 	}
 	if code != 0 {
-		return fmt.Errorf("kadm5: RPC operation failed with code %d", code)
+		return operationError("RPC operation", code)
 	}
 	return r.done()
 }
@@ -568,10 +656,21 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	for i := 0; i < 4; i++ {
-		if _, e = r.i32(); e != nil {
-			return PrincipalEntry{}, e
-		}
+	expire, e := r.i32()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	lastPwd, e := r.i32()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	pwExpire, e := r.i32()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	maxLife, e := r.i32()
+	if e != nil {
+		return PrincipalEntry{}, e
 	}
 	has, e := r.boolean()
 	if e != nil {
@@ -582,7 +681,7 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 			return PrincipalEntry{}, e
 		}
 	}
-	if _, e = r.i32(); e != nil {
+	if _, e = r.i32(); e != nil { // modification time
 		return PrincipalEntry{}, e
 	}
 	attrs, e := r.i32()
@@ -593,28 +692,43 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	if _, e = r.u32(); e != nil {
+	mkvno, e := r.u32()
+	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	if _, e = r.nullString(); e != nil {
+	policy, e := r.nullString()
+	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	if _, e = r.i32(); e != nil {
+	aux, e := r.i32()
+	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	if _, e = r.i32(); e != nil {
+	maxRenew, e := r.i32()
+	if e != nil {
 		return PrincipalEntry{}, e
 	}
-	for i := 0; i < 3; i++ {
-		if _, e = r.i32(); e != nil {
-			return PrincipalEntry{}, e
-		}
-	}
-	if _, e = r.i16(); e != nil {
+	if _, e = r.i32(); e != nil { // last success
 		return PrincipalEntry{}, e
 	}
-	if _, e = r.i16(); e != nil {
+	lastFailed, e := r.i32()
+	if e != nil {
 		return PrincipalEntry{}, e
+	}
+	failCount, e := r.u32()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	nKeyData, e := r.i16()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	nTLData, e := r.i16()
+	if e != nil {
+		return PrincipalEntry{}, e
+	}
+	if nKeyData < 0 || nTLData < 0 {
+		return PrincipalEntry{}, errors.New("kadm5: negative principal data count")
 	}
 	more, e := r.boolean()
 	if e != nil {
@@ -659,29 +773,60 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 			}
 		}
 	}
-	return PrincipalEntry{Principal: p, Attributes: attrs, KVNO: kvno}, nil
+	return PrincipalEntry{
+		Principal: p, PrincExpireTime: expire, LastPwdChange: lastPwd,
+		PWExpiration: pwExpire, MaxLife: maxLife, Attributes: attrs,
+		KVNO: kvno, MKVNO: mkvno, Policy: policy, AuxAttributes: aux,
+		MaxRenewableLife: maxRenew, LastFailed: lastFailed,
+		FailAuthCount: failCount,
+	}, nil
 }
 
 func writeEmptyEntry(w *xdrWriter, p principal.Principal) {
+	writeEntry(w, PrincipalEntry{Principal: p}, 0)
+}
+
+func writeEntry(w *xdrWriter, entry PrincipalEntry, mask int32) {
+	p := entry.Principal
 	w.principal(p)
-	for i := 0; i < 4; i++ {
-		w.i32(0)
-	}
+	w.i32(entry.PrincExpireTime)
+	w.i32(entry.LastPwdChange)
+	w.i32(entry.PWExpiration)
+	w.i32(entry.MaxLife)
 	w.boolean(true)
 	w.i32(0)
-	w.i32(0)
-	w.i32(0)
-	w.i32(0)
-	w.nullString("")
-	w.i32(0)
-	w.i32(0)
-	w.i32(0)
-	w.i32(0)
-	w.i32(0)
+	w.i32(entry.Attributes)
+	w.u32(entry.KVNO)
+	w.u32(entry.MKVNO)
+	if mask&KADM5Policy != 0 && mask&KADM5PolicyClear == 0 {
+		w.nullString(entry.Policy)
+	} else {
+		w.nullString("")
+	}
+	w.i32(entry.AuxAttributes)
+	w.i32(entry.MaxRenewableLife)
+	w.i32(entry.LastSuccess)
+	w.i32(entry.LastFailed)
+	w.u32(entry.FailAuthCount)
 	w.i16(0)
 	w.i16(0)
 	w.boolean(true)
 	w.u32(0)
+}
+
+func operationError(operation string, code uint32) error {
+	switch code {
+	case 43787527:
+		return fmt.Errorf("kadm5: %s: %w", operation, ErrDuplicate)
+	case 43787529, 43787532, 43787534, 43787535:
+		return fmt.Errorf("kadm5: %s: %w", operation, ErrNotFound)
+	case 43787533:
+		return fmt.Errorf("kadm5: %s: %w", operation, ErrUnknownPolicy)
+	case 43787547:
+		return fmt.Errorf("kadm5: %s: %w", operation, ErrPolicyInUse)
+	default:
+		return fmt.Errorf("kadm5: %s failed with code %d", operation, code)
+	}
 }
 
 type xdrWriter struct{ b bytes.Buffer }
