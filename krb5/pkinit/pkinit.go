@@ -246,7 +246,7 @@ func (c *Client) SharedKeyWithNonces(serverPublic []byte, enctype int32, clientN
 		return nil, errors.New("pkinit: incomplete DH state")
 	}
 	y := new(big.Int).SetBytes(serverPublic)
-	if y.Sign() <= 0 || y.Cmp(group14P) >= 0 {
+	if !validDHPublicValue(y) {
 		return nil, errors.New("pkinit: invalid DH public value")
 	}
 	shared := new(big.Int).Exp(y, c.Private, group14P).Bytes()
@@ -312,10 +312,18 @@ func parseSPKIPublicValue(data []byte) (*big.Int, error) {
 	}
 	integerDER := bits[1:]
 	value, err := parseInteger(integerDER)
-	if err != nil || value.Sign() <= 0 || value.Cmp(group14P) >= 0 {
+	if err != nil || !validDHPublicValue(value) {
 		return nil, errors.New("pkinit: invalid client DH public value")
 	}
 	return value, nil
+}
+
+func validDHPublicValue(value *big.Int) bool {
+	if value == nil {
+		return false
+	}
+	return value.Cmp(big.NewInt(1)) > 0 &&
+		value.Cmp(new(big.Int).Sub(group14P, big.NewInt(1))) < 0
 }
 
 // VerifyPAASRep verifies a PA-PK-AS-REP and derives its DH reply key.
@@ -917,7 +925,7 @@ func parseExplicitBitStringInteger(v []byte) (*big.Int, error) {
 		return nil, errors.New("DH public value is too large")
 	}
 	value, err := parseInteger(integerDER)
-	if err != nil || value.Sign() <= 0 || value.Cmp(group14P) >= 0 {
+	if err != nil || !validDHPublicValue(value) {
 		return nil, errors.New("invalid DH public value")
 	}
 	return value, nil

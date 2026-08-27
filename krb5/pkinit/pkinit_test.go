@@ -134,8 +134,54 @@ func TestDHSharedKeyRejectsInvalidPublicValue(t *testing.T) {
 	if _, err := client.SharedKey([]byte{0}, crypto.EnctypeAES256SHA1); err == nil {
 		t.Fatal("zero DH public value accepted")
 	}
+	if _, err := client.SharedKey([]byte{1}, crypto.EnctypeAES256SHA1); err == nil {
+		t.Fatal("one DH public value accepted")
+	}
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	if _, err := client.SharedKey(pMinusOne.Bytes(), crypto.EnctypeAES256SHA1); err == nil {
+		t.Fatal("order-two DH public value accepted")
+	}
 	if _, err := client.SharedKey(group14P.Bytes(), crypto.EnctypeAES256SHA1); err == nil {
 		t.Fatal("out-of-range DH public value accepted")
+	}
+}
+
+func TestBuildPAASRepRejectsDegenerateClientPublicValues(t *testing.T) {
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	for _, value := range []*big.Int{big.NewInt(1), pMinusOne} {
+		if _, _, err := BuildPAASRep(marshalSPKI(value),
+			crypto.EnctypeAES256SHA1, 42, kdcCert, kdcKey); err == nil {
+			t.Fatalf("client DH public value %v accepted", value)
+		}
+	}
+}
+
+func TestVerifyPAASRepRejectsDegenerateServerPublicValues(t *testing.T) {
+	clientCert, clientKey := testCertificate(t)
+	client, err := NewClient(clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	for _, value := range []*big.Int{big.NewInt(1), pMinusOne} {
+		dhInfo := derSeq(
+			derExplicit(0, derBitString(derIntBig(value))),
+			derExplicit(1, derInt(42)),
+		)
+		signed, err := signCMSWithContentType(dhInfo,
+			asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 2}, kdcCert, kdcKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := derExplicit(0, derSeq(derImplicitOctet(0, signed)))
+		if _, err := client.VerifyPAASRep(data, nil,
+			crypto.EnctypeAES256SHA1, 42); err == nil {
+			t.Fatalf("server DH public value %v accepted", value)
+		}
 	}
 }
 
