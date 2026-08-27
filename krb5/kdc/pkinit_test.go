@@ -1,0 +1,286 @@
+package kdc
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"math/big"
+	"testing"
+	"time"
+
+	krb5asn1 "github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/pkinit"
+	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
+)
+
+func TestServerPKINITASExchange(t *testing.T) {
+	now := time.Unix(2000001000, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	credentials, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots)
+	if err != nil {
+		t.Fatalf("PKINIT AS exchange: %v", err)
+	}
+	if !samePrincipal(credentials.Client, user) {
+		t.Fatalf("PKINIT client = %v, want %v", credentials.Client, user)
+	}
+}
+
+func TestServerPKINITRejectsUntrustedClient(t *testing.T) {
+	now := time.Unix(2000001010, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, _, _ := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITClientCAs = roots
+	_, _, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	_, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots)
+	if err == nil || !hasKRBCode(err, kdcErrClientNotTrusted) {
+		t.Fatalf("untrusted PKINIT client error = %v, want KDC error %d", err, kdcErrClientNotTrusted)
+	}
+}
+
+func TestServerPKINITRejectsMissingCTime(t *testing.T) {
+	now := time.Unix(2000001020, 0).UTC()
+	server, _ := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 12)
+	bodyDER := mustMarshal(t, request.ReqBody)
+	pa, _, err := pkinit.BuildPAASReq(bodyDER, time.Time{}, request.ReqBody.Nonce, clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{pa}
+	var kerberosError protocol.KRBError
+	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatalf("missing ctime response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrPreauthFailed {
+		t.Fatalf("missing ctime code = %d, want %d", kerberosError.ErrorCode, kdcErrPreauthFailed)
+	}
+}
+
+func TestServerPKINITFASTASExchange(t *testing.T) {
+	now := time.Unix(2000001030, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor AS exchange: %v", err)
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		t.Fatalf("new armor: %v", err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 13)
+	bodyDER := mustMarshal(t, request.ReqBody)
+	pa, pkClient, err := pkinit.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce, clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastData, err := armor.WrapASReq(request.ReqBody, protocol.MethodData{pa})
+	if err != nil {
+		t.Fatalf("wrap FAST PKINIT request: %v", err)
+	}
+	request.PAData = protocol.MethodData{fastData}
+	var reply protocol.ASRep
+	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
+		t.Fatalf("FAST PKINIT response: %v", err)
+	}
+	ticketDER := mustMarshal(t, reply.Ticket)
+	fastReply, err := armor.UnwrapReply(reply.PAData, ticketDER, request.ReqBody.Nonce)
+	if err != nil {
+		t.Fatalf("unwrap FAST PKINIT response: %v", err)
+	}
+	var pkReply []byte
+	for _, item := range fastReply.PAData {
+		if item.PADataType == pkinit.PADataASRep {
+			pkReply = item.PADataValue
+			break
+		}
+	}
+	if len(pkReply) == 0 {
+		t.Fatal("FAST response omitted PA-PK-AS-REP")
+	}
+	dhKey, err := pkClient.VerifyPAASRep(pkReply, roots, reply.EncPart.EType, request.ReqBody.Nonce)
+	if err != nil {
+		t.Fatalf("verify FAST PKINIT reply: %v", err)
+	}
+	effectiveKey, err := armor.ReplyKey(protocol.EncryptionKey{
+		KeyType: reply.EncPart.EType, KeyValue: dhKey,
+	}, fastReply.StrengthenKey)
+	if err != nil {
+		t.Fatalf("derive FAST PKINIT reply key: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := etype.Decrypt(effectiveKey.KeyValue, 3, reply.EncPart.Cipher); err != nil {
+		t.Fatalf("decrypt FAST PKINIT AS-REP: %v", err)
+	}
+}
+
+func TestServerPKINITKeylessPrincipal(t *testing.T) {
+	now := time.Unix(2000001040, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	server.DB = keylessPKINITStore{base: server.DB, client: user}
+
+	credentials, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots)
+	if err != nil {
+		t.Fatalf("keyless PKINIT AS exchange: %v", err)
+	}
+	if !samePrincipal(credentials.Client, user) {
+		t.Fatalf("keyless PKINIT client = %v, want %v", credentials.Client, user)
+	}
+}
+
+type keylessPKINITStore struct {
+	base   kdb.Store
+	client principal.Principal
+}
+
+func (s keylessPKINITStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool, error) {
+	if samePrincipal(name, s.client) {
+		return kdb.PrincipalRecord{Name: s.client, Keys: map[int32]kdb.Key{}}, true, nil
+	}
+	return s.base.Lookup(name)
+}
+
+func makePKINITTestCertificate(t *testing.T, component, realm string, kdc bool) (*x509.Certificate, *rsa.PrivateKey, *x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(100), Subject: pkix.Name{CommonName: "PKINIT CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key := makePKINITTestCertificateWithCA(t, ca, caKey, component, realm, kdc)
+	return ca, caKey, cert, key
+}
+
+func makePKINITTestCertificateWithCA(t *testing.T, ca *x509.Certificate, caKey *rsa.PrivateKey, component, realm string, kdc bool) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	components := []string{component}
+	nameType := int64(1)
+	eku := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4}
+	if kdc {
+		components = append(components, realm)
+		nameType = 2
+		eku = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5}
+	}
+	nameParts := make([][]byte, 0, len(components))
+	for _, value := range components {
+		nameParts = append(nameParts, testGeneralString(value))
+	}
+	principalDER := testSequence(
+		testExplicit(0, testGeneralString(realm)),
+		testExplicit(1, testSequence(
+			testExplicit(0, testInteger(nameType)),
+			testExplicit(1, testSequence(nameParts...)),
+		)),
+	)
+	otherName := testContext(0, append(
+		testOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 2}),
+		testContext(0, principalDER)...,
+	))
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(101), Subject: pkix.Name{CommonName: component},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, UnknownExtKeyUsage: []asn1.ObjectIdentifier{eku},
+		ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: testSequence(otherName)}},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert, key
+}
+
+func testTLV(tag byte, content []byte) []byte {
+	return append(append([]byte{tag, byte(len(content))}, content...), nil...)
+}
+
+func testSequence(values ...[]byte) []byte {
+	var content []byte
+	for _, value := range values {
+		content = append(content, value...)
+	}
+	return testTLV(0x30, content)
+}
+
+func testExplicit(tag int, value []byte) []byte { return testTLV(0xa0|byte(tag), value) }
+func testContext(tag int, value []byte) []byte  { return testTLV(0xa0|byte(tag), value) }
+func testGeneralString(value string) []byte     { return testTLV(0x1b, []byte(value)) }
+func testInteger(value int64) []byte            { return testTLV(0x02, []byte{byte(value)}) }
+func testOID(value asn1.ObjectIdentifier) []byte {
+	encoded, _ := asn1.Marshal(value)
+	return encoded
+}

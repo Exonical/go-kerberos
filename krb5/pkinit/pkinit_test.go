@@ -134,8 +134,54 @@ func TestDHSharedKeyRejectsInvalidPublicValue(t *testing.T) {
 	if _, err := client.SharedKey([]byte{0}, crypto.EnctypeAES256SHA1); err == nil {
 		t.Fatal("zero DH public value accepted")
 	}
+	if _, err := client.SharedKey([]byte{1}, crypto.EnctypeAES256SHA1); err == nil {
+		t.Fatal("one DH public value accepted")
+	}
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	if _, err := client.SharedKey(pMinusOne.Bytes(), crypto.EnctypeAES256SHA1); err == nil {
+		t.Fatal("order-two DH public value accepted")
+	}
 	if _, err := client.SharedKey(group14P.Bytes(), crypto.EnctypeAES256SHA1); err == nil {
 		t.Fatal("out-of-range DH public value accepted")
+	}
+}
+
+func TestBuildPAASRepRejectsDegenerateClientPublicValues(t *testing.T) {
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	for _, value := range []*big.Int{big.NewInt(1), pMinusOne} {
+		if _, _, err := BuildPAASRep(marshalSPKI(value),
+			crypto.EnctypeAES256SHA1, 42, kdcCert, kdcKey); err == nil {
+			t.Fatalf("client DH public value %v accepted", value)
+		}
+	}
+}
+
+func TestVerifyPAASRepRejectsDegenerateServerPublicValues(t *testing.T) {
+	clientCert, clientKey := testCertificate(t)
+	client, err := NewClient(clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	pMinusOne := new(big.Int).Sub(group14P, big.NewInt(1))
+	for _, value := range []*big.Int{big.NewInt(1), pMinusOne} {
+		dhInfo := derSeq(
+			derExplicit(0, derBitString(derIntBig(value))),
+			derExplicit(1, derInt(42)),
+		)
+		signed, err := signCMSWithContentType(dhInfo,
+			asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 2}, kdcCert, kdcKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := derExplicit(0, derSeq(derImplicitOctet(0, signed)))
+		if _, err := client.VerifyPAASRep(data, nil,
+			crypto.EnctypeAES256SHA1, 42); err == nil {
+			t.Fatalf("server DH public value %v accepted", value)
+		}
 	}
 }
 
@@ -159,6 +205,116 @@ func TestPAASReqChecksumAndNonce(t *testing.T) {
 	if _, err := VerifyPAASReq(append(append([]byte(nil), pa.PADataValue...), 0), body); err == nil {
 		t.Fatal("trailing PA-PK-AS-REQ data accepted")
 	}
+}
+
+func TestBuildPAASRepRoundTrip(t *testing.T) {
+	clientCert, clientKey := testCertificate(t)
+	client, err := NewClient(clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST", asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	pa, replyKey, err := BuildPAASRep(marshalSPKI(client.Public), crypto.EnctypeAES256SHA1, 42, kdcCert, kdcKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pa.PADataType != PADataASRep || len(replyKey) == 0 {
+		t.Fatalf("PA-PK-AS-REP = %#v, key length %d", pa, len(replyKey))
+	}
+	derivedKey, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(derivedKey) != string(replyKey) {
+		t.Fatal("client and KDC DH reply keys differ")
+	}
+}
+
+func TestValidateClientCertificate(t *testing.T) {
+	cert, _, roots := testPKINITCertificateWithCA(t, "alice", "PKINIT.TEST", asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4})
+	if err := ValidateClientCertificate(cert, roots, "PKINIT.TEST", []string{"alice"}); err != nil {
+		t.Fatalf("validate client certificate: %v", err)
+	}
+	if err := ValidateClientCertificate(cert, roots, "PKINIT.TEST", []string{"bob"}); err == nil {
+		t.Fatal("client SAN mismatch accepted")
+	}
+	invalid := *cert
+	invalid.UnknownExtKeyUsage = nil
+	if err := ValidateClientCertificate(&invalid, roots, "PKINIT.TEST", []string{"alice"}); err == nil {
+		t.Fatal("client certificate without EKU accepted")
+	}
+	otherCA, _, _ := testPKINITCertificateWithCA(t, "alice", "PKINIT.TEST", asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4})
+	if err := ValidateClientCertificate(otherCA, roots, "PKINIT.TEST", []string{"alice"}); err == nil {
+		t.Fatal("untrusted client certificate accepted")
+	}
+}
+
+func testPKINITCertificate(t testing.TB, component, realm string, eku asn1.ObjectIdentifier) (*x509.Certificate, *rsa.PrivateKey) {
+	cert, key, _ := testPKINITCertificateWithCA(t, component, realm, eku)
+	return cert, key
+}
+
+func testPKINITCertificateWithCA(t testing.TB, component, realm string, eku asn1.ObjectIdentifier) (*x509.Certificate, *rsa.PrivateKey, *x509.CertPool) {
+	t.Helper()
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(100), Subject: pkix.Name{CommonName: "PKINIT CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nameType := int64(1)
+	components := []string{component}
+	if component == "krbtgt" {
+		nameType = 2
+		components = []string{component, realm}
+	}
+	nameParts := make([][]byte, 0, len(components))
+	for _, value := range components {
+		nameParts = append(nameParts, der(0x1b, []byte(value)))
+	}
+	principalDER := derSeq(
+		derExplicit(0, der(0x1b, []byte(realm))),
+		derExplicit(1, derSeq(
+			derExplicit(0, derInt(nameType)),
+			derExplicit(1, derSeq(nameParts...)),
+		)),
+	)
+	otherName := der(0xa0, append(
+		derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 2}),
+		der(0xa0, principalDER)...,
+	))
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(101), Subject: pkix.Name{CommonName: component},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, UnknownExtKeyUsage: []asn1.ObjectIdentifier{eku},
+		ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: derSeq(otherName)}},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	return cert, key, roots
 }
 
 func TestValidateKDCSAN(t *testing.T) {

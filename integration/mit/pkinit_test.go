@@ -20,6 +20,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/kdc"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -139,6 +141,111 @@ func TestGoClientPKINITAgainstMITKDC(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("MIT klist PKINIT:\n%s", out)
+}
+
+func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
+	for _, name := range []string{"/usr/bin/openssl", "/usr/bin/kinit"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Skipf("PKINIT harness skipped: missing %s", name)
+		}
+	}
+	dir := t.TempDir()
+	realm := "GOKDC.PKINIT.TEST"
+	if err := generatePKINITFixtures(t, dir, realm); err != nil {
+		t.Skipf("PKINIT certificate generation failed: %v", err)
+	}
+	roots := x509.NewCertPool()
+	caPEM, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(pemDecodePK(t, caPEM, "CERTIFICATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots.AddCert(ca)
+	kdcPEM, err := os.ReadFile(filepath.Join(dir, "kdc.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcCert, err := x509.ParseCertificate(pemDecodePK(t, kdcPEM, "CERTIFICATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcKeyPEM, err := os.ReadFile(filepath.Join(dir, "kdc.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcKey := parsePKRSAKey(t, kdcKeyPEM)
+	db := kdb.NewDatabase(realm)
+	for _, item := range []struct {
+		name, password string
+	}{
+		{"alice", "alice-password"},
+		{"krbtgt/" + realm, "krbtgt-password"},
+	} {
+		if err := db.AddPrincipal(item.name, item.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := &kdc.Server{
+		Realm: realm, DB: db, MaxTicketLife: 10 * time.Hour,
+		MaxRenewableLife: 24 * time.Hour, PKINITCertificate: kdcCert,
+		PKINITSigner: kdcKey, PKINITClientCAs: roots,
+	}
+	port := freeTestPort(t)
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcp, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		udp.Close()
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := make(chan error, 1)
+	go func() { errs <- server.ListenAndServe(ctx, udp, tcp) }()
+	t.Cleanup(func() {
+		cancel()
+		_ = udp.Close()
+		_ = tcp.Close()
+		select {
+		case <-errs:
+		case <-time.After(time.Second):
+		}
+	})
+	conf := filepath.Join(dir, "gokdc-krb5.conf")
+	writePKFile(t, conf, fmt.Sprintf("[libdefaults]\n default_realm = %s\n dns_lookup_kdc = false\n dns_lookup_realm = false\n pkinit_anchors = FILE:%s\n pkinit_identities = FILE:%s,%s\n[realms]\n %s = {\n  kdc = 127.0.0.1:%d\n  pkinit_anchors = FILE:%s\n  pkinit_identities = FILE:%s,%s\n }\n", realm, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice.crt"), filepath.Join(dir, "alice.key"), realm, port, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice.crt"), filepath.Join(dir, "alice.key")))
+	cache := filepath.Join(dir, "gokdc.ccache")
+	trace := filepath.Join(dir, "gokdc-trace")
+	out, err := runPK(append(os.Environ(), "KRB5_CONFIG="+conf, "KRB5_TRACE="+trace), "", "/usr/bin/kinit", "-X", "X509_user_identity=FILE:"+filepath.Join(dir, "alice.crt")+","+filepath.Join(dir, "alice.key"), "-c", cache, "alice@"+realm)
+	if err != nil {
+		traceData, _ := os.ReadFile(trace)
+		t.Fatalf("MIT kinit against Go KDC: %v\noutput: %s\ntrace: %s", err, out, traceData)
+	}
+}
+
+func parsePKRSAKey(t *testing.T, data []byte) *rsa.PrivateKey {
+	t.Helper()
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatal("invalid private key PEM")
+	}
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err == nil {
+		return key
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatal("private key is not RSA")
+	}
+	return key
 }
 
 func generatePKINITFixtures(t *testing.T, dir, realm string) error {

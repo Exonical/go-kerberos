@@ -22,7 +22,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump) | unit + golden | MIT pass (master enctypes 17/18/19/20) | read-only |
 | AP exchange | RED | RED | RED |
-| PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
+| PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -64,7 +64,15 @@ MIT `kvno` FAST-TGS interoperability: its trace contains
 is accepted by the Go KDC. MIT FAST AS interoperability remains covered by
 `kinit -T`.
 
-The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
+The PKINIT implementation supports the RFC 4556 Diffie-Hellman profile on
+both the client and Go KDC. The KDC validates the client certificate chain,
+the id-pkinit-KPClientAuth EKU, and the Kerberos principal SAN before signing
+the DH reply and encrypting the AS-REP with the DH-derived reply key. Coverage
+includes Go client ↔ Go KDC, Go client ↔ MIT KDC, and a live MIT
+client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
+available. The implementation currently uses the RFC 3526 MODP group 14
+profile and does not implement group 2 negotiation or newer algorithm-agility
+KDF profiles.
 using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.
 
 ## Testing layers
