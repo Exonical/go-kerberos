@@ -399,7 +399,7 @@ func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, 
 		return nil, nil, errors.New("pkinit: missing CMS signer")
 	}
 	si, err := sequenceFields(infos[0])
-	if err != nil || len(si) < 5 {
+	if err != nil || len(si) < 6 {
 		return nil, nil, errors.New("pkinit: malformed CMS signer")
 	}
 	issuerSerial, err := sequenceFields(si[1])
@@ -503,17 +503,16 @@ func validateKDC(_ *x509.CertPool, cert *x509.Certificate) error {
 		return errors.New("pkinit: missing KDC certificate")
 	}
 	kdcEKU := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5}
+	hasKDCEKU := false
 	for _, oid := range cert.UnknownExtKeyUsage {
 		if oid.Equal(kdcEKU) {
-			return validateKDCSAN(cert)
+			hasKDCEKU = true
+			break
 		}
 	}
-	if len(cert.UnknownExtKeyUsage) > 0 {
+	if !hasKDCEKU {
 		return errors.New("pkinit: KDC certificate lacks id-pkinit-KPKdc EKU")
 	}
-	// Some MIT configurations intentionally relax EKU checking and omit the
-	// private PKINIT EKU. Chain validation remains mandatory when anchors are
-	// supplied. When the private EKU is present, the KDC SAN is checked below.
 	return validateKDCSAN(cert)
 }
 
@@ -652,24 +651,26 @@ func tlv(data []byte) (byte, []byte, error) {
 	if len(data) < 2 {
 		return 0, nil, errors.New("short DER")
 	}
-	n := 1
-	l := int(data[1])
-	if l&0x80 != 0 {
-		k := l & 0x7f
-		if k == 0 || len(data) < 2+k {
+	headerLen := 2
+	length := int(data[1])
+	if length&0x80 != 0 {
+		k := length & 0x7f
+		if k == 0 || k > len(data)-2 || k > int(^uint(0)>>1)/256 {
 			return 0, nil, errors.New("bad DER length")
 		}
-		l = 0
+		headerLen += k
+		length = 0
 		for i := 0; i < k; i++ {
-			l = l<<8 | int(data[2+i])
+			if length > (int(^uint(0)>>1)-int(data[2+i]))/256 {
+				return 0, nil, errors.New("bad DER length")
+			}
+			length = length*256 + int(data[2+i])
 		}
-		n += k
 	}
-	start := n + 1
-	if start+l > len(data) {
+	if length > len(data)-headerLen {
 		return 0, nil, errors.New("truncated DER")
 	}
-	return data[0], data[start : start+l], nil
+	return data[0], data[headerLen : headerLen+length], nil
 }
 func tlvContent(data []byte) ([]byte, error) { _, v, e := tlv(data); return v, e }
 func sequenceFields(data []byte) ([][]byte, error) {
@@ -701,15 +702,27 @@ func collectionFields(data []byte) ([][]byte, error) {
 	return out, nil
 }
 func readTLVLen(v []byte) (byte, []byte, int) {
+	if len(v) < 2 {
+		return 0, nil, 0
+	}
 	l := int(v[1])
 	n := 2
 	if l&0x80 != 0 {
 		k := l & 0x7f
+		if k == 0 || k > len(v)-2 || k > int(^uint(0)>>1)/256 {
+			return 0, nil, 0
+		}
 		l = 0
 		for i := 0; i < k; i++ {
+			if l > (int(^uint(0)>>1)-int(v[n+i]))/256 {
+				return 0, nil, 0
+			}
 			l = l<<8 | int(v[n+i])
 		}
 		n += k
+	}
+	if l > len(v)-n {
+		return 0, nil, 0
 	}
 	return v[0], v[n : n+l], n + l
 }
@@ -724,6 +737,9 @@ func parseExplicitBitStringInteger(v []byte) (*big.Int, error) {
 	bits, err := tlvContent(inner)
 	if err != nil || len(bits) < 1 || bits[0] != 0 {
 		return nil, errors.New("invalid DH bit string")
+	}
+	if len(bits)-1 > (group14P.BitLen()+7)/8 {
+		return nil, errors.New("DH public value is too large")
 	}
 	return parseInteger(bits[1:])
 }
