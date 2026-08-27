@@ -237,6 +237,61 @@ func (KRBError) ApplicationTag() int { return TagKRBError }
 
 type MethodData []PAData
 
+// FastOptions contains RFC 6113 FAST option bits.
+type FastOptions = types.KDCOptions
+
+// KrbFastArmor identifies the armor used by a FAST request.
+type KrbFastArmor struct {
+	ArmorType  int32  `krb5:"tag:0"`
+	ArmorValue []byte `krb5:"tag:1"`
+}
+
+// KrbFastArmoredReq contains an armored FAST request.
+type KrbFastArmoredReq struct {
+	Armor       *KrbFastArmor `krb5:"tag:0,optional"`
+	ReqChecksum Checksum      `krb5:"tag:1"`
+	EncFastReq  EncryptedData `krb5:"tag:2"`
+}
+
+// PAFXFastRequest is the PA-FX-FAST request choice payload.
+type PAFXFastRequest struct {
+	ArmoredData KrbFastArmoredReq `krb5:"tag:0,choice"`
+}
+
+// KrbFastReq is the encrypted inner FAST request.
+type KrbFastReq struct {
+	FastOptions FastOptions `krb5:"tag:0"`
+	PAData      MethodData  `krb5:"tag:1"`
+	ReqBody     KDCReqBody  `krb5:"tag:2"`
+}
+
+// KrbFastArmoredRep contains an armored FAST response.
+type KrbFastArmoredRep struct {
+	EncFastRep EncryptedData `krb5:"tag:0"`
+}
+
+// PAFXFastReply is the PA-FX-FAST reply choice payload.
+type PAFXFastReply struct {
+	ArmoredData KrbFastArmoredRep `krb5:"tag:0,choice"`
+}
+
+// KrbFastResponse is the encrypted FAST response.
+type KrbFastResponse struct {
+	PAData        MethodData       `krb5:"tag:0"`
+	StrengthenKey *EncryptionKey   `krb5:"tag:1,optional"`
+	Finished      *KrbFastFinished `krb5:"tag:2,optional"`
+	Nonce         uint32           `krb5:"tag:3"`
+}
+
+// KrbFastFinished authenticates a completed FAST reply.
+type KrbFastFinished struct {
+	Timestamp      types.KerberosTime `krb5:"tag:0"`
+	Usec           int32              `krb5:"tag:1"`
+	CRealm         string             `krb5:"tag:2"`
+	CName          PrincipalName      `krb5:"tag:3"`
+	TicketChecksum Checksum           `krb5:"tag:4"`
+}
+
 type ETypeInfoEntry struct {
 	EType int32   `krb5:"tag:0"`
 	Salt  *[]byte `krb5:"tag:1,optional"`

@@ -168,6 +168,51 @@ func TestGoClientASExchange(t *testing.T) {
 	}
 }
 
+func TestGoClientFASTASExchange(t *testing.T) {
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	kclient := &client.Client{Config: cfg, Now: func() time.Time { return now }}
+	armorTGT, err := kclient.ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go armor AS exchange: %v", err)
+	}
+	credentials, err := kclient.ASExchangeFAST(context.Background(), clientPrincipal, "alice-password", armorTGT)
+	if err != nil {
+		t.Fatalf("Go FAST AS exchange: %v", err)
+	}
+	outputPath := filepath.Join(realm.Dir, "go-client-fast.ccache")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatalf("create Go FAST ccache: %v", err)
+	}
+	cache := &ccache.Cache{
+		DefaultPrincipal: clientPrincipal,
+		Credentials:      []ccache.Credential{credentials.ToCCacheCredential()},
+	}
+	if err := ccache.Write(output, cache); err != nil {
+		output.Close()
+		t.Fatalf("write Go FAST ccache: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close Go FAST ccache: %v", err)
+	}
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
+	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
+		t.Fatalf("MIT klist does not contain FAST TGT:\n%s", listing)
+	}
+}
+
 func TestGoClientTGSExchange(t *testing.T) {
 	realm := testenv.Start(t)
 	configData, err := os.ReadFile(realm.Config)
