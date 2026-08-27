@@ -421,10 +421,13 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 		}
 		if len(realms) == 1 {
 			return makeTGSReply(t, profile, sessionKey, request.ReqBody.Nonce, now, referralKey,
-				"HOME", principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "OTHER"}})
+				"HOME", principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "OTHER"}}), nil
+		}
+		if request.ReqBody.KDCOptions&types.KDCCanonicalize == 0 {
+			t.Fatalf("referral request options = %#x, canonicalize is not set", request.ReqBody.KDCOptions)
 		}
 		return makeTGSReply(t, profile, referralKey, request.ReqBody.Nonce, now, bytes.Repeat([]byte{0x33}, profile.KeySize()),
-			"OTHER", principal.Principal{Realm: "OTHER", NameType: principal.NTSrvHst, Components: service.Components})
+			"OTHER", principal.Principal{Realm: "OTHER", NameType: principal.NTSrvHst, Components: service.Components}), nil
 	}
 	result, err := (&Client{Config: &config.Config{DefaultRealm: "HOME"}, Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(context.Background(), tgt, service)
 	if err != nil {
@@ -438,6 +441,23 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 	}
 }
 
+func TestServiceRealmUsesHostMapping(t *testing.T) {
+	cfg := &config.Config{
+		DefaultRealm: "HOME",
+		DomainRealm:  map[string]string{".other.test": "OTHER"},
+	}
+	service := principal.Principal{Components: []string{"host", "api.other.test"}}
+	realm, mapped := ServiceRealm(cfg, service)
+	if realm != "OTHER" || !mapped {
+		t.Fatalf("service realm = %q, mapped = %v", realm, mapped)
+	}
+	service.Realm = "EXPLICIT"
+	realm, mapped = ServiceRealm(cfg, service)
+	if realm != "EXPLICIT" || !mapped {
+		t.Fatalf("explicit service realm = %q, mapped = %v", realm, mapped)
+	}
+}
+
 func TestTGSExchangeRejectsReferralLoopAndHopCap(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
@@ -446,7 +466,7 @@ func TestTGSExchangeRejectsReferralLoopAndHopCap(t *testing.T) {
 	}
 	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
 	tgt := &Credentials{
-		Client: principal.Principal{Realm: "HOME", Components: []string{"alice"}},
+		Client: principal.Principal{Realm: "HOME", NameType: principal.NTPrincipal, Components: []string{"alice"}},
 		Server: principal.Principal{Realm: "HOME", Components: []string{"krbtgt", "HOME"}},
 		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
 		Ticket: mustMarshal(t, protocol.Ticket{TktVNO: 5, Realm: "HOME",
@@ -462,7 +482,7 @@ func TestTGSExchangeRejectsReferralLoopAndHopCap(t *testing.T) {
 				}
 				next := responseRealm(realm)
 				return makeTGSReply(t, profile, key, request.ReqBody.Nonce, now, key,
-					realm, principal.Principal{Realm: realm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", next}})
+					realm, principal.Principal{Realm: realm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", next}}), nil
 			}}
 	}
 	loop := makeClient(func(realm string) string {
