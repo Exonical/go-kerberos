@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -325,6 +327,208 @@ func TestRequestNonceFitsKerberosInteger(t *testing.T) {
 	if request.ReqBody.Nonce > 0x7fffffff {
 		t.Fatalf("nonce = %#x exceeds positive INTEGER range", request.ReqBody.Nonce)
 	}
+}
+
+func TestASExchangeCanonicalizeOption(t *testing.T) {
+	request, err := (&Client{Canonicalize: true}).newASReq(
+		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		time.Unix(0, 0).UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReqBody.KDCOptions&types.KDCCanonicalize == 0 {
+		t.Fatalf("KDC options = %#x, canonicalize is not set", request.ReqBody.KDCOptions)
+	}
+}
+
+func TestASExchangeCanonicalizeAcceptsReturnedName(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	requested := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	returned := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice-alias"}}
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := profile.StringToKey([]byte("password"), []byte(testRealm+"alice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.ASReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		partDER := mustMarshal(t, protocol.EncASRepPart{
+			Key:   protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+			Nonce: request.ReqBody.Nonce, AuthTime: kerberosTime(now),
+			EndTime: kerberosTime(now.Add(time.Hour)), SRealm: testRealm,
+			SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+		})
+		cipher, err := profile.Encrypt(key, 3, partDER)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return asn1.Marshal(protocol.ASRep{
+			PVNO: 5, MsgType: 11, CRealm: testRealm,
+			CName: protocol.PrincipalName{NameType: int32(returned.NameType), NameString: returned.Components},
+			Ticket: protocol.Ticket{
+				TktVNO: 5, Realm: testRealm,
+				SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+				EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+			},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
+		})
+	}
+	if _, err := (&Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(context.Background(), requested, "password"); err == nil {
+		t.Fatal("non-canonicalized name change unexpectedly accepted")
+	}
+	result, err := (&Client{Canonicalize: true, Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(context.Background(), requested, "password")
+	if err != nil {
+		t.Fatalf("canonicalized AS exchange: %v", err)
+	}
+	if result.Client.String() != returned.String() {
+		t.Fatalf("returned client = %s, want %s", result.Client, returned)
+	}
+}
+
+func TestTGSExchangeFollowsReferral(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	referralKey := bytes.Repeat([]byte{0x24}, profile.KeySize())
+	clientPrincipal := principal.Principal{Realm: "HOME", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := &Credentials{
+		Client: clientPrincipal,
+		Server: principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "HOME"}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: sessionKey},
+		Ticket: mustMarshal(t, protocol.Ticket{
+			TktVNO: 5, Realm: "HOME",
+			SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", "HOME"}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+		}),
+	}
+	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	var realms []string
+	exchange := func(_ context.Context, realm string, payload []byte) ([]byte, error) {
+		realms = append(realms, realm)
+		var request protocol.TGSReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		if len(realms) == 1 {
+			return makeTGSReply(t, profile, sessionKey, request.ReqBody.Nonce, now, referralKey,
+				"HOME", principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "OTHER"}}), nil
+		}
+		if request.ReqBody.KDCOptions&types.KDCCanonicalize == 0 {
+			t.Fatalf("referral request options = %#x, canonicalize is not set", request.ReqBody.KDCOptions)
+		}
+		return makeTGSReply(t, profile, referralKey, request.ReqBody.Nonce, now, bytes.Repeat([]byte{0x33}, profile.KeySize()),
+			"OTHER", principal.Principal{Realm: "OTHER", NameType: principal.NTSrvHst, Components: service.Components}), nil
+	}
+	result, err := (&Client{Config: &config.Config{DefaultRealm: "HOME"}, Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("TGS referral: %v", err)
+	}
+	if len(realms) != 2 || realms[0] != "HOME" || realms[1] != "OTHER" {
+		t.Fatalf("KDC realms = %#v", realms)
+	}
+	if result.Server.Realm != "OTHER" || result.Server.Components[0] != "host" {
+		t.Fatalf("result server = %s", result.Server)
+	}
+}
+
+func TestServiceRealmUsesHostMapping(t *testing.T) {
+	cfg := &config.Config{
+		DefaultRealm: "HOME",
+		DomainRealm:  map[string]string{".other.test": "OTHER"},
+	}
+	service := principal.Principal{Components: []string{"host", "api.other.test"}}
+	realm, mapped := ServiceRealm(cfg, service)
+	if realm != "OTHER" || !mapped {
+		t.Fatalf("service realm = %q, mapped = %v", realm, mapped)
+	}
+	service.Realm = "EXPLICIT"
+	realm, mapped = ServiceRealm(cfg, service)
+	if realm != "EXPLICIT" || !mapped {
+		t.Fatalf("explicit service realm = %q, mapped = %v", realm, mapped)
+	}
+}
+
+func TestTGSExchangeRejectsReferralLoopAndHopCap(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	tgt := &Credentials{
+		Client: principal.Principal{Realm: "HOME", NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		Server: principal.Principal{Realm: "HOME", Components: []string{"krbtgt", "HOME"}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		Ticket: mustMarshal(t, protocol.Ticket{TktVNO: 5, Realm: "HOME",
+			SName:   protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", "HOME"}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}}}),
+	}
+	makeClient := func(responseRealm func(string) string) *Client {
+		return &Client{Now: func() time.Time { return now }, Config: &config.Config{DefaultRealm: "HOME"},
+			Exchange: func(_ context.Context, realm string, payload []byte) ([]byte, error) {
+				var request protocol.TGSReq
+				if err := asn1.Unmarshal(payload, &request); err != nil {
+					t.Fatal(err)
+				}
+				next := responseRealm(realm)
+				return makeTGSReply(t, profile, key, request.ReqBody.Nonce, now, key,
+					realm, principal.Principal{Realm: realm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", next}}), nil
+			}}
+	}
+	loop := makeClient(func(realm string) string {
+		if realm == "HOME" {
+			return "OTHER"
+		}
+		return "HOME"
+	})
+	if _, err := loop.TGSExchange(context.Background(), tgt, principal.Principal{Components: []string{"host", "service.test"}}); err == nil || !strings.Contains(err.Error(), "loop") {
+		t.Fatalf("loop error = %v", err)
+	}
+	hop := 0
+	hops := makeClient(func(realm string) string {
+		hop++
+		return "R" + strconv.Itoa(hop)
+	})
+	if _, err := hops.TGSExchange(context.Background(), tgt, principal.Principal{Components: []string{"host", "service.test"}}); err == nil || !strings.Contains(err.Error(), "hop") {
+		t.Fatalf("hop cap error = %v", err)
+	}
+}
+
+func makeTGSReply(t *testing.T, profile crypto.EType, decryptKey []byte, nonce uint32, now time.Time, sessionKey []byte, realm string, server principal.Principal) []byte {
+	t.Helper()
+	partDER := mustMarshal(t, protocol.EncTGSRepPart{
+		Key:   protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: sessionKey},
+		Nonce: nonce, AuthTime: kerberosTime(now), EndTime: kerberosTime(now.Add(time.Hour)),
+		SRealm: server.Realm, SName: protocol.PrincipalName{NameType: int32(server.NameType), NameString: server.Components},
+	})
+	cipher, err := profile.Encrypt(decryptKey, 8, partDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticketDER := mustMarshal(t, protocol.Ticket{
+		TktVNO: 5, Realm: realm,
+		SName:   protocol.PrincipalName{NameType: int32(server.NameType), NameString: server.Components},
+		EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{2}},
+	})
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(ticketDER, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	return mustMarshal(t, protocol.TGSRep{
+		PVNO: 5, MsgType: 13, CRealm: "HOME",
+		CName:  protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
+		Ticket: ticket, EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
+	})
 }
 
 func kerberosTime(value time.Time) types.KerberosTime {

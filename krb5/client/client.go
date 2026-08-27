@@ -27,6 +27,9 @@ type Client struct {
 	Dialer   transport.Dialer
 	Now      func() time.Time
 	Exchange func(ctx context.Context, realm string, payload []byte) ([]byte, error)
+	// Canonicalize requests KDC canonicalization and permits the KDC to
+	// return a canonical client principal in an AS-REP.
+	Canonicalize bool
 }
 
 // Credentials contains the initial credentials returned by an AS exchange.
@@ -156,15 +159,8 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("TGS exchange: invalid service principal")
 	}
-	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
-	if err != nil {
-		return nil, err
-	}
-	var ticket protocol.Ticket
-	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
-		return nil, fmt.Errorf("TGS exchange ticket: %w", err)
-	}
-	realm := service.Realm
+	requestedService := service
+	realm, mapped := ServiceRealm(c.Config, service)
 	if realm == "" {
 		realm = tgt.Server.Realm
 	}
@@ -175,16 +171,69 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 		return nil, fmt.Errorf("TGS exchange: missing service realm")
 	}
 	service = serviceWithRealm(service, realm)
-	now := time.Now().UTC()
-	if c.Now != nil {
-		now = c.Now().UTC()
+	visited := make(map[string]bool)
+	currentTGT := tgt
+	for hops := 0; ; hops++ {
+		if visited[realm] {
+			return nil, fmt.Errorf("TGS exchange: referral realm loop at %s", realm)
+		}
+		if hops > 10 {
+			return nil, fmt.Errorf("TGS exchange: referral hop limit exceeded")
+		}
+		visited[realm] = true
+		now := time.Now().UTC()
+		if c.Now != nil {
+			now = c.Now().UTC()
+		}
+		request, nonce, err := c.newTGSReq(currentTGT, service, realm, now,
+			hops > 0 || (!mapped && requestedService.Realm == ""))
+		if err != nil {
+			return nil, err
+		}
+		response, err := c.exchangePayload(ctx, realm, request, "TGS exchange request")
+		if err != nil {
+			return nil, err
+		}
+		if kerberosError, ok := decodeKRBError(response); ok {
+			return nil, kerberosError
+		}
+		result, referral, err := c.decodeTGSRepForExchange(response, currentTGT.Client, service, requestedService, mapped, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now)
+		if err != nil {
+			return nil, err
+		}
+		if !referral {
+			return result, nil
+		}
+		if hops >= 10 {
+			return nil, fmt.Errorf("TGS exchange: referral hop limit exceeded")
+		}
+		if len(result.Server.Components) != 2 || result.Server.Components[0] != "krbtgt" {
+			return nil, fmt.Errorf("TGS exchange: malformed referral ticket")
+		}
+		nextRealm := result.Server.Components[1]
+		if nextRealm == "" {
+			return nil, fmt.Errorf("TGS exchange: referral ticket has empty realm")
+		}
+		currentTGT = result
+		realm = nextRealm
+	}
+}
+
+func (c *Client) newTGSReq(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool) (protocol.TGSReq, uint32, error) {
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		return protocol.TGSReq{}, 0, err
 	}
 	nonceBytes := make([]byte, 4)
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
-		return nil, fmt.Errorf("TGS exchange nonce: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange nonce: %w", err)
+	}
+	options := types.KDCRenewableOK
+	if c.canonicalizeEnabled() || referral {
+		options |= types.KDCCanonicalize
 	}
 	body := protocol.KDCReqBody{
-		KDCOptions: types.KDCRenewableOK,
+		KDCOptions: options,
 		Realm:      realm,
 		SName: &protocol.PrincipalName{
 			NameType: int32(service.NameType), NameString: append([]string(nil), service.Components...),
@@ -195,11 +244,11 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	}
 	bodyDER, err := asn1.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange request body: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange request body: %w", err)
 	}
 	checksum, err := etype.Checksum(tgt.Key.KeyValue, 6, bodyDER)
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange request checksum: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange request checksum: %w", err)
 	}
 	usec := int32(now.Nanosecond() / 1000)
 	authenticatorDER, err := asn1.Marshal(protocol.Authenticator{
@@ -214,67 +263,59 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 		Ctime: types.KerberosTime{Time: now, Microseconds: usec, Present: true},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange authenticator: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange authenticator: %w", err)
 	}
 	encryptedAuthenticator, err := etype.Encrypt(tgt.Key.KeyValue, 7, authenticatorDER)
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange authenticator encryption: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange authenticator encryption: %w", err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange ticket: %w", err)
 	}
 	apReqDER, err := asn1.Marshal(protocol.APReq{
-		PVNO:    5,
-		MsgType: 14,
-		Ticket:  ticket,
-		Authenticator: protocol.EncryptedData{
-			EType:  tgt.Key.KeyType,
-			Cipher: encryptedAuthenticator,
-		},
+		PVNO: 5, MsgType: 14, Ticket: ticket,
+		Authenticator: protocol.EncryptedData{EType: tgt.Key.KeyType, Cipher: encryptedAuthenticator},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange AP-REQ: %w", err)
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange AP-REQ: %w", err)
 	}
-	request := protocol.TGSReq{
-		PVNO:    5,
-		MsgType: 12,
+	return protocol.TGSReq{
+		PVNO: 5, MsgType: 12,
 		PAData:  protocol.MethodData{{PADataType: 1, PADataValue: apReqDER}},
 		ReqBody: body,
-	}
-	response, err := c.exchangePayload(ctx, realm, request, "TGS exchange request")
-	if err != nil {
-		return nil, err
-	}
-	if kerberosError, ok := decodeKRBError(response); ok {
-		return nil, kerberosError
-	}
-	return c.decodeTGSRep(response, tgt.Client, service, body.Nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+	}, body.Nonce, nil
 }
 
 func (c *Client) decodeTGSRep(data []byte, clientPrincipal, service principal.Principal, nonce uint32, keyType int32, key []byte, now time.Time) (*Credentials, error) {
+	result, _, err := c.decodeTGSRepForExchange(data, clientPrincipal, service, service, true, nonce, keyType, key, now)
+	return result, err
+}
+
+func (c *Client) decodeTGSRepForExchange(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, keyType int32, key []byte, now time.Time) (*Credentials, bool, error) {
 	var reply protocol.TGSRep
 	if err := asn1.Unmarshal(data, &reply); err != nil {
 		if kerberosError, ok := decodeKRBError(data); ok {
-			return nil, kerberosError
+			return nil, false, kerberosError
 		}
-		return nil, fmt.Errorf("TGS exchange TGS-REP: %w", err)
+		return nil, false, fmt.Errorf("TGS exchange TGS-REP: %w", err)
 	}
 	if reply.MsgType != 13 {
-		return nil, fmt.Errorf("TGS exchange: unexpected message type %d", reply.MsgType)
+		return nil, false, fmt.Errorf("TGS exchange: unexpected message type %d", reply.MsgType)
 	}
 	if reply.CRealm != clientPrincipal.Realm || !samePrincipal(reply.CName, clientPrincipal) {
-		return nil, fmt.Errorf("TGS exchange: TGS-REP client principal mismatch")
-	}
-	if reply.Ticket.Realm != service.Realm || !sameProtocolPrincipal(reply.Ticket.SName, service) {
-		return nil, fmt.Errorf("TGS exchange: TGS-REP service principal mismatch")
+		return nil, false, fmt.Errorf("TGS exchange: TGS-REP client principal mismatch")
 	}
 	if reply.EncPart.EType != keyType {
-		return nil, fmt.Errorf("TGS exchange TGS-REP enctype %d: %w", reply.EncPart.EType, krberrors.ErrUnsupportedEType)
+		return nil, false, fmt.Errorf("TGS exchange TGS-REP enctype %d: %w", reply.EncPart.EType, krberrors.ErrUnsupportedEType)
 	}
 	etype, err := crypto.NewRegistry().Get(keyType)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	plaintext, err := etype.Decrypt(key, 8, reply.EncPart.Cipher)
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange decrypt TGS-REP: %w", err)
+		return nil, false, fmt.Errorf("TGS exchange decrypt TGS-REP: %w", err)
 	}
 	if len(plaintext) > 0 && plaintext[0] == 0x79 {
 		plaintext = append([]byte(nil), plaintext...)
@@ -282,26 +323,35 @@ func (c *Client) decodeTGSRep(data []byte, clientPrincipal, service principal.Pr
 	}
 	var part protocol.EncTGSRepPart
 	if err := asn1.Unmarshal(plaintext, &part); err != nil {
-		return nil, fmt.Errorf("TGS exchange EncTGSRepPart: %w", err)
+		return nil, false, fmt.Errorf("TGS exchange EncTGSRepPart: %w", err)
 	}
 	if part.Nonce != nonce {
-		return nil, fmt.Errorf("TGS exchange: TGS-REP nonce mismatch")
+		return nil, false, fmt.Errorf("TGS exchange: TGS-REP nonce mismatch")
 	}
-	if part.SRealm != service.Realm || !sameProtocolPrincipal(part.SName, service) {
-		return nil, fmt.Errorf("TGS exchange: encrypted service principal mismatch")
+	referral := isReferralPrincipal(reply.Ticket.SName, requestedService)
+	if !referral {
+		if (serviceRealmKnown && (reply.Ticket.Realm != service.Realm || part.SRealm != service.Realm)) ||
+			!sameProtocolPrincipal(reply.Ticket.SName, service) ||
+			!sameProtocolPrincipal(part.SName, service) {
+			return nil, false, fmt.Errorf("TGS exchange: service principal mismatch")
+		}
+	} else if len(reply.Ticket.SName.NameString) != 2 {
+		return nil, false, fmt.Errorf("TGS exchange: malformed referral service principal")
 	}
 	if !validTimes(part.AuthTime, part.StartTime, part.EndTime, now, c.clockSkew()) {
-		return nil, fmt.Errorf("TGS exchange: %w", krberrors.ErrClockSkew)
+		return nil, false, fmt.Errorf("TGS exchange: %w", krberrors.ErrClockSkew)
 	}
 	ticket, err := asn1.Marshal(reply.Ticket)
 	if err != nil {
-		return nil, fmt.Errorf("TGS exchange ticket: %w", err)
+		return nil, false, fmt.Errorf("TGS exchange ticket: %w", err)
 	}
+	server := principalFromProtocol(reply.Ticket.SName)
+	server.Realm = reply.Ticket.Realm
 	return &Credentials{
-		Client: clientPrincipal, Server: service, Key: part.Key, Flags: part.Flags,
+		Client: clientPrincipal, Server: server, Key: part.Key, Flags: part.Flags,
 		AuthTime: part.AuthTime, StartTime: part.StartTime, EndTime: part.EndTime,
 		RenewTill: part.RenewTill, Ticket: ticket,
-	}, nil
+	}, referral, nil
 }
 
 func (c *Client) exchangePayload(ctx context.Context, realm string, request any, label string) ([]byte, error) {
@@ -348,6 +398,10 @@ func (c *Client) ticketLifetime() time.Duration {
 	return 10 * time.Hour
 }
 
+func (c *Client) canonicalizeEnabled() bool {
+	return c.Canonicalize || (c.Config != nil && c.Config.Canonicalize)
+}
+
 func (c *Client) requestEnctypes() []int32 {
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
 		return append([]int32(nil), c.Config.DefaultTKTEnctypes...)
@@ -382,6 +436,31 @@ func serviceWithRealm(value principal.Principal, realm string) principal.Princip
 	return value
 }
 
+// ServiceRealm resolves the target realm for a service principal. The bool
+// reports whether the realm came from the principal or an explicit mapping;
+// the configured default realm is a fallback for unmapped host services.
+func ServiceRealm(cfg *config.Config, service principal.Principal) (string, bool) {
+	if service.Realm != "" {
+		return service.Realm, true
+	}
+	if cfg != nil && len(service.Components) > 1 {
+		if realm, ok := cfg.RealmForHost(service.Components[1]); ok {
+			return realm, true
+		}
+	}
+	if cfg != nil && cfg.DefaultRealm != "" {
+		return cfg.DefaultRealm, false
+	}
+	return "", false
+}
+
+func isReferralPrincipal(value protocol.PrincipalName, requested principal.Principal) bool {
+	if len(value.NameString) != 2 || value.NameString[0] != "krbtgt" {
+		return false
+	}
+	return requested.Realm == "" || value.NameString[1] != requested.Realm
+}
+
 func randomNonce(value []byte) uint32 {
 	return binary.BigEndian.Uint32(value) & 0x7fffffff
 }
@@ -402,6 +481,9 @@ func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (p
 	options := types.KDCRenewableOK
 	if forwardable {
 		options |= types.KDCForwardable
+	}
+	if c.canonicalizeEnabled() {
+		options |= types.KDCCanonicalize
 	}
 	enctypes := []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
@@ -479,7 +561,7 @@ func (c *Client) decodeASRep(data []byte, clientPrincipal principal.Principal, n
 		return nil, fmt.Errorf("AS exchange: unexpected message type %d", reply.MsgType)
 	}
 	if reply.CRealm != clientPrincipal.Realm ||
-		!samePrincipal(reply.CName, clientPrincipal) {
+		(!samePrincipal(reply.CName, clientPrincipal) && !c.canonicalizeEnabled()) {
 		return nil, fmt.Errorf("AS exchange: AS-REP client principal mismatch")
 	}
 	if reply.EncPart.EType != etypeID {
@@ -525,8 +607,10 @@ func (c *Client) decodeASRep(data []byte, clientPrincipal principal.Principal, n
 	}
 	server := principalFromProtocol(reply.Ticket.SName)
 	server.Realm = reply.Ticket.Realm
+	returnedClient := principalFromProtocol(reply.CName)
+	returnedClient.Realm = reply.CRealm
 	return &Credentials{
-		Client: clientPrincipal, Server: server,
+		Client: returnedClient, Server: server,
 		Key: part.Key, Flags: part.Flags, AuthTime: part.AuthTime,
 		StartTime: part.StartTime, EndTime: part.EndTime,
 		RenewTill: part.RenewTill, Ticket: ticket,
