@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -63,5 +64,75 @@ func TestParseMITDurations(t *testing.T) {
 func TestConfigMalformedSection(t *testing.T) {
 	if _, err := Parse([]byte("[libdefaults\nfoo = bar")); err == nil {
 		t.Fatal("malformed section unexpectedly accepted")
+	}
+}
+
+func TestCapathRealmPath(t *testing.T) {
+	cfg, err := Parse([]byte(`[capaths]
+ A = {
+  C = B
+  C = .
+ }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cfg.RealmPath("A", "C"); err == nil {
+		t.Fatal("mixed direct and intermediate capath unexpectedly accepted")
+	}
+	cfg, err = Parse([]byte(`[capaths]
+ A = {
+  C = B
+  C = D
+ }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, ok, err := cfg.RealmPath("A", "C")
+	if err != nil || !ok {
+		t.Fatalf("RealmPath = %#v, %v, %v", path, ok, err)
+	}
+	if len(path) != 4 || path[0] != "A" || path[1] != "B" || path[2] != "D" || path[3] != "C" {
+		t.Fatalf("RealmPath = %#v", path)
+	}
+	cfg, err = Parse([]byte(`[capaths]
+ A = {
+  C = B
+ }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path, ok, err := cfg.RealmPath("A", "C"); err != nil || !ok ||
+		len(path) != 3 || path[1] != "B" {
+		t.Fatalf("single intermediate RealmPath = %#v, %v, %v", path, ok, err)
+	}
+}
+
+func TestCapathRealmPathRejectsLoopsAndExcessHops(t *testing.T) {
+	cfg := &Config{CapathOptions: map[string]map[string][]string{
+		"A": {"C": {"B", "A"}},
+	}}
+	if _, _, err := cfg.RealmPath("A", "C"); err == nil {
+		t.Fatal("capath loop unexpectedly accepted")
+	}
+	values := make([]string, 10)
+	for i := range values {
+		values[i] = fmt.Sprintf("R%d", i)
+	}
+	cfg.CapathOptions["A"]["C"] = values
+	if _, _, err := cfg.RealmPath("A", "C"); err == nil {
+		t.Fatal("excessive capath unexpectedly accepted")
+	}
+}
+
+func TestCapathRealmPathDirect(t *testing.T) {
+	cfg := &Config{CapathOptions: map[string]map[string][]string{
+		"A": {"C": {"."}},
+	}}
+	path, ok, err := cfg.RealmPath("A", "C")
+	if err != nil || !ok || len(path) != 2 || path[0] != "A" || path[1] != "C" {
+		t.Fatalf("direct RealmPath = %#v, %v, %v", path, ok, err)
 	}
 }

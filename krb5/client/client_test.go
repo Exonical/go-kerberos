@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -455,6 +456,59 @@ func TestServiceRealmUsesHostMapping(t *testing.T) {
 	realm, mapped = ServiceRealm(cfg, service)
 	if realm != "EXPLICIT" || !mapped {
 		t.Fatalf("explicit service realm = %q, mapped = %v", realm, mapped)
+	}
+}
+
+func TestTGSExchangeFollowsConfiguredCapath(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	tgt := &Credentials{
+		Client: principal.Principal{Realm: "HOME", NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		Server: principal.Principal{Realm: "HOME", Components: []string{"krbtgt", "HOME"}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		Ticket: mustMarshal(t, protocol.Ticket{TktVNO: 5, Realm: "HOME",
+			SName:   protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", "HOME"}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}}}),
+	}
+	var requests []string
+	cfg := &config.Config{
+		CapathOptions: map[string]map[string][]string{"HOME": {"OTHER": {"MIDDLE"}}},
+	}
+	c := &Client{
+		Config: cfg, Now: func() time.Time { return now },
+		Exchange: func(_ context.Context, realm string, payload []byte) ([]byte, error) {
+			var request protocol.TGSReq
+			if err := asn1.Unmarshal(payload, &request); err != nil {
+				t.Fatal(err)
+			}
+			requests = append(requests, realm+":"+strings.Join(request.ReqBody.SName.NameString, "/"))
+			var server principal.Principal
+			if realm == "HOME" {
+				server = principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "MIDDLE"}}
+			} else if realm == "MIDDLE" {
+				server = principal.Principal{Realm: "MIDDLE", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "OTHER"}}
+			} else {
+				server = principal.Principal{Realm: "OTHER", NameType: principal.NTSrvHst, Components: []string{"host", "service"}}
+			}
+			return makeTGSReply(t, profile, key, request.ReqBody.Nonce, now, key, realm, server), nil
+		},
+	}
+	result, err := c.TGSExchange(context.Background(), tgt, principal.Principal{
+		Realm: "OTHER", NameType: principal.NTSrvHst, Components: []string{"host", "service"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"HOME:krbtgt/MIDDLE", "MIDDLE:krbtgt/OTHER", "OTHER:host/service"}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+	if result.Server.Realm != "OTHER" {
+		t.Fatalf("result realm = %q", result.Server.Realm)
 	}
 }
 

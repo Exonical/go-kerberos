@@ -9,6 +9,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
@@ -723,6 +724,147 @@ func TestCrossRealmTGSExchange(t *testing.T) {
 	}
 	if part.Transited.TrType != 1 {
 		t.Fatalf("transited type = %d, want DOMAIN-X500-COMPRESS (1)", part.Transited.TrType)
+	}
+	if got := string(part.Transited.Contents); got != realmA {
+		t.Fatalf("transited contents = %q, want %q", got, realmA)
+	}
+}
+
+func TestCapathMultiHopTGSExchange(t *testing.T) {
+	now := time.Unix(2000001300, 0).UTC()
+	realmA, realmB, realmC := "REALM.A", "REALM.B", "REALM.C"
+	dbA := kdb.NewDatabase(realmA)
+	for _, entry := range []struct{ name, password string }{
+		{"alice@" + realmA, "alice-password"},
+		{"krbtgt/" + realmA, "realm-a-tgt"},
+		{"krbtgt/" + realmB + "@" + realmA, "a-b-shared"},
+	} {
+		if err := dbA.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbB := kdb.NewDatabase(realmB)
+	for _, entry := range []struct{ name, password string }{
+		{"krbtgt/" + realmB, "realm-b-tgt"},
+		{"krbtgt/" + realmB + "@" + realmA, "a-b-shared"},
+		{"krbtgt/" + realmC + "@" + realmB, "b-c-shared"},
+	} {
+		if err := dbB.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbC := kdb.NewDatabase(realmC)
+	for _, entry := range []struct{ name, password string }{
+		{"krbtgt/" + realmC, "realm-c-tgt"},
+		{"krbtgt/" + realmC + "@" + realmB, "b-c-shared"},
+		{"host/backend@" + realmC, "backend-password"},
+	} {
+		if err := dbC.AddPrincipal(entry.name, entry.password, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serverA := &Server{Realm: realmA, DB: dbA, Now: func() time.Time { return now }}
+	serverB := &Server{Realm: realmB, DB: dbB, Now: func() time.Time { return now }}
+	serverC := &Server{
+		Realm: realmC, DB: dbC, Now: func() time.Time { return now },
+		Capaths: map[string]map[string][]string{realmA: {realmC: {realmB}}},
+	}
+	clientConfig := &config.Config{
+		CapathOptions: map[string]map[string][]string{realmA: {realmC: {realmB}}},
+	}
+	var bTransit string
+	kclient := &client.Client{
+		Config: clientConfig,
+		Now:    func() time.Time { return now },
+		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
+			var response []byte
+			switch realm {
+			case realmA:
+				response = serverA.HandleMessage(payload)
+			case realmB:
+				response = serverB.HandleMessage(payload)
+				var rep protocol.TGSRep
+				if err := asn1.Unmarshal(response, &rep); err == nil {
+					keyRecord, ok, err := dbC.Lookup(principal.Principal{
+						Realm: realmB, NameType: principal.NTSrvInstance,
+						Components: []string{"krbtgt", realmC},
+					})
+					if err != nil || !ok {
+						t.Fatalf("B/C key lookup: %v %v", err, ok)
+					}
+					key := keyRecord.Keys[rep.Ticket.EncPart.EType]
+					etype, err := crypto.NewRegistry().Get(key.Enctype)
+					if err != nil {
+						t.Fatal(err)
+					}
+					plain, err := etype.Decrypt(key.Key, 2, rep.Ticket.EncPart.Cipher)
+					if err != nil {
+						t.Fatalf("decrypt B-issued TGT: %v", err)
+					}
+					var part protocol.EncTicketPart
+					if err := asn1.Unmarshal(plain, &part); err != nil {
+						t.Fatal(err)
+					}
+					bTransit = string(part.Transited.Contents)
+				}
+			case realmC:
+				response = serverC.HandleMessage(payload)
+			default:
+				return nil, errors.New("unexpected realm")
+			}
+			return response, nil
+		},
+	}
+	user := principal.Principal{Realm: realmA, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("AS exchange: %v", err)
+	}
+	serverC.Capaths = nil
+	_, err = kclient.TGSExchange(context.Background(), tgt, principal.Principal{
+		Realm: realmC, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err == nil || !hasKRBCode(err, kdcErrPolicy) {
+		t.Fatalf("unconfigured transited path error = %v, want KDC_ERR_POLICY", err)
+	}
+	serverC.Capaths = map[string]map[string][]string{realmA: {realmC: {realmB}}}
+	credentials, err := kclient.TGSExchange(context.Background(), tgt, principal.Principal{
+		Realm: realmC, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err != nil {
+		t.Fatalf("multi-hop TGS exchange: %v", err)
+	}
+	if bTransit != realmA {
+		t.Fatalf("B-issued TGT transited = %q, want %q", bTransit, realmA)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(credentials.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := dbC.Lookup(principal.Principal{
+		Realm: realmC, NameType: principal.NTSrvHst, Components: []string{"host", "backend"},
+	})
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v %v", err, ok)
+	}
+	key := record.Keys[ticket.EncPart.EType]
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key.Key, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var part protocol.EncTicketPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(part.Transited.Contents); got != realmA+","+realmB {
+		t.Fatalf("C service ticket transited = %q, want %q", got, realmA+","+realmB)
+	}
+	if part.Flags&types.TicketTransited == 0 {
+		t.Fatal("C service ticket lacks TRANSITED-POLICY-CHECKED")
 	}
 }
 
