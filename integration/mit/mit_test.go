@@ -168,7 +168,61 @@ func TestGoClientASExchange(t *testing.T) {
 }
 
 func TestGoClientTGSExchange(t *testing.T) {
-	t.Skip("Go TGS exchange is not implemented")
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	kclient := &client.Client{
+		Config: cfg, Now: func() time.Time { return now },
+	}
+	tgt, err := kclient.ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go AS exchange: %v", err)
+	}
+	servicePrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	}
+	serviceTicket, err := kclient.TGSExchange(context.Background(), tgt, servicePrincipal)
+	if err != nil {
+		t.Fatalf("Go TGS exchange: %v", err)
+	}
+	outputPath := filepath.Join(realm.Dir, "go-client-tgs.ccache")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatalf("create Go client ccache: %v", err)
+	}
+	cache := &ccache.Cache{
+		DefaultPrincipal: clientPrincipal,
+		Credentials: []ccache.Credential{
+			tgt.ToCCacheCredential(), serviceTicket.ToCCacheCredential(),
+		},
+	}
+	if err := ccache.Write(output, cache); err != nil {
+		output.Close()
+		t.Fatalf("write Go client ccache: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close Go client ccache: %v", err)
+	}
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
+	for _, expected := range []string{
+		"krbtgt/" + testenv.RealmName + "@" + testenv.RealmName,
+		"host/service.test@" + testenv.RealmName,
+	} {
+		if !strings.Contains(listing, expected) {
+			t.Fatalf("MIT klist does not contain %s:\n%s", expected, listing)
+		}
+	}
 }
 
 func TestGoClientAPExchange(t *testing.T) {
