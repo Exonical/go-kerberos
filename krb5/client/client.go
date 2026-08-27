@@ -351,6 +351,12 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 }
 
 func (c *Client) newTGSReq(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool) (protocol.TGSReq, uint32, error) {
+	return c.newTGSReqWithBody(tgt, service, realm, now, referral, nil)
+}
+
+// newTGSReqWithBody builds a TGS-REQ, letting the caller adjust the request
+// body before it is marshalled and covered by the authenticator checksum.
+func (c *Client) newTGSReqWithBody(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool, adjust func(*protocol.KDCReqBody)) (protocol.TGSReq, uint32, error) {
 	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
 	if err != nil {
 		return protocol.TGSReq{}, 0, err
@@ -372,6 +378,9 @@ func (c *Client) newTGSReq(tgt *Credentials, service principal.Principal, realm 
 		Till:  types.KerberosTime{Time: now.Add(c.ticketLifetime()), Present: true},
 		Nonce: randomNonce(nonceBytes),
 		EType: c.requestEnctypes(),
+	}
+	if adjust != nil {
+		adjust(&body)
 	}
 	bodyDER, err := asn1.Marshal(body)
 	if err != nil {

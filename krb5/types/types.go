@@ -57,14 +57,16 @@ func (t KerberosTime) EncodeGeneralizedTime() (string, error) {
 type KDCOptions uint32
 
 const (
-	KDCForwardable           KDCOptions = 1 << 1
-	KDCForwarded             KDCOptions = 1 << 2
-	KDCProxiable             KDCOptions = 1 << 3
-	KDCProxy                 KDCOptions = 1 << 4
-	KDCAllowPostdate         KDCOptions = 1 << 5
-	KDCPostdated             KDCOptions = 1 << 6
-	KDCRenewable             KDCOptions = 1 << 8
-	KDCCanonicalize          KDCOptions = 1 << 15
+	KDCForwardable   KDCOptions = 1 << 1
+	KDCForwarded     KDCOptions = 1 << 2
+	KDCProxiable     KDCOptions = 1 << 3
+	KDCProxy         KDCOptions = 1 << 4
+	KDCAllowPostdate KDCOptions = 1 << 5
+	KDCPostdated     KDCOptions = 1 << 6
+	KDCRenewable     KDCOptions = 1 << 8
+	KDCCanonicalize  KDCOptions = 1 << 15
+	// KDCCNameInAddlTkt requests constrained delegation ([MS-SFU] S4U2Proxy).
+	KDCCNameInAddlTkt        KDCOptions = 1 << 14
 	KDCDisableTransitedCheck KDCOptions = 1 << 26
 	KDCRenewableOK           KDCOptions = 1 << 27
 	KDCEncTktInSkey          KDCOptions = 1 << 28
