@@ -910,15 +910,16 @@ func (s *Server) withinSkew(value time.Time) bool {
 }
 
 func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.KerberosTime {
-	lifetime := s.MaxTicketLife
-	if lifetime <= 0 {
-		lifetime = 10 * time.Hour
+	maxLife := s.MaxTicketLife
+	if maxLife <= 0 {
+		maxLife = 10 * time.Hour
 	}
-	if s.DefaultTicketLife > 0 && s.DefaultTicketLife < lifetime {
-		lifetime = s.DefaultTicketLife
-	}
-	end := start.Add(lifetime)
-	if ticketTillSet(till) && till.Time.Before(end) {
+	end := start.Add(maxLife)
+	if !ticketTillSet(till) {
+		if s.DefaultTicketLife > 0 && s.DefaultTicketLife < maxLife {
+			end = start.Add(s.DefaultTicketLife)
+		}
+	} else if till.Time.Before(end) {
 		end = till.Time
 	}
 	if end.Before(start) {

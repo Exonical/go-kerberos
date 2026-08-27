@@ -232,6 +232,11 @@ func TestASDisablePreauth(t *testing.T) {
 func TestASAndTGSApplyDefaultTicketLife(t *testing.T) {
 	now := time.Unix(2000000175, 0).UTC()
 	server, kclient := testServer(t, now)
+	server.DefaultTicketLife = 4 * time.Hour
+	server.MaxTicketLife = 10 * time.Hour
+	if got := server.ticketEndFrom(kerberosTime(now.Add(8*time.Hour)), now); !got.Time.Equal(now.Add(8 * time.Hour)) {
+		t.Fatalf("explicit-till end-time = %v, want %v", got.Time, now.Add(8*time.Hour))
+	}
 	server.DefaultTicketLife = 2 * time.Hour
 	server.MaxTicketLife = 3 * time.Hour
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
