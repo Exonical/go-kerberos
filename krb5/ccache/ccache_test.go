@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -233,5 +234,18 @@ func TestCCacheMalformedInput(t *testing.T) {
 		if _, err := Read(bytes.NewReader(input)); err == nil {
 			t.Fatalf("malformed ccache %x unexpectedly accepted", input)
 		}
+	}
+}
+
+func TestReadMITGeneratedCCacheFixture(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/ccaches/mit-alice.ccache")
+	if os.IsNotExist(err) {
+		t.Skipf("fixture not yet generated: %s", "../../testdata/ccaches/mit-alice.ccache")
+	}
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if _, err := Read(bytes.NewReader(data)); err != nil {
+		t.Fatalf("Read MIT-generated ccache: %v", err)
 	}
 }

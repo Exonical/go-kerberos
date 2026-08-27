@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -190,5 +191,18 @@ func TestKeytabMalformedRecords(t *testing.T) {
 		if _, err := Read(bytes.NewReader(input)); err == nil {
 			t.Fatalf("malformed keytab %x unexpectedly accepted", input)
 		}
+	}
+}
+
+func TestReadMITGeneratedKeytabFixture(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/keytabs/mit-multi-enctype.keytab")
+	if os.IsNotExist(err) {
+		t.Skipf("fixture not yet generated: %s", "../../testdata/keytabs/mit-multi-enctype.keytab")
+	}
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if _, err := Read(bytes.NewReader(data)); err != nil {
+		t.Fatalf("Read MIT-generated keytab: %v", err)
 	}
 }
