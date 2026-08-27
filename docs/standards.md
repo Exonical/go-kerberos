@@ -35,7 +35,7 @@ requirements.
 | METHOD-DATA | RFC 4120 | 5.9.1 | RED | not started |
 | ETYPE-INFO / ETYPE-INFO2 | RFC 4120 | 5.2.7, 5.9.1 | RED | not started |
 | LastReq | RFC 4120 | 5.2.8 | RED | not started |
-| TransitedEncoding | RFC 4120 | 5.3.1 | implemented | DOMAIN-X500-COMPRESS codec and policy checks |
+| TransitedEncoding | RFC 4120 | 5.3.1 | implemented | DOMAIN-X500-COMPRESS codec; MIT-compatible hierarchical and replacing-capath policy checks |
 | AES CTS primitive | RFC 3962 | 5 | RED | not started |
 | Kerberos crypto framework | RFC 3961 | 4–6 | RED | not started |
 | AES128/AES256 CTS HMAC SHA1 | RFC 3962 | 4–5 | RED | not started |

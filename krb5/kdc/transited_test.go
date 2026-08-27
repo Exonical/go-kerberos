@@ -91,3 +91,69 @@ func TestTransitedPolicy(t *testing.T) {
 		t.Fatal("configured intermediate rejected")
 	}
 }
+
+func TestTransitedPolicyUsesHierarchicalPath(t *testing.T) {
+	contents, err := encodeTransited([]string{"EXAMPLE.COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transitedPermitted(contents, "A.EXAMPLE.COM", "B.EXAMPLE.COM", nil) {
+		t.Fatal("hierarchical common suffix rejected")
+	}
+	contents, err = encodeTransited([]string{"OTHER.COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transitedPermitted(contents, "A.EXAMPLE.COM", "B.EXAMPLE.COM", nil) {
+		t.Fatal("unrelated hierarchical intermediate accepted")
+	}
+}
+
+func TestTransitedPolicyCapathReplacesHierarchy(t *testing.T) {
+	client, server := "A.EXAMPLE.COM", "B.EXAMPLE.COM"
+	capaths := map[string]map[string][]string{client: {server: {"OTHER.COM"}}}
+	hierarchical, err := encodeTransited([]string{"EXAMPLE.COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transitedPermitted(hierarchical, client, server, capaths) {
+		t.Fatal("hierarchical intermediate accepted despite capath replacement")
+	}
+	configured, err := encodeTransited([]string{"OTHER.COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !transitedPermitted(configured, client, server, capaths) {
+		t.Fatal("configured intermediate rejected")
+	}
+}
+
+func TestTransitedPolicyCapathDirectOnly(t *testing.T) {
+	client, server := "A.EXAMPLE.COM", "B.EXAMPLE.COM"
+	capaths := map[string]map[string][]string{client: {server: {"."}}}
+	if !transitedPermitted(nil, client, server, capaths) {
+		t.Fatal("direct capath rejected empty transited list")
+	}
+	contents, err := encodeTransited([]string{"EXAMPLE.COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transitedPermitted(contents, client, server, capaths) {
+		t.Fatal("direct capath accepted an intermediate")
+	}
+}
+
+func TestTransitedPolicyX500RequiresConfiguredPath(t *testing.T) {
+	client, server := "/COM/HP/APOLLO", "/COM/DEC"
+	contents, err := encodeTransited([]string{"/COM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transitedPermitted(contents, client, server, nil) {
+		t.Fatal("X.500 hierarchy unexpectedly accepted")
+	}
+	capaths := map[string]map[string][]string{client: {server: {"/COM"}}}
+	if !transitedPermitted(contents, client, server, capaths) {
+		t.Fatal("configured X.500 intermediate rejected")
+	}
+}
