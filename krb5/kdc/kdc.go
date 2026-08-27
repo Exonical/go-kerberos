@@ -710,7 +710,9 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		Transited: ticketPart.Transited,
 		AuthTime:  authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
 	}
-	if ticketPart.Transited.TrType == 0 {
+	crossRealmTGT := len(serviceName.Components) == 2 &&
+		serviceName.Components[0] == "krbtgt" && serviceName.Components[1] != s.Realm
+	if ticketPart.CRealm != s.Realm || crossRealmTGT {
 		ticketPart.Transited.TrType = 1
 	}
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
