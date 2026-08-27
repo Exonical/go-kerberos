@@ -1,10 +1,10 @@
 package types
 
 import (
+	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
-
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 )
 
 // Clock supplies the current time to protocol code.
@@ -27,12 +27,30 @@ type KerberosTime struct {
 
 // ParseKerberosTime parses RFC 4120 GeneralizedTime.
 func ParseKerberosTime(value string) (KerberosTime, error) {
-	return KerberosTime{}, krberrors.ErrNotImplemented
+	if value == "" {
+		return KerberosTime{}, nil
+	}
+	if len(value) != len("20060102150405Z") || value[len(value)-1] != 'Z' {
+		return KerberosTime{}, fmt.Errorf("parse GeneralizedTime: want YYYYMMDDHHMMSSZ")
+	}
+	for i := 0; i < len(value)-1; i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return KerberosTime{}, fmt.Errorf("parse GeneralizedTime: non-digit at offset %d", i)
+		}
+	}
+	parsed, err := time.ParseInLocation("20060102150405Z", value, time.UTC)
+	if err != nil {
+		return KerberosTime{}, fmt.Errorf("parse GeneralizedTime: %w", err)
+	}
+	return KerberosTime{Time: parsed.UTC(), Present: true}, nil
 }
 
 // EncodeGeneralizedTime encodes a KerberosTime without fractional seconds.
 func (t KerberosTime) EncodeGeneralizedTime() (string, error) {
-	return "", krberrors.ErrNotImplemented
+	if !t.Present {
+		return "", nil
+	}
+	return t.Time.UTC().Truncate(time.Second).Format("20060102150405Z"), nil
 }
 
 // KDCOptions is the 32-bit KDC-options field from RFC 4120, section 5.4.1.
@@ -84,5 +102,36 @@ const (
 
 // EncodeFlags returns the RFC 4120 BIT STRING representation.
 func EncodeFlags(flags uint32) ([]byte, error) {
-	return nil, krberrors.ErrNotImplemented
+	der := []byte{0x03, 0x05, 0x00, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(der[3:], flagsToBytes(flags))
+	return der, nil
+}
+
+// DecodeFlags decodes the canonical 32-bit RFC 4120 KerberosFlags BIT STRING.
+func DecodeFlags(der []byte) (uint32, error) {
+	if len(der) != 7 || der[0] != 0x03 || der[1] != 0x05 || der[2] != 0 {
+		return 0, fmt.Errorf("decode KerberosFlags: invalid DER BIT STRING")
+	}
+	return bytesToFlags(der[3:]), nil
+}
+
+func flagsToBytes(flags uint32) uint32 {
+	var encoded uint32
+	for bit := uint(0); bit < 32; bit++ {
+		if flags&(uint32(1)<<bit) != 0 {
+			encoded |= uint32(1) << (31 - bit)
+		}
+	}
+	return encoded
+}
+
+func bytesToFlags(encoded []byte) uint32 {
+	value := binary.BigEndian.Uint32(encoded)
+	var flags uint32
+	for bit := uint(0); bit < 32; bit++ {
+		if value&(uint32(1)<<(31-bit)) != 0 {
+			flags |= uint32(1) << bit
+		}
+	}
+	return flags
 }
