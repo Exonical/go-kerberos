@@ -88,6 +88,84 @@ func Unmarshal(data []byte, value any) error {
 	return nil
 }
 
+// Field returns the raw DER encoding of a nested context or application
+// element. Path values are tag numbers, not encoded tag bytes. A path may
+// begin with an application element; when the current value is a constructed
+// element, the next path value is searched among its direct children.
+func Field(data []byte, path ...int) ([]byte, error) {
+	if len(path) == 0 {
+		return nil, fmt.Errorf("read kerberos ASN.1 field: empty path")
+	}
+	for _, tag := range path {
+		if tag < 0 || tag > 30 {
+			return nil, fmt.Errorf("read kerberos ASN.1 field: tag %d out of range", tag)
+		}
+	}
+	current := data
+	for position, tagNumber := range path {
+		tag, content, end, err := readTLV(current)
+		if err != nil {
+			return nil, fmt.Errorf("read kerberos ASN.1 field: %w", err)
+		}
+		if end != len(current) {
+			return nil, fmt.Errorf("read kerberos ASN.1 field: trailing data")
+		}
+		if position == 0 && matchesTag(tag, tagNumber) {
+			if len(path) == 1 {
+				return append([]byte(nil), current...), nil
+			}
+			current = content
+			continue
+		}
+		found, err := findChild(content, tagNumber)
+		if err != nil {
+			return nil, fmt.Errorf("read kerberos ASN.1 field: %w", err)
+		}
+		if found == nil {
+			return nil, fmt.Errorf("read kerberos ASN.1 field: tag %d not found", tagNumber)
+		}
+		if position == len(path)-1 {
+			return append([]byte(nil), found...), nil
+		}
+		current = found
+	}
+	return append([]byte(nil), current...), nil
+}
+
+// FieldContent returns the contents of the raw DER element selected by Field.
+func FieldContent(data []byte, path ...int) ([]byte, error) {
+	element, err := Field(data, path...)
+	if err != nil {
+		return nil, err
+	}
+	_, content, end, err := readTLV(element)
+	if err != nil {
+		return nil, fmt.Errorf("read kerberos ASN.1 field contents: %w", err)
+	}
+	if end != len(element) {
+		return nil, fmt.Errorf("read kerberos ASN.1 field contents: trailing data")
+	}
+	return append([]byte(nil), content...), nil
+}
+
+func matchesTag(tag byte, tagNumber int) bool {
+	return tag == byte(0x60|tagNumber) || tag == byte(0xa0|tagNumber)
+}
+
+func findChild(data []byte, tagNumber int) ([]byte, error) {
+	for len(data) > 0 {
+		tag, _, end, err := readTLV(data)
+		if err != nil {
+			return nil, err
+		}
+		if matchesTag(tag, tagNumber) {
+			return data[:end], nil
+		}
+		data = data[end:]
+	}
+	return nil, nil
+}
+
 func encodeValue(value reflect.Value, depth int) ([]byte, error) {
 	if depth > maxDepth {
 		return nil, fmt.Errorf("maximum nesting depth exceeded")
