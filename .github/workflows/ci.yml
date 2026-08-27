@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: unit (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - run: go build ./...
+      - run: go vet ./...
+      # The implementation is intentionally RED at this stage. Compile all
+      # tests without running the unimplemented behavior; this gate flips to
+      # the full suite when implementation work starts.
+      - if: runner.os == 'Linux'
+        run: go test -count=1 -run '^$' ./...
+
+  race:
+    name: race (compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - run: go test -race -count=1 -run '^$' ./...
+
+  vet:
+    name: vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - run: go vet ./...
+
+  fuzz-smoke:
+    name: fuzz-smoke (compile-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      # Fuzz execution is deferred until the corresponding implementations
+      # exist; this confirms every fuzz package and seed compiles.
+      - run: go test -count=1 -run '^$' ./...
+
+  interop-mit:
+    name: interop-mit (harness self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Install MIT krb5 runtime
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            krb5-kdc krb5-admin-server krb5-user krb5-kdc-ldap
+      # Only the hermetic realm boot and kinit/klist smoke test is green in
+      # this RED phase; parser and client assertions are intentionally omitted.
+      - run: go test -tags integration ./integration/mit -run '^TestHarnessSelfTest$' -count=1 -v
