@@ -1,0 +1,375 @@
+package ap
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+
+	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
+	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
+)
+
+const (
+	authenticatorUsage = 11
+	ticketUsage        = 2
+	apRepUsage         = 12
+)
+
+// APReq is the initiator state associated with an AP-REQ.
+type APReq struct {
+	DER               []byte
+	SessionKey        protocol.EncryptionKey
+	AuthenticatorTime time.Time
+	Cusec             int32
+	SubKey            *protocol.EncryptionKey
+	SeqNumber         *uint32
+	APOptions         types.APOptions
+}
+
+// APReqState is an alias for APReq.
+type APReqState = APReq
+
+// VerifiedAPReq is the acceptor state associated with a verified AP-REQ.
+type VerifiedAPReq struct {
+	Client            principal.Principal
+	Server            principal.Principal
+	SessionKey        protocol.EncryptionKey
+	AuthenticatorTime time.Time
+	Cusec             int32
+	SubKey            *protocol.EncryptionKey
+	SeqNumber         *uint32
+	APOptions         types.APOptions
+}
+
+var replayCache = struct {
+	sync.Mutex
+	entries map[string]struct{}
+}{entries: make(map[string]struct{})}
+
+// BuildAPReq constructs an AP-REQ and its initiator state.
+func BuildAPReq(creds *client.Credentials, opts types.APOptions, now time.Time) (*APReq, []byte, error) {
+	if creds == nil {
+		return nil, nil, fmt.Errorf("build AP-REQ: nil credentials")
+	}
+	if len(creds.Ticket) == 0 || len(creds.Key.KeyValue) == 0 {
+		return nil, nil, fmt.Errorf("build AP-REQ: incomplete credentials")
+	}
+	etype, err := crypto.NewRegistry().Get(creds.Key.KeyType)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(creds.Ticket, &ticket); err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ ticket: %w", err)
+	}
+	if ticket.Realm == "" || len(ticket.SName.NameString) == 0 {
+		return nil, nil, fmt.Errorf("build AP-REQ: invalid ticket service")
+	}
+	now = now.UTC()
+	cusec := int32(now.Nanosecond() / 1000)
+	subkeyValue := make([]byte, etype.KeySize())
+	if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ subkey: %w", err)
+	}
+	var sequenceBytes [4]byte
+	if _, err := io.ReadFull(crypto.RandomSource, sequenceBytes[:]); err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ sequence number: %w", err)
+	}
+	sequence := binary.BigEndian.Uint32(sequenceBytes[:]) & 0x7fffffff
+	subkey := &protocol.EncryptionKey{KeyType: creds.Key.KeyType, KeyValue: subkeyValue}
+	authenticator := protocol.Authenticator{
+		AuthenticatorVNO: 5,
+		CRealm:           creds.Client.Realm,
+		CName:            protocol.PrincipalName{NameType: int32(creds.Client.NameType), NameString: append([]string(nil), creds.Client.Components...)},
+		Cusec:            cusec,
+		Ctime:            types.KerberosTime{Time: now, Microseconds: cusec, Present: true},
+		SubKey:           subkey,
+		SeqNumber:        &sequence,
+	}
+	authenticatorDER, err := asn1.Marshal(authenticator)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ authenticator: %w", err)
+	}
+	ciphertext, err := etype.Encrypt(creds.Key.KeyValue, authenticatorUsage, authenticatorDER)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ authenticator encryption: %w", err)
+	}
+	apReq := protocol.APReq{
+		PVNO: 5, MsgType: 14, APOptions: opts, Ticket: ticket,
+		Authenticator: protocol.EncryptedData{EType: creds.Key.KeyType, Cipher: ciphertext},
+	}
+	der, err := asn1.Marshal(apReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build AP-REQ: %w", err)
+	}
+	state := &APReq{
+		DER: append([]byte(nil), der...), SessionKey: copyEncryptionKey(creds.Key),
+		AuthenticatorTime: now, Cusec: cusec, SubKey: copyEncryptionKeyPointer(subkey),
+		SeqNumber: uint32Pointer(sequence), APOptions: opts,
+	}
+	return state, der, nil
+}
+
+// VerifyAPReq verifies an AP-REQ using service keys from a keytab.
+func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+	if kt == nil {
+		return nil, fmt.Errorf("verify AP-REQ: nil keytab")
+	}
+	var request protocol.APReq
+	if err := asn1.Unmarshal(der, &request); err != nil {
+		return nil, fmt.Errorf("verify AP-REQ: %w", err)
+	}
+	if request.PVNO != 5 || request.MsgType != 14 {
+		return nil, fmt.Errorf("verify AP-REQ: unexpected message")
+	}
+	entry, err := findServiceEntry(kt, request.Ticket)
+	if err != nil {
+		return nil, err
+	}
+	etype, err := crypto.NewRegistry().Get(entry.Enctype)
+	if err != nil {
+		return nil, err
+	}
+	ticketPlain, err := etype.Decrypt(entry.Key, ticketUsage, request.Ticket.EncPart.Cipher)
+	if err != nil {
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", err)
+	}
+	var ticketPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrIntegrity)
+	}
+	now = now.UTC()
+	if !ticketValid(ticketPart, now) {
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketExpired)
+	}
+	if request.Authenticator.EType != ticketPart.Key.KeyType {
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrIntegrity)
+	}
+	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
+	if err != nil {
+		return nil, err
+	}
+	authPlain, err := sessionEType.Decrypt(ticketPart.Key.KeyValue, authenticatorUsage, request.Authenticator.Cipher)
+	if err != nil {
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", err)
+	}
+	var authenticator protocol.Authenticator
+	if err := asn1.Unmarshal(authPlain, &authenticator); err != nil {
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrIntegrity)
+	}
+	if authenticator.AuthenticatorVNO != 5 ||
+		authenticator.CRealm != ticketPart.CRealm ||
+		!sameProtocolPrincipal(authenticator.CName, ticketPart.CName) {
+		return nil, fmt.Errorf("verify AP-REQ client principal mismatch")
+	}
+	if skew < 0 {
+		skew = -skew
+	}
+	if !withinSkew(authenticator.Ctime.Time, now, skew) {
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
+	}
+	replayKey := fmt.Sprintf("%s|%d|%s|%d|%d", authenticator.CRealm, authenticator.CName.NameType,
+		joinPrincipalComponents(authenticator.CName.NameString), authenticator.Ctime.Time.Unix(), authenticator.Cusec)
+	replayCache.Lock()
+	_, replayed := replayCache.entries[replayKey]
+	if !replayed {
+		replayCache.entries[replayKey] = struct{}{}
+	}
+	replayCache.Unlock()
+	if replayed {
+		return nil, fmt.Errorf("verify AP-REQ: replayed authenticator")
+	}
+	return &VerifiedAPReq{
+		Client: principal.Principal{
+			Realm: authenticator.CRealm, NameType: principal.NameType(authenticator.CName.NameType),
+			Components: append([]string(nil), authenticator.CName.NameString...),
+		},
+		Server: principal.Principal{
+			Realm: request.Ticket.Realm, NameType: principal.NameType(request.Ticket.SName.NameType),
+			Components: append([]string(nil), request.Ticket.SName.NameString...),
+		},
+		SessionKey:        copyEncryptionKey(ticketPart.Key),
+		AuthenticatorTime: authenticator.Ctime.Time,
+		Cusec:             authenticator.Cusec,
+		SubKey:            copyEncryptionKeyPointer(authenticator.SubKey),
+		SeqNumber:         uint32PointerValue(authenticator.SeqNumber),
+		APOptions:         request.APOptions,
+	}, nil
+}
+
+// BuildAPRep constructs an AP-REP echoing the request authenticator time.
+func BuildAPRep(request *VerifiedAPReq) ([]byte, error) {
+	if request == nil {
+		return nil, fmt.Errorf("build AP-REP: nil request")
+	}
+	return buildAPRepWithTime(request, request.AuthenticatorTime)
+}
+
+func buildAPRepWithTime(request *VerifiedAPReq, ctime time.Time) ([]byte, error) {
+	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
+	if err != nil {
+		return nil, err
+	}
+	cusec := request.Cusec
+	part := protocol.EncAPRepPart{
+		Ctime: types.KerberosTime{Time: ctime.UTC(), Microseconds: cusec, Present: true},
+		Cusec: cusec,
+	}
+	plain, err := asn1.Marshal(part)
+	if err != nil {
+		return nil, fmt.Errorf("build AP-REP encrypted part: %w", err)
+	}
+	ciphertext, err := etype.Encrypt(request.SessionKey.KeyValue, apRepUsage, plain)
+	if err != nil {
+		return nil, fmt.Errorf("build AP-REP encrypted part: %w", err)
+	}
+	der, err := asn1.Marshal(protocol.APRep{
+		PVNO: 5, MsgType: 15,
+		EncPart: protocol.EncryptedData{EType: request.SessionKey.KeyType, Cipher: ciphertext},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build AP-REP: %w", err)
+	}
+	return der, nil
+}
+
+// VerifyAPRep verifies an AP-REP against the initiator AP-REQ state.
+func VerifyAPRep(request *APReq, der []byte) error {
+	if request == nil {
+		return fmt.Errorf("verify AP-REP: nil request")
+	}
+	if request.APOptions&types.APMutualRequired == 0 {
+		return fmt.Errorf("verify AP-REP: mutual authentication was not requested")
+	}
+	var reply protocol.APRep
+	if err := asn1.Unmarshal(der, &reply); err != nil {
+		return fmt.Errorf("verify AP-REP: %w", err)
+	}
+	if reply.PVNO != 5 || reply.MsgType != 15 || reply.EncPart.EType != request.SessionKey.KeyType {
+		return fmt.Errorf("verify AP-REP: %w", krberrors.ErrIntegrity)
+	}
+	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
+	if err != nil {
+		return err
+	}
+	plain, err := etype.Decrypt(request.SessionKey.KeyValue, apRepUsage, reply.EncPart.Cipher)
+	if err != nil {
+		return fmt.Errorf("verify AP-REP encrypted part: %w", err)
+	}
+	var part protocol.EncAPRepPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		return fmt.Errorf("verify AP-REP encrypted part: %w", krberrors.ErrIntegrity)
+	}
+	if !part.Ctime.Present || !part.Ctime.Time.Equal(request.AuthenticatorTime.Truncate(time.Second)) ||
+		part.Cusec != request.Cusec {
+		return fmt.Errorf("verify AP-REP: authenticator time mismatch")
+	}
+	return nil
+}
+
+func findServiceEntry(kt *keytab.Keytab, ticket protocol.Ticket) (keytab.Entry, error) {
+	target := principal.Principal{
+		Realm: ticket.Realm, NameType: principal.NameType(ticket.SName.NameType),
+		Components: ticket.SName.NameString,
+	}
+	var selected keytab.Entry
+	found := false
+	for _, entry := range kt.Entries {
+		if !servicePrincipalEqual(entry.Principal, target) || entry.Enctype != ticket.EncPart.EType {
+			continue
+		}
+		if ticket.EncPart.KVNO != nil && entry.KVNO != *ticket.EncPart.KVNO {
+			continue
+		}
+		if !found || entry.KVNO > selected.KVNO {
+			selected = entry
+			found = true
+		}
+	}
+	if !found {
+		return keytab.Entry{}, fmt.Errorf("verify AP-REQ: service key not found")
+	}
+	return selected, nil
+}
+
+func ticketValid(part protocol.EncTicketPart, now time.Time) bool {
+	if part.StartTime != nil && now.Before(part.StartTime.Time) {
+		return false
+	}
+	return !now.After(part.EndTime.Time)
+}
+
+func withinSkew(value, now time.Time, skew time.Duration) bool {
+	difference := value.Sub(now)
+	if difference < 0 {
+		difference = -difference
+	}
+	return difference <= skew
+}
+
+func sameProtocolPrincipal(left, right protocol.PrincipalName) bool {
+	return left.NameType == right.NameType && slicesEqual(left.NameString, right.NameString)
+}
+
+func principalEqual(left, right principal.Principal) bool {
+	return left.Realm == right.Realm && left.NameType == right.NameType &&
+		slicesEqual(left.Components, right.Components)
+}
+
+func servicePrincipalEqual(left, right principal.Principal) bool {
+	return left.Realm == right.Realm && slicesEqual(left.Components, right.Components)
+}
+
+func slicesEqual(left, right []string) bool {
+	return len(left) == len(right) && func() bool {
+		for i := range left {
+			if left[i] != right[i] {
+				return false
+			}
+		}
+		return true
+	}()
+}
+
+func joinPrincipalComponents(components []string) string {
+	return string(bytes.Join(func() [][]byte {
+		result := make([][]byte, len(components))
+		for i := range components {
+			result[i] = []byte(components[i])
+		}
+		return result
+	}(), []byte{0}))
+}
+
+func copyEncryptionKey(value protocol.EncryptionKey) protocol.EncryptionKey {
+	return protocol.EncryptionKey{KeyType: value.KeyType, KeyValue: append([]byte(nil), value.KeyValue...)}
+}
+
+func copyEncryptionKeyPointer(value *protocol.EncryptionKey) *protocol.EncryptionKey {
+	if value == nil {
+		return nil
+	}
+	result := copyEncryptionKey(*value)
+	return &result
+}
+
+func uint32Pointer(value uint32) *uint32 {
+	return &value
+}
+
+func uint32PointerValue(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
