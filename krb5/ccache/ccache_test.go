@@ -113,6 +113,9 @@ func writeConfigCredential(w io.Writer, client, server principal.Principal, tick
 	if err := binary.Write(w, binary.BigEndian, uint32(0)); err != nil {
 		return err
 	}
+	if err := binary.Write(w, binary.BigEndian, uint32(0)); err != nil {
+		return err
+	}
 	if err := counted32(w, ticket); err != nil {
 		return err
 	}
