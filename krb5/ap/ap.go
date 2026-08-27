@@ -38,6 +38,11 @@ type APReq struct {
 // APReqState is an alias for APReq.
 type APReqState = APReq
 
+// APReqOptions controls optional authenticator fields when building AP-REQs.
+type APReqOptions struct {
+	Checksum *protocol.Checksum
+}
+
 // VerifiedAPReq is the acceptor state associated with a verified AP-REQ.
 type VerifiedAPReq struct {
 	Client            principal.Principal
@@ -48,6 +53,7 @@ type VerifiedAPReq struct {
 	SubKey            *protocol.EncryptionKey
 	SeqNumber         *uint32
 	APOptions         types.APOptions
+	Checksum          *protocol.Checksum
 }
 
 var replayCache = struct {
@@ -57,6 +63,11 @@ var replayCache = struct {
 
 // BuildAPReq constructs an AP-REQ and its initiator state.
 func BuildAPReq(creds *client.Credentials, opts types.APOptions, now time.Time) (*APReq, []byte, error) {
+	return BuildAPReqWithOptions(creds, opts, now, APReqOptions{})
+}
+
+// BuildAPReqWithOptions constructs an AP-REQ with optional authenticator data.
+func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now time.Time, options APReqOptions) (*APReq, []byte, error) {
 	if creds == nil {
 		return nil, nil, fmt.Errorf("build AP-REQ: nil credentials")
 	}
@@ -94,6 +105,11 @@ func BuildAPReq(creds *client.Credentials, opts types.APOptions, now time.Time) 
 		Ctime:            types.KerberosTime{Time: now, Microseconds: cusec, Present: true},
 		SubKey:           subkey,
 		SeqNumber:        &sequence,
+	}
+	if options.Checksum != nil {
+		checksum := *options.Checksum
+		checksum.Checksum = append([]byte(nil), checksum.Checksum...)
+		authenticator.Checksum = &checksum
 	}
 	authenticatorDER, err := asn1.Marshal(authenticator)
 	if err != nil {
@@ -188,6 +204,12 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 	if replayed {
 		return nil, fmt.Errorf("verify AP-REQ: replayed authenticator")
 	}
+	var authChecksum *protocol.Checksum
+	if authenticator.Checksum != nil {
+		checksum := *authenticator.Checksum
+		checksum.Checksum = append([]byte(nil), checksum.Checksum...)
+		authChecksum = &checksum
+	}
 	return &VerifiedAPReq{
 		Client: principal.Principal{
 			Realm: authenticator.CRealm, NameType: principal.NameType(authenticator.CName.NameType),
@@ -203,6 +225,7 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 		SubKey:            copyEncryptionKeyPointer(authenticator.SubKey),
 		SeqNumber:         uint32PointerValue(authenticator.SeqNumber),
 		APOptions:         request.APOptions,
+		Checksum:          authChecksum,
 	}, nil
 }
 
