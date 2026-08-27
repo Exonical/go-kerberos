@@ -3,9 +3,12 @@ package kdc
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
@@ -19,6 +22,7 @@ import (
 )
 
 const (
+	maxReplayEntries      = 10000
 	paTGSReq              = 1
 	paEncTimestamp        = 2
 	kdcErrCPrincipal      = 6
@@ -26,9 +30,12 @@ const (
 	kdcErrPreauthFailed   = 24
 	kdcErrPreauthRequired = 25
 	kdcErrGeneric         = 60
+	kdcErrBadOption       = 13
+	kdcErrCannotPostdate  = 10
 	krbAPErrBadIntegrity  = 31
 	krbAPErrTktExpired    = 32
 	krbAPErrTktNYV        = 33
+	krbAPErrRepeat        = 34
 	krbAPErrSkew          = 37
 	krbAPErrInKeyUsage    = 44
 )
@@ -41,6 +48,9 @@ type Server struct {
 	ClockSkew        time.Duration
 	MaxTicketLife    time.Duration
 	MaxRenewableLife time.Duration
+
+	replayMu sync.Mutex
+	replays  map[string]time.Time
 }
 
 // HandleMessage handles one DER-encoded AS-REQ or TGS-REQ.
@@ -212,12 +222,26 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	now := s.now().UTC().Truncate(time.Second)
 	authTime := types.KerberosTime{Time: now, Present: true}
 	startTime := authTime
-	endTime := s.ticketEnd(request.ReqBody.Till, now)
 	flags := types.TicketInitial | types.TicketPreAuthent
 	if request.ReqBody.KDCOptions&types.KDCForwardable != 0 {
 		flags |= types.TicketForwardable
 	}
-	if request.ReqBody.KDCOptions&types.KDCRenewableOK != 0 {
+	if request.ReqBody.KDCOptions&types.KDCAllowPostdate != 0 {
+		flags |= types.TicketMayPostdate
+	}
+	if request.ReqBody.KDCOptions&types.KDCPostdated != 0 {
+		if request.ReqBody.From == nil || !request.ReqBody.From.Present ||
+			!request.ReqBody.From.Time.After(now) ||
+			(request.ReqBody.Till.Present && !request.ReqBody.Till.Time.After(request.ReqBody.From.Time)) ||
+			request.ReqBody.KDCOptions&types.KDCAllowPostdate == 0 {
+			return s.errorResponse(kdcErrCannotPostdate, request.ReqBody.SName)
+		}
+		startTime = *request.ReqBody.From
+		flags |= types.TicketPostdated | types.TicketInvalid
+	}
+	endTime := s.ticketEndFrom(request.ReqBody.Till, startTime.Time)
+	renewTill := s.renewTill(request.ReqBody.KDCOptions, request.ReqBody.RTime, request.ReqBody.Till, startTime.Time, endTime.Time)
+	if renewTill != nil {
 		flags |= types.TicketRenewable
 	}
 	ticketPart := protocol.EncTicketPart{
@@ -225,7 +249,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		CRealm:   clientName.Realm,
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
-		AuthTime: authTime, StartTime: &startTime, EndTime: endTime,
+		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
 	ticketPlain := marshalDER(ticketPart)
 	ticketCipher, err := encryptWithKey(serviceKey, 2, ticketPlain)
@@ -242,7 +266,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	part := protocol.EncASRepPart{
 		Key:     protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		LastReq: lastReq, Nonce: request.ReqBody.Nonce, Flags: flags,
-		AuthTime: authTime, StartTime: &startTime, EndTime: endTime,
+		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 		SRealm: request.ReqBody.Realm, SName: *request.ReqBody.SName,
 	}
 	replyPlain := marshalDER(part)
@@ -301,7 +325,23 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
-	if code, ok := s.ticketValidity(ticketPart); !ok {
+	options := request.ReqBody.KDCOptions
+	if options&types.KDCRenew != 0 {
+		if ticketPart.Flags&types.TicketRenewable == 0 {
+			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+		}
+		if ticketPart.RenewTill == nil || s.now().After(ticketPart.RenewTill.Time) {
+			return s.errorResponse(krbAPErrTktExpired, request.ReqBody.SName)
+		}
+	} else if options&types.KDCValidate != 0 {
+		if ticketPart.Flags&types.TicketInvalid == 0 {
+			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+		}
+		if ticketPart.StartTime != nil && ticketPart.StartTime.Present &&
+			s.now().Before(ticketPart.StartTime.Time) {
+			return s.errorResponse(krbAPErrTktNYV, request.ReqBody.SName)
+		}
+	} else if code, ok := s.ticketValidity(ticketPart); !ok {
 		return s.errorResponse(code, request.ReqBody.SName)
 	}
 	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
@@ -333,7 +373,20 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := sessionEType.VerifyChecksum(ticketPart.Key.KeyValue, 6, body, authenticator.Checksum.Checksum); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
+	if s.replayed(ticketPart.CRealm, ticketPart.CName, authenticator) {
+		return s.errorResponse(krbAPErrRepeat, request.ReqBody.SName)
+	}
+	if options&types.KDCPostdated != 0 && options&types.KDCAllowPostdate == 0 {
+		return s.errorResponse(kdcErrCannotPostdate, request.ReqBody.SName)
+	}
+	if options&(types.KDCAllowPostdate|types.KDCPostdated) != 0 &&
+		ticketPart.Flags&types.TicketMayPostdate == 0 {
+		return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
+	if options&(types.KDCRenew|types.KDCValidate) != 0 {
+		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
+	}
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
@@ -351,10 +404,10 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage)
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -368,13 +421,57 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if !authTime.Present {
 		authTime = types.KerberosTime{Time: now, Present: true}
 	}
-	endTime := s.ticketEnd(request.ReqBody.Till, now)
 	flags := ticketPart.Flags
+	startTime := ticketPart.StartTime
+	endTime := ticketPart.EndTime
+	renewTill := ticketPart.RenewTill
+	if request.ReqBody.KDCOptions&types.KDCValidate != 0 {
+		flags &^= types.TicketInvalid
+	} else if request.ReqBody.KDCOptions&types.KDCRenew != 0 {
+		start := authTime.Time
+		if startTime != nil && startTime.Present {
+			start = startTime.Time
+		}
+		lifetime := ticketPart.EndTime.Time.Sub(start)
+		end := now.Add(lifetime)
+		if renewTill != nil && end.After(renewTill.Time) {
+			end = renewTill.Time
+		}
+		startTime = &types.KerberosTime{Time: now, Present: true}
+		endTime = types.KerberosTime{Time: end.Truncate(time.Second), Present: true}
+	} else {
+		start := now
+		flags &^= types.TicketRenewable
+		if request.ReqBody.KDCOptions&types.KDCPostdated != 0 {
+			if request.ReqBody.From == nil || !request.ReqBody.From.Present ||
+				!request.ReqBody.From.Time.After(now) ||
+				(request.ReqBody.Till.Present && !request.ReqBody.Till.Time.After(request.ReqBody.From.Time)) {
+				return s.errorResponse(kdcErrCannotPostdate, request.ReqBody.SName)
+			}
+			startTime = request.ReqBody.From
+			start = startTime.Time
+			flags |= types.TicketPostdated | types.TicketInvalid
+		} else {
+			startTime = nil
+		}
+		endTime = s.ticketEndFrom(request.ReqBody.Till, start)
+		renewTill = s.renewTill(request.ReqBody.KDCOptions, request.ReqBody.RTime, request.ReqBody.Till, start, endTime.Time)
+		if request.ReqBody.KDCOptions&(types.KDCRenewable|types.KDCRenewableOK) != 0 {
+			if ticketPart.RenewTill == nil {
+				renewTill = nil
+			} else if renewTill != nil && renewTill.Time.After(ticketPart.RenewTill.Time) {
+				renewTill = ticketPart.RenewTill
+			}
+		}
+		if renewTill != nil {
+			flags |= types.TicketRenewable
+		}
+	}
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		CRealm: ticketPart.CRealm, CName: ticketPart.CName,
-		AuthTime: authTime, EndTime: endTime,
+		AuthTime: authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
 	}
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
 	if err != nil {
@@ -385,11 +482,20 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		TktVNO: 5, Realm: serviceName.Realm, SName: *request.ReqBody.SName,
 		EncPart: protocol.EncryptedData{EType: etypeID, KVNO: &ticketKVNO, Cipher: ticketCipher},
 	}
+	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
+		ticket.SName = headerTicket.SName
+		ticket.Realm = headerTicket.Realm
+	}
 	part := protocol.EncTGSRepPart{
 		Key:     protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		LastReq: protocol.LastReq{{LRType: 0, LRValue: types.KerberosTime{Time: now, Present: true}}},
-		Nonce:   request.ReqBody.Nonce, Flags: flags, AuthTime: authTime,
+		Nonce:   request.ReqBody.Nonce, Flags: flags, AuthTime: authTime, StartTime: startTime,
 		EndTime: endTime, SRealm: serviceName.Realm, SName: *request.ReqBody.SName,
+		RenewTill: renewTill,
+	}
+	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
+		part.SRealm = headerTicket.Realm
+		part.SName = headerTicket.SName
 	}
 	replyCipher, err := encryptWithKey(kdb.Key{Enctype: replyKey.KeyType, KVNO: 0, Key: replyKey.KeyValue}, replyUsage, marshalDER(part))
 	if err != nil {
@@ -494,19 +600,84 @@ func (s *Server) withinSkew(value time.Time) bool {
 	return difference <= skew
 }
 
-func (s *Server) ticketEnd(till types.KerberosTime, now time.Time) types.KerberosTime {
+func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.KerberosTime {
 	lifetime := s.MaxTicketLife
 	if lifetime <= 0 {
 		lifetime = 10 * time.Hour
 	}
-	end := now.Add(lifetime)
+	end := start.Add(lifetime)
 	if till.Present && till.Time.Before(end) {
 		end = till.Time
 	}
-	if end.Before(now) {
-		end = now
+	if end.Before(start) {
+		end = start
 	}
 	return types.KerberosTime{Time: end.Truncate(time.Second), Present: true}
+}
+
+func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTime, till types.KerberosTime, start, end time.Time) *types.KerberosTime {
+	renewable := options&types.KDCRenewable != 0
+	if !renewable && (options&types.KDCRenewableOK == 0 || !till.Present || !till.Time.After(end)) {
+		return nil
+	}
+	target := start.Add(s.MaxRenewableLife)
+	if till.Present {
+		target = till.Time
+	}
+	if renewable && requested != nil && requested.Present {
+		target = requested.Time
+	}
+	if !target.After(end) && !renewable {
+		return nil
+	}
+	if s.MaxRenewableLife <= 0 {
+		return nil
+	}
+	capTime := start.Add(s.MaxRenewableLife)
+	if target.After(capTime) {
+		target = capTime
+	}
+	if !target.After(end) && !renewable {
+		return nil
+	}
+	if !target.After(start) {
+		return nil
+	}
+	result := types.KerberosTime{Time: target.Truncate(time.Second), Present: true}
+	return &result
+}
+
+func (s *Server) replayed(realm string, name protocol.PrincipalName, authenticator protocol.Authenticator) bool {
+	now := s.now()
+	key := strings.Join(append([]string{realm, fmt.Sprint(name.NameType), fmt.Sprint(authenticator.Cusec), authenticator.Ctime.Time.UTC().Format(time.RFC3339Nano), hex.EncodeToString(authenticator.Checksum.Checksum)}, name.NameString...), "\x00")
+	expires := now.Add(s.skew())
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	if s.replays == nil {
+		s.replays = make(map[string]time.Time)
+	}
+	for replayKey, expiry := range s.replays {
+		if !expiry.After(now) {
+			delete(s.replays, replayKey)
+		}
+	}
+	if expiry, ok := s.replays[key]; ok && expiry.After(now) {
+		return true
+	}
+	if len(s.replays) >= maxReplayEntries {
+		var oldestKey string
+		var oldest time.Time
+		for replayKey, expiry := range s.replays {
+			if oldestKey == "" || expiry.Before(oldest) {
+				oldestKey, oldest = replayKey, expiry
+			}
+		}
+		if oldestKey != "" {
+			delete(s.replays, oldestKey)
+		}
+	}
+	s.replays[key] = expires
+	return false
 }
 
 func findPA(data protocol.MethodData, kind int32) *protocol.PAData {
