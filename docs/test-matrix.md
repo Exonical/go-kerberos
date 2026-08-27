@@ -17,6 +17,7 @@ when absent.
 | FILE ccache | RED | RED | RED |
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
+| FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump) | unit + golden | MIT pass | read-only |
@@ -38,6 +39,15 @@ DOMAIN-X500-COMPRESS transited contents and validate transited realms against
 the configured server capath or the default hierarchical path. Server-side
 capaths are supplied through `kdc.Server.Capaths`; a full MIT policy-module
 configuration interface is not implemented.
+
+FAST-armored TGS exchanges use the implicit RFC 6113 armor derived from the
+PA-TGS-REQ authenticator subkey and TGT session key. The Go client and Go KDC
+cover request unwrapping, strengthened replies, finished checksums, and
+negative cases end to end. The MIT integration harness also confirms live
+MIT `kvno` FAST-TGS interoperability: its trace contains
+`Encoding request body and padata into FAST` and the resulting service ticket
+is accepted by the Go KDC. MIT FAST AS interoperability remains covered by
+`kinit -T`.
 
 The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
 using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.

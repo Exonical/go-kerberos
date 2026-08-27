@@ -418,20 +418,79 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	}
 }
 
+// TGSExchangeFAST obtains a service ticket using an RFC 6113 implicit TGS
+// armor exchange. The TGS authenticator subkey supplies the armor key input.
+func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("FAST TGS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("FAST TGS exchange: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("FAST TGS exchange: %w", err)
+	}
+	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
+		return nil, fmt.Errorf("FAST TGS exchange: incomplete TGT")
+	}
+	if len(service.Components) == 0 {
+		return nil, fmt.Errorf("FAST TGS exchange: invalid service principal")
+	}
+	realm, _ := ServiceRealm(c.Config, service)
+	if realm == "" {
+		realm = tgt.Server.Realm
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("FAST TGS exchange: missing service realm")
+	}
+	currentRealm := tgt.Server.Realm
+	if currentRealm == "" {
+		currentRealm = tgt.Client.Realm
+	}
+	if currentRealm != realm {
+		return nil, fmt.Errorf("FAST TGS exchange: cross-realm FAST is not supported")
+	}
+	service = serviceWithRealm(service, realm)
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, nonce, armor, replyKey, err := c.newTGSReqFAST(tgt, service, realm, now, false)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.exchangePayload(ctx, realm, request, "FAST TGS exchange request")
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeFASTTGSRep(response, tgt.Client, service, service, true, nonce,
+		replyKey, armor, now)
+}
+
 func (c *Client) newTGSReq(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool) (protocol.TGSReq, uint32, error) {
-	return c.newTGSReqWithBody(tgt, service, realm, now, referral, nil)
+	request, nonce, _, _, err := c.newTGSReqWithBodyOptions(tgt, service, realm, now, referral, nil, false)
+	return request, nonce, err
 }
 
 // newTGSReqWithBody builds a TGS-REQ, letting the caller adjust the request
 // body before it is marshalled and covered by the authenticator checksum.
 func (c *Client) newTGSReqWithBody(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool, adjust func(*protocol.KDCReqBody)) (protocol.TGSReq, uint32, error) {
+	request, nonce, _, _, err := c.newTGSReqWithBodyOptions(tgt, service, realm, now, referral, adjust, false)
+	return request, nonce, err
+}
+
+func (c *Client) newTGSReqFAST(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool) (protocol.TGSReq, uint32, *fast.Armor, protocol.EncryptionKey, error) {
+	return c.newTGSReqWithBodyOptions(tgt, service, realm, now, referral, nil, true)
+}
+
+func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool, adjust func(*protocol.KDCReqBody), useFAST bool) (protocol.TGSReq, uint32, *fast.Armor, protocol.EncryptionKey, error) {
 	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
 	if err != nil {
-		return protocol.TGSReq{}, 0, err
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, err
 	}
 	nonceBytes := make([]byte, 4)
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange nonce: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange nonce: %w", err)
 	}
 	options := types.KDCRenewableOK
 	if c.canonicalizeEnabled() || referral {
@@ -452,13 +511,21 @@ func (c *Client) newTGSReqWithBody(tgt *Credentials, service principal.Principal
 	}
 	bodyDER, err := asn1.Marshal(body)
 	if err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange request body: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange request body: %w", err)
 	}
 	checksum, err := etype.Checksum(tgt.Key.KeyValue, 6, bodyDER)
 	if err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange request checksum: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange request checksum: %w", err)
 	}
 	usec := int32(now.Nanosecond() / 1000)
+	var subkey *protocol.EncryptionKey
+	if useFAST {
+		subkeyValue := make([]byte, etype.KeySize())
+		if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+			return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("FAST TGS subkey: %w", err)
+		}
+		subkey = &protocol.EncryptionKey{KeyType: tgt.Key.KeyType, KeyValue: subkeyValue}
+	}
 	authenticatorDER, err := asn1.Marshal(protocol.Authenticator{
 		AuthenticatorVNO: 5,
 		CRealm:           tgt.Client.Realm,
@@ -467,32 +534,46 @@ func (c *Client) newTGSReqWithBody(tgt *Credentials, service principal.Principal
 			ChecksumType: checksumType(tgt.Key.KeyType),
 			Checksum:     checksum,
 		},
-		Cusec: usec,
-		Ctime: types.KerberosTime{Time: now, Microseconds: usec, Present: true},
+		Cusec:  usec,
+		Ctime:  types.KerberosTime{Time: now, Microseconds: usec, Present: true},
+		SubKey: subkey,
 	})
 	if err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange authenticator: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange authenticator: %w", err)
 	}
 	encryptedAuthenticator, err := etype.Encrypt(tgt.Key.KeyValue, 7, authenticatorDER)
 	if err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange authenticator encryption: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange authenticator encryption: %w", err)
 	}
 	var ticket protocol.Ticket
 	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange ticket: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange ticket: %w", err)
 	}
 	apReqDER, err := asn1.Marshal(protocol.APReq{
 		PVNO: 5, MsgType: 14, Ticket: ticket,
 		Authenticator: protocol.EncryptedData{EType: tgt.Key.KeyType, Cipher: encryptedAuthenticator},
 	})
 	if err != nil {
-		return protocol.TGSReq{}, 0, fmt.Errorf("TGS exchange AP-REQ: %w", err)
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange AP-REQ: %w", err)
 	}
-	return protocol.TGSReq{
+	request := protocol.TGSReq{
 		PVNO: 5, MsgType: 12,
 		PAData:  protocol.MethodData{{PADataType: 1, PADataValue: apReqDER}},
 		ReqBody: body,
-	}, body.Nonce, nil
+	}
+	if !useFAST {
+		return request, body.Nonce, nil, protocol.EncryptionKey{}, nil
+	}
+	armor, err := fast.NewTGSArmor(fast.TGT{Key: tgt.Key}, *subkey)
+	if err != nil {
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, err
+	}
+	fastData, err := armor.WrapTGSReq(body, nil, apReqDER)
+	if err != nil {
+		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, err
+	}
+	request.PAData = append(request.PAData, fastData)
+	return request, body.Nonce, armor, *subkey, nil
 }
 
 func (c *Client) decodeTGSRep(data []byte, clientPrincipal, service principal.Principal, nonce uint32, keyType int32, key []byte, now time.Time) (*Credentials, error) {
@@ -501,6 +582,40 @@ func (c *Client) decodeTGSRep(data []byte, clientPrincipal, service principal.Pr
 }
 
 func (c *Client) decodeTGSRepForExchange(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, keyType int32, key []byte, now time.Time) (*Credentials, bool, error) {
+	return c.decodeTGSRepForExchangeWithUsage(data, clientPrincipal, service, requestedService,
+		serviceRealmKnown, nonce, keyType, key, 8, now)
+}
+
+func (c *Client) decodeFASTTGSRep(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, replyKey protocol.EncryptionKey, armor *fast.Armor, now time.Time) (*Credentials, error) {
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(data, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(data); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("FAST TGS exchange TGS-REP: %w", err)
+	}
+	ticket, err := asn1.Marshal(reply.Ticket)
+	if err != nil {
+		return nil, fmt.Errorf("FAST TGS exchange ticket: %w", err)
+	}
+	fastReply, err := armor.UnwrapReply(reply.PAData, ticket, nonce)
+	if err != nil {
+		return nil, err
+	}
+	replyKey, err = armor.ReplyKey(replyKey, fastReply.StrengthenKey)
+	if err != nil {
+		return nil, err
+	}
+	rewrapped, err := asn1.Marshal(reply)
+	if err != nil {
+		return nil, fmt.Errorf("FAST TGS exchange reply: %w", err)
+	}
+	result, _, err := c.decodeTGSRepForExchangeWithUsage(rewrapped, clientPrincipal, service,
+		requestedService, serviceRealmKnown, nonce, replyKey.KeyType, replyKey.KeyValue, 9, now)
+	return result, err
+}
+
+func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, keyType int32, key []byte, usage uint32, now time.Time) (*Credentials, bool, error) {
 	var reply protocol.TGSRep
 	if err := asn1.Unmarshal(data, &reply); err != nil {
 		if kerberosError, ok := decodeKRBError(data); ok {
@@ -521,7 +636,7 @@ func (c *Client) decodeTGSRepForExchange(data []byte, clientPrincipal, service, 
 	if err != nil {
 		return nil, false, err
 	}
-	plaintext, err := etype.Decrypt(key, 8, reply.EncPart.Cipher)
+	plaintext, err := etype.Decrypt(key, usage, reply.EncPart.Cipher)
 	if err != nil {
 		return nil, false, fmt.Errorf("TGS exchange decrypt TGS-REP: %w", err)
 	}

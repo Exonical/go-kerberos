@@ -519,6 +519,64 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 	return marshalDER(reply)
 }
 
+func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext) []byte {
+	strengthenValue := make([]byte, armor.etype.KeySize())
+	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	effectiveKey, err := crypto.CF2(armor.etype, strengthenValue, replyKey.KeyValue,
+		[]byte("strengthenkey"), []byte("replykey"))
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyPlain, err := replyEType.Decrypt(replyKey.KeyValue, replyUsage, reply.EncPart.Cipher)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyCipher, err := replyEType.Encrypt(effectiveKey, replyUsage, replyPlain)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	reply.EncPart = protocol.EncryptedData{EType: reply.EncPart.EType, Cipher: replyCipher}
+	ticketChecksum, err := armor.etype.Checksum(armor.key, fast.UsageFinished, marshalDER(reply.Ticket))
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	now := s.now().UTC()
+	fastResponse := protocol.KrbFastResponse{
+		StrengthenKey: &protocol.EncryptionKey{KeyType: armor.etype.ID(), KeyValue: strengthenValue},
+		Finished: &protocol.KrbFastFinished{
+			Timestamp: types.KerberosTime{Time: now, Present: true},
+			Usec:      int32(now.Nanosecond() / 1000),
+			CRealm:    reply.CRealm,
+			CName:     reply.CName,
+			TicketChecksum: protocol.Checksum{
+				ChecksumType: fast.ChecksumType(armor.etype.ID()),
+				Checksum:     ticketChecksum,
+			},
+		},
+		Nonce: armor.nonce,
+	}
+	if armor.cookie != nil {
+		fastResponse.PAData = protocol.MethodData{*armor.cookie}
+	}
+	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	reply.PAData = protocol.MethodData{{
+		PADataType: fast.PAFXFast,
+		PADataValue: marshalDER(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+			EncFastRep: protocol.EncryptedData{EType: armor.etype.ID(), Cipher: responseCipher},
+		}}),
+	}}
+	return marshalDER(reply)
+}
+
 func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, data []byte, nonce uint32, armor *fastContext) []byte {
 	var inner protocol.MethodData
 	if armor.cookie != nil {
@@ -542,6 +600,13 @@ func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, 
 		}}),
 	}}
 	return s.errorResponseWithData(code, service, marshalDER(outer))
+}
+
+func (s *Server) tgsErrorResponse(armor *fastContext, code int32, service *protocol.PrincipalName) []byte {
+	if armor == nil {
+		return s.errorResponse(code, service)
+	}
+	return s.fastErrorResponse(code, service, nil, armor.nonce, armor)
 }
 
 func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
@@ -585,30 +650,6 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
-	options := request.ReqBody.KDCOptions
-	if options&types.KDCRenew != 0 {
-		if code, ok := s.ticketValidity(ticketPart); !ok {
-			return s.errorResponse(code, request.ReqBody.SName)
-		}
-		if ticketPart.Flags&types.TicketRenewable == 0 {
-			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
-		}
-		if ticketPart.RenewTill == nil || s.now().After(ticketPart.RenewTill.Time) {
-			return s.errorResponse(krbAPErrTktExpired, request.ReqBody.SName)
-		}
-	} else if options&types.KDCValidate != 0 {
-		if ticketPart.Flags&types.TicketInvalid == 0 {
-			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
-		}
-		if ticketPart.StartTime != nil && ticketPart.StartTime.Present && s.now().Before(ticketPart.StartTime.Time) {
-			return s.errorResponse(krbAPErrTktNYV, request.ReqBody.SName)
-		}
-		if code, ok := s.ticketValidityWithInvalid(ticketPart); !ok {
-			return s.errorResponse(code, request.ReqBody.SName)
-		}
-	} else if code, ok := s.ticketValidity(ticketPart); !ok {
-		return s.errorResponse(code, request.ReqBody.SName)
-	}
 	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -638,28 +679,63 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	if err := sessionEType.VerifyChecksum(ticketPart.Key.KeyValue, 6, body, authenticator.Checksum.Checksum); err != nil {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
+	var armor *fastContext
+	if findPA(request.PAData, fast.PAFXFast) != nil {
+		var errCode int32
+		request, armor, errCode = s.unwrapFASTTGSReq(request, pa.PADataValue, ticketPart, authenticator)
+		if errCode != 0 {
+			if armor != nil {
+				return s.fastErrorResponse(errCode, request.ReqBody.SName, nil, armor.nonce, armor)
+			}
+			return s.errorResponse(errCode, request.ReqBody.SName)
+		}
+	}
+	options := request.ReqBody.KDCOptions
+	if options&types.KDCRenew != 0 {
+		if code, ok := s.ticketValidity(ticketPart); !ok {
+			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+		}
+		if ticketPart.Flags&types.TicketRenewable == 0 {
+			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+		}
+		if ticketPart.RenewTill == nil || s.now().After(ticketPart.RenewTill.Time) {
+			return s.tgsErrorResponse(armor, krbAPErrTktExpired, request.ReqBody.SName)
+		}
+	} else if options&types.KDCValidate != 0 {
+		if ticketPart.Flags&types.TicketInvalid == 0 {
+			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+		}
+		if ticketPart.StartTime != nil && ticketPart.StartTime.Present && s.now().Before(ticketPart.StartTime.Time) {
+			return s.tgsErrorResponse(armor, krbAPErrTktNYV, request.ReqBody.SName)
+		}
+		if code, ok := s.ticketValidityWithInvalid(ticketPart); !ok {
+			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+		}
+	} else if code, ok := s.ticketValidity(ticketPart); !ok {
+		return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+	}
 	if apRequest.Ticket.Realm != s.Realm {
 		if (ticketPart.Transited.TrType == 0 && len(ticketPart.Transited.Contents) != 0) ||
 			(ticketPart.Transited.TrType != 0 && ticketPart.Transited.TrType != domainX500Compress) {
-			return s.errorResponse(14, request.ReqBody.SName)
+			return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 		}
 		contents, err := appendTransited(ticketPart.Transited.Contents, apRequest.Ticket.Realm)
 		if err != nil {
-			return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
 		}
 		ticketPart.Transited = protocol.TransitedEncoding{
 			TrType: domainX500Compress, Contents: contents,
 		}
 	}
 	if s.replayed(ticketPart.CRealm, ticketPart.CName, authenticator) {
-		return s.errorResponse(krbAPErrRepeat, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, krbAPErrRepeat, request.ReqBody.SName)
 	}
 	if options&types.KDCPostdated != 0 && options&types.KDCAllowPostdate == 0 {
-		return s.errorResponse(kdcErrCannotPostdate, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrCannotPostdate, request.ReqBody.SName)
 	}
 	if options&(types.KDCAllowPostdate|types.KDCPostdated) != 0 &&
 		ticketPart.Flags&types.TicketMayPostdate == 0 {
-		return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
@@ -672,14 +748,14 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
-		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	if !ok {
-		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
 	}
 	etypeID, serviceKey, ok := selectServiceKey(request.ReqBody.EType, serviceRecord)
 	if !ok {
-		return s.errorResponse(14, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 	}
 	replyKey := ticketPart.Key
 	replyUsage := uint32(8)
@@ -687,13 +763,64 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor)
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32) []byte {
+func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byte, ticketPart protocol.EncTicketPart, authenticator protocol.Authenticator) (protocol.TGSReq, *fastContext, int32) {
+	pa := findPA(request.PAData, fast.PAFXFast)
+	if pa == nil {
+		return request, nil, 0
+	}
+	var wrapper protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(pa.PADataValue, &wrapper); err != nil ||
+		wrapper.ArmoredData.Armor != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	if authenticator.SubKey == nil || authenticator.SubKey.KeyType != ticketPart.Key.KeyType {
+		return request, nil, kdcErrPreauthFailed
+	}
+	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
+	if err != nil || len(authenticator.SubKey.KeyValue) != sessionEType.KeySize() {
+		return request, nil, kdcErrPreauthFailed
+	}
+	armorKey, err := crypto.CF2(sessionEType, authenticator.SubKey.KeyValue, ticketPart.Key.KeyValue,
+		[]byte("subkeyarmor"), []byte("ticketarmor"))
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	armor := &fastContext{etype: sessionEType, key: armorKey}
+	if wrapper.ArmoredData.EncFastReq.EType != sessionEType.ID() ||
+		wrapper.ArmoredData.ReqChecksum.ChecksumType != fast.ChecksumType(sessionEType.ID()) ||
+		wrapper.ArmoredData.ReqChecksum.Checksum == nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	plaintext, err := sessionEType.Decrypt(armorKey, fast.UsageReq, wrapper.ArmoredData.EncFastReq.Cipher)
+	if err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	var fastRequest protocol.KrbFastReq
+	if err := asn1.Unmarshal(plaintext, &fastRequest); err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	if err := sessionEType.VerifyChecksum(armorKey, fast.UsageReqChecksum, checksummedData,
+		wrapper.ArmoredData.ReqChecksum.Checksum); err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	if cookie := findPA(fastRequest.PAData, fast.PAFXCookie); cookie != nil {
+		copy := *cookie
+		copy.PADataValue = append([]byte(nil), cookie.PADataValue...)
+		armor.cookie = &copy
+	}
+	request.ReqBody = fastRequest.ReqBody
+	request.PAData = fastRequest.PAData
+	armor.nonce = fastRequest.ReqBody.Nonce
+	return request, armor, 0
+}
+
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
-		return s.errorResponse(14, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 	}
 	sessionValue := make([]byte, etype.KeySize())
 	if _, err := io.ReadFull(crypto.RandomSource, sessionValue); err != nil {
@@ -729,7 +856,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 			if request.ReqBody.From == nil || !request.ReqBody.From.Present ||
 				!request.ReqBody.From.Time.After(now) ||
 				(request.ReqBody.Till.Present && !request.ReqBody.Till.Time.After(request.ReqBody.From.Time)) {
-				return s.errorResponse(kdcErrCannotPostdate, request.ReqBody.SName)
+				return s.tgsErrorResponse(armor, kdcErrCannotPostdate, request.ReqBody.SName)
 			}
 			startTime = request.ReqBody.From
 			start = startTime.Time
@@ -769,14 +896,14 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if !crossRealmTGT && len(ticketPart.Transited.Contents) > 0 {
 		if !transitedPermitted(ticketPart.Transited.Contents, ticketPart.CRealm,
 			serviceName.Realm, s.Capaths) {
-			return s.errorResponse(kdcErrPolicy, request.ReqBody.SName)
+			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
 		}
 		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
 	if err != nil {
-		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketKVNO := serviceKey.KVNO
 	ticket := protocol.Ticket{
@@ -800,12 +927,15 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	replyCipher, err := encryptWithKey(kdb.Key{Enctype: replyKey.KeyType, KVNO: 0, Key: replyKey.KeyValue}, replyUsage, marshalDER(part))
 	if err != nil {
-		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	reply := protocol.TGSRep{
 		PVNO: 5, MsgType: 13, CRealm: ticketPart.CRealm, CName: ticketPart.CName,
 		Ticket:  ticket,
 		EncPart: protocol.EncryptedData{EType: replyKey.KeyType, Cipher: replyCipher},
+	}
+	if armor != nil {
+		return s.wrapFASTTGSRep(reply, replyKey, replyUsage, armor)
 	}
 	return marshalDER(reply)
 }
