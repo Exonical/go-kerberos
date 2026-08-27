@@ -18,9 +18,13 @@ when absent.
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
 | AP exchange | RED | RED | RED |
+| PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
 The matrix will be extended for later client features such as renewal,
 canonicalization, referrals, FAST, GSS-API, S4U, and PKINIT.
+
+The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
+using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.
 
 ## Testing layers
 
