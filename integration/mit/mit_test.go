@@ -277,6 +277,49 @@ func TestGoClientAPExchange(t *testing.T) {
 	}
 }
 
+func TestGoKinitInterop(t *testing.T) {
+	realm := testenv.Start(t)
+	binaryPath := filepath.Join(realm.Dir, "gokinit")
+	realm.Run(t, "", "/usr/local/go/bin/go", "build", "-o", binaryPath, "../../cmd/gokinit")
+	realm.Run(t, "alice-password\n", binaryPath, "-c", realm.Cache, "alice")
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", realm.Cache)
+	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
+		t.Fatalf("MIT klist does not contain gokinit TGT:\n%s", listing)
+	}
+}
+
+func TestGoKlistInterop(t *testing.T) {
+	realm := testenv.Start(t)
+	realm.Run(t, "alice-password\n", "/usr/bin/kinit", "-c", realm.Cache, "alice")
+	binaryPath := filepath.Join(realm.Dir, "goklist")
+	realm.Run(t, "", "/usr/local/go/bin/go", "build", "-o", binaryPath, "../../cmd/goklist")
+	listing := realm.Run(t, "", binaryPath, "-c", realm.Cache, "-e")
+	for _, expected := range []string{
+		"Default principal: alice@" + testenv.RealmName,
+		"krbtgt/" + testenv.RealmName + "@" + testenv.RealmName,
+		"aes256-cts-hmac-sha1-96",
+	} {
+		if !strings.Contains(listing, expected) {
+			t.Fatalf("goklist output does not contain %q:\n%s", expected, listing)
+		}
+	}
+}
+
+func TestGoKVNOInterop(t *testing.T) {
+	realm := testenv.Start(t)
+	realm.Run(t, "alice-password\n", "/usr/bin/kinit", "-c", realm.Cache, "alice")
+	binaryPath := filepath.Join(realm.Dir, "gokvno")
+	realm.Run(t, "", "/usr/local/go/bin/go", "build", "-o", binaryPath, "../../cmd/gokvno")
+	output := realm.Run(t, "", binaryPath, "-c", realm.Cache, "host/service.test")
+	if !strings.Contains(output, "host/service.test@"+testenv.RealmName+": kvno = ") {
+		t.Fatalf("gokvno output does not contain service ticket:\n%s", output)
+	}
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", realm.Cache)
+	if !strings.Contains(listing, "host/service.test@"+testenv.RealmName) {
+		t.Fatalf("MIT klist does not contain gokvno service ticket:\n%s", listing)
+	}
+}
+
 func TestFixturePathsRemainStable(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
