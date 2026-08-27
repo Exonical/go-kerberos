@@ -91,6 +91,56 @@ func TestServerFASTRejectsMalformedArmor(t *testing.T) {
 	}
 }
 
+func TestServerFASTRejectsBadChecksumAndGarbage(t *testing.T) {
+	now := time.Unix(2000000070, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		t.Fatalf("new armor: %v", err)
+	}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}, 8)
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("wrap FAST request: %v", err)
+	}
+	var wrapper protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(fastData.PADataValue, &wrapper); err != nil {
+		t.Fatalf("decode FAST request: %v", err)
+	}
+	wrapper.ArmoredData.ReqChecksum.Checksum[0] ^= 0xff
+	fastData.PADataValue = mustMarshal(t, wrapper)
+	request.PAData = protocol.MethodData{fastData}
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	request.PAData[0].PADataValue = mustMarshal(t, wrapper)
+	request.PAData[0].PADataValue[len(request.PAData[0].PADataValue)-1] ^= 0xff
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	request.PAData[0].PADataValue = []byte{0x01, 0x02, 0x03}
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+}
+
+func assertKRBError(t *testing.T, response []byte) {
+	t.Helper()
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("FAST error response: %v", err)
+	}
+	if kerberosError.ErrorCode == 0 {
+		t.Fatal("FAST request unexpectedly succeeded")
+	}
+}
+
 func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 	now := time.Unix(2000000100, 0).UTC()
 	server, _ := testServer(t, now)
