@@ -58,3 +58,24 @@ func TestAddPrincipalRequiresRealmConsistentWithDatabase(t *testing.T) {
 		t.Fatal("cross-realm principal unexpectedly accepted")
 	}
 }
+
+func TestAddPrincipalAllowsForeignRealmTGT(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("krbtgt/TEST.REALM@OTHER.REALM", "shared-password", 1); err != nil {
+		t.Fatalf("cross-realm TGT: %v", err)
+	}
+	name, err := principal.Parse("krbtgt/TEST.REALM@OTHER.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*name)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !ok {
+		t.Fatal("cross-realm TGT was not stored")
+	}
+	if record.Name.Realm != "OTHER.REALM" {
+		t.Fatalf("stored realm = %q", record.Name.Realm)
+	}
+}

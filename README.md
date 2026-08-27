@@ -91,7 +91,11 @@ notes, and the full test matrix.
 ## Roadmap
 
 S4U (constrained delegation), PKINIT, KDC replay cache and renewals,
-cross-realm, kdb persistence, and server-side FAST.
+kdb persistence, and server-side FAST.
+
+Cross-realm TGS support currently covers direct single-hop trust. Configure
+matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
+transited-policy checking are intentionally out of scope.
 
 ## License
 

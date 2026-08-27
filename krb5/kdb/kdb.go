@@ -123,7 +123,8 @@ func parseName(name, realm string) (*principal.Principal, error) {
 	if err != nil {
 		return nil, err
 	}
-	if parsed.Realm != realm {
+	if parsed.Realm != realm &&
+		(len(parsed.Components) != 2 || parsed.Components[0] != "krbtgt") {
 		return nil, fmt.Errorf("principal realm %q does not match database realm %q", parsed.Realm, realm)
 	}
 	if len(parsed.Components) == 0 {

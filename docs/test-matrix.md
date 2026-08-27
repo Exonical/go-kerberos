@@ -17,11 +17,15 @@ when absent.
 | FILE ccache | RED | RED | RED |
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
+| Cross-realm TGS | unit coverage | unit coverage | unit coverage |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
 The matrix will be extended for later client features such as renewal,
 canonicalization, referrals, FAST, GSS-API, S4U, and PKINIT.
+
+Cross-realm support is limited to direct single-hop trust. Capaths and
+transited-policy checking are not implemented.
 
 The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
 using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.
