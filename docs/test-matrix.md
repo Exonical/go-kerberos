@@ -24,6 +24,7 @@ when absent.
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd password change | Go client + live MIT kadmind | MIT `kadmind` | Go client |
+| MIT kadm5 administrative RPC subset | Go client + live MIT kadmind | MIT `kadmind` | Go client |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -90,12 +91,14 @@ Go AS exchange with the new password. Password policy and authorization errors
 are returned without exposing password material. RFC 3244 set-password
 requests for another principal are not currently exposed.
 
-The larger MIT `kadm5` administrative RPC is intentionally out of scope. The
-pinned MIT source requires generated XDR for a broad procedure set
-(`create_principal_2`, `create_principal3_2`, principal/key/modifying
-operations, and more), ONC-RPC transport, and AUTH-GSSAPI RPC authentication
-from `src/lib/kadm5` and `src/kadmin`. This focused slice does not claim
-general kadmin administrative RPC support.
+The Go client implements a focused MIT `kadm5` administrative RPC subset over
+RFC 5531 record-marked TCP with RPCSEC_GSS privacy and strict hand-written XDR.
+API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
+covers `GET_PRINCIPAL`, `CREATE_PRINCIPAL`, `DELETE_PRINCIPAL`, and
+`CHPASS_PRINCIPAL`. Key management, policies, aliases, renaming, principal
+listing, and other procedures remain out of scope. MIT's legacy
+AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
+modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 
 ## Testing layers
 

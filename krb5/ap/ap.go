@@ -296,6 +296,9 @@ func VerifyAPRep(request *APReq, der []byte) error {
 		part.Cusec != request.Cusec {
 		return fmt.Errorf("verify AP-REP: authenticator time mismatch")
 	}
+	if part.SubKey != nil {
+		request.SubKey = copyEncryptionKeyPointer(part.SubKey)
+	}
 	return nil
 }
 

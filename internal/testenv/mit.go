@@ -121,6 +121,7 @@ func start(t *testing.T, masterEType string) *Realm {
 	run(t, r.env(), "", "/usr/sbin/kdb5_util", createArgs...)
 	for _, command := range []string{
 		"ktadd -k " + filepath.Join(dir, "kadm5.keytab") + " kadmin/admin kadmin/changepw",
+		"addprinc -pw admin-password admin/admin",
 		"addprinc -pw alice-password alice",
 		"addprinc -pw bob-password bob",
 		"addprinc -pw host-password host/server.test",

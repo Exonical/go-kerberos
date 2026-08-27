@@ -15,6 +15,9 @@ disposable integration test environments.
   and canonicalization (loop detection, hop cap).
 - **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and
   KRB-PRIV framing on the kpasswd service port.
+- **MIT kadm5 administrative RPC** over ONC-RPC/RFC 5531 record-marked TCP
+  with RPCSEC_GSS privacy, covering API negotiation and principal
+  create/get/delete/password-change operations.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
@@ -93,9 +96,9 @@ notes, and the full test matrix.
 ## Roadmap
 
 S4U (constrained delegation), PKINIT, KDC replay cache and renewals,
-kdb persistence, server-side FAST, and RFC 3244 password changes are
-implemented. The larger MIT kadm5 administrative RPC (ONC-RPC/GSS-RPC) is
-not implemented; this project does not claim general kadmin RPC support.
+kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
+MIT kadm5 administrative RPC subset are implemented. General kadmin RPC
+coverage beyond the documented principal operations remains out of scope.
 
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
