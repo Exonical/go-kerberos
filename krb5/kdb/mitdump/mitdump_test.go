@@ -2,8 +2,10 @@ package mitdump
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +87,18 @@ func TestParseMITDumpFixture(t *testing.T) {
 func TestParseMITDumpRejectsWrongMasterPassword(t *testing.T) {
 	if _, err := ParseWithMasterPassword(fixtureBytes(t), "wrong-password"); err == nil {
 		t.Fatal("ParseWithMasterPassword unexpectedly succeeded")
+	}
+}
+
+func TestParseMITDumpRejectsUnsupportedMasterEnctype(t *testing.T) {
+	realm := "TEST.GOKRB5.LOCAL"
+	name := "K/M@" + realm
+	record := fmt.Sprintf("princ\t%d\t%d\t0\t1\t0\t%s\t0\t0\t0\t0\t0\t0\t0\t0\t1\t1\t23\t0\t-1\t-1;\n",
+		len(name), len(name), name)
+	data := append(append([]byte(nil), fixtureBytes(t)...), []byte(record)...)
+	_, err := ParseWithMasterPassword(data, "synthetic-master-password")
+	if err == nil || !strings.Contains(err.Error(), "unsupported MIT dump master enctype 23") {
+		t.Fatalf("error = %v, want unsupported master enctype", err)
 	}
 }
 
