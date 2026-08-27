@@ -312,6 +312,21 @@ func TestTGSExchangeRejectsTamperedReply(t *testing.T) {
 	}
 }
 
+func TestRequestNonceFitsKerberosInteger(t *testing.T) {
+	restore := crypto.SetRandomSource(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+	defer restore()
+	request, err := (&Client{}).newASReq(
+		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		time.Unix(0, 0).UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReqBody.Nonce > 0x7fffffff {
+		t.Fatalf("nonce = %#x exceeds positive INTEGER range", request.ReqBody.Nonce)
+	}
+}
+
 func kerberosTime(value time.Time) types.KerberosTime {
 	return types.KerberosTime{Time: value, Present: true}
 }
