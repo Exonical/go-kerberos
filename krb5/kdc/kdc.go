@@ -164,7 +164,7 @@ func (s *Server) handleASReq(request protocol.ASReq) []byte {
 				PADataType: 19,
 				PADataValue: marshalDER(protocol.ETypeInfo2{{
 					EType: etypeID,
-					Salt:  stringPointer(clientName.Realm + joinComponents(clientName.Components)),
+					Salt:  stringPointer(principalSalt(clientRecord, clientName)),
 				}}),
 			},
 		}
@@ -502,6 +502,13 @@ func joinComponents(values []string) string {
 		result += value
 	}
 	return result
+}
+
+func principalSalt(record kdb.PrincipalRecord, name principal.Principal) string {
+	if record.Salt != "" {
+		return record.Salt
+	}
+	return name.Realm + joinComponents(name.Components)
 }
 
 func stringPointer(value string) *string { return &value }

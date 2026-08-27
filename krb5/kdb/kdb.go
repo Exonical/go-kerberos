@@ -21,6 +21,7 @@ type Key struct {
 // PrincipalRecord contains a principal and its KDC policy.
 type PrincipalRecord struct {
 	Name     principal.Principal
+	Salt     string
 	Keys     map[int32]Key
 	KVNO     uint32
 	Flags    uint32
@@ -90,7 +91,7 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 		}
 		keys[enctype] = Key{Enctype: enctype, KVNO: latest, Key: derived}
 	}
-	record := PrincipalRecord{Name: *parsedName, Keys: keys, KVNO: latest}
+	record := PrincipalRecord{Name: *parsedName, Salt: parsedName.Realm + strings.Join(parsedName.Components, ""), Keys: keys, KVNO: latest}
 	db.mu.Lock()
 	db.principals[canonical(*parsedName)] = record
 	db.mu.Unlock()
