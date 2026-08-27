@@ -28,6 +28,11 @@ type PrincipalRecord struct {
 	MaxRenew time.Duration
 }
 
+// Store resolves principal records for the KDC.
+type Store interface {
+	Lookup(principal.Principal) (PrincipalRecord, bool)
+}
+
 // Database is a concurrency-safe in-memory principal store.
 type Database struct {
 	Realm string

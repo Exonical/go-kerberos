@@ -34,7 +34,7 @@ const (
 // Server is an in-memory Kerberos KDC.
 type Server struct {
 	Realm            string
-	DB               *kdb.Database
+	DB               kdb.Store
 	Now              func() time.Time
 	ClockSkew        time.Duration
 	MaxTicketLife    time.Duration
