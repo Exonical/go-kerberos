@@ -119,19 +119,15 @@ func (a *Armor) WrapASReq(body protocol.KDCReqBody, inner protocol.MethodData) (
 	if err != nil {
 		return protocol.PAData{}, fmt.Errorf("FAST request checksum: %w", err)
 	}
-	armored, err := asn1.Marshal(protocol.KrbFastArmoredReq{
+	armored, err := asn1.Marshal(protocol.PAFXFastRequest{ArmoredData: protocol.KrbFastArmoredReq{
 		Armor:       &protocol.KrbFastArmor{ArmorType: ArmorTypeAPReq, ArmorValue: append([]byte(nil), a.APReq...)},
 		ReqChecksum: protocol.Checksum{ChecksumType: checksumType(a.EType.ID()), Checksum: checksum},
 		EncFastReq:  protocol.EncryptedData{EType: a.EType.ID(), Cipher: cipher},
-	})
+	}})
 	if err != nil {
 		return protocol.PAData{}, fmt.Errorf("FAST request armor: %w", err)
 	}
-	value, err := asn1.WrapContext(0, armored)
-	if err != nil {
-		return protocol.PAData{}, err
-	}
-	return protocol.PAData{PADataType: PAFXFast, PADataValue: value}, nil
+	return protocol.PAData{PADataType: PAFXFast, PADataValue: armored}, nil
 }
 
 // UnwrapReply authenticates and decrypts a PA-FX-FAST reply.
@@ -149,18 +145,14 @@ func (a *Armor) UnwrapReply(padata protocol.MethodData, ticket []byte, nonce uin
 	if len(value) == 0 {
 		return nil, fmt.Errorf("FAST reply: missing PA-FX-FAST")
 	}
-	armored, err := asn1.UnwrapContext(value, 0)
-	if err != nil {
-		return nil, fmt.Errorf("FAST reply: %w", err)
-	}
-	var wrapper protocol.KrbFastArmoredRep
-	if err := asn1.Unmarshal(armored, &wrapper); err != nil {
+	var wrapper protocol.PAFXFastReply
+	if err := asn1.Unmarshal(value, &wrapper); err != nil {
 		return nil, fmt.Errorf("FAST reply armor: %w", err)
 	}
-	if wrapper.EncFastRep.EType != a.EType.ID() {
-		return nil, fmt.Errorf("FAST reply enctype %d: %w", wrapper.EncFastRep.EType, krberrors.ErrUnsupportedEType)
+	if wrapper.ArmoredData.EncFastRep.EType != a.EType.ID() {
+		return nil, fmt.Errorf("FAST reply enctype %d: %w", wrapper.ArmoredData.EncFastRep.EType, krberrors.ErrUnsupportedEType)
 	}
-	plaintext, err := a.EType.Decrypt(a.Key, UsageRep, wrapper.EncFastRep.Cipher)
+	plaintext, err := a.EType.Decrypt(a.Key, UsageRep, wrapper.ArmoredData.EncFastRep.Cipher)
 	if err != nil {
 		return nil, fmt.Errorf("FAST reply decrypt: %w", err)
 	}

@@ -255,7 +255,7 @@ type KrbFastArmoredReq struct {
 
 // PAFXFastRequest is the PA-FX-FAST request choice payload.
 type PAFXFastRequest struct {
-	ArmoredData KrbFastArmoredReq `krb5:"tag:0"`
+	ArmoredData KrbFastArmoredReq `krb5:"tag:0,choice"`
 }
 
 // KrbFastReq is the encrypted inner FAST request.
@@ -272,7 +272,7 @@ type KrbFastArmoredRep struct {
 
 // PAFXFastReply is the PA-FX-FAST reply choice payload.
 type PAFXFastReply struct {
-	ArmoredData KrbFastArmoredRep `krb5:"tag:0"`
+	ArmoredData KrbFastArmoredRep `krb5:"tag:0,choice"`
 }
 
 // KrbFastResponse is the encrypted FAST response.

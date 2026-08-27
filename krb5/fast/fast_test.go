@@ -47,15 +47,11 @@ func TestArmorWrapAndUnwrapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outer, err := asn1.UnwrapContext(pa.PADataValue, 0)
-	if err != nil {
+	var wrapped protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(pa.PADataValue, &wrapped); err != nil {
 		t.Fatal(err)
 	}
-	var wrapped protocol.KrbFastArmoredReq
-	if err := asn1.Unmarshal(outer, &wrapped); err != nil {
-		t.Fatal(err)
-	}
-	plaintext, err := etype.Decrypt(armor.Key, UsageReq, wrapped.EncFastReq.Cipher)
+	plaintext, err := etype.Decrypt(armor.Key, UsageReq, wrapped.ArmoredData.EncFastReq.Cipher)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +63,7 @@ func TestArmorWrapAndUnwrapRoundTrip(t *testing.T) {
 		t.Fatalf("inner request mismatch: %#v", inner)
 	}
 	bodyDER, _ := asn1.Marshal(body)
-	if err := etype.VerifyChecksum(armor.Key, UsageReqChecksum, bodyDER, wrapped.ReqChecksum.Checksum); err != nil {
+	if err := etype.VerifyChecksum(armor.Key, UsageReqChecksum, bodyDER, wrapped.ArmoredData.ReqChecksum.Checksum); err != nil {
 		t.Fatalf("request checksum: %v", err)
 	}
 
@@ -92,14 +88,13 @@ func TestArmorWrapAndUnwrapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replyDER, err := asn1.Marshal(protocol.KrbFastArmoredRep{
+	replyDER, err := asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
 		EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: responseCipher},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	replyValue, _ := asn1.WrapContext(0, replyDER)
-	reply, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: replyValue}}, ticket, body.Nonce)
+	reply, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: replyDER}}, ticket, body.Nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,8 +111,7 @@ func TestArmorRejectsReplyNonceAndFinishedChecksum(t *testing.T) {
 	armor := &Armor{EType: etype, Key: bytes.Repeat([]byte{1}, etype.KeySize())}
 	responseDER, _ := asn1.Marshal(protocol.KrbFastResponse{Nonce: 2})
 	cipher, _ := etype.Encrypt(armor.Key, UsageRep, responseDER)
-	wrapper, _ := asn1.Marshal(protocol.KrbFastArmoredRep{EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher}})
-	value, _ := asn1.WrapContext(0, wrapper)
+	value, _ := asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher}}})
 	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 1); err == nil {
 		t.Fatal("nonce mismatch unexpectedly accepted")
 	}
@@ -142,14 +136,11 @@ func TestArmorRejectsReplyNonceAndFinishedChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper, err = asn1.Marshal(protocol.KrbFastArmoredRep{EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher}})
+	wrapper, err := asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err = asn1.WrapContext(0, wrapper)
-	if err != nil {
-		t.Fatal(err)
-	}
+	value = wrapper
 	value[len(value)-1] ^= 1
 	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 2); err == nil {
 		t.Fatal("tampered FAST reply unexpectedly accepted")

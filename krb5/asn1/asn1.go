@@ -27,6 +27,7 @@ type applicationTagger interface {
 type fieldTag struct {
 	number   int
 	optional bool
+	choice   bool
 }
 
 // Marshal encodes a Kerberos ASN.1 value using canonical DER.
@@ -106,6 +107,13 @@ func encodeValue(value reflect.Value, depth int) ([]byte, error) {
 			return nil, err
 		}
 		return encodeTLV(0x60|byte(tag), inner), nil
+	}
+	if tag, field, ok := choiceField(value); ok {
+		encoded, err := encodeValue(value.Field(field), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return encodeTLV(0xa0|byte(tag), encoded), nil
 	}
 	return encodeBare(value, depth)
 }
@@ -217,6 +225,12 @@ func decodeValue(data []byte, destination reflect.Value, depth int) error {
 			return fmt.Errorf("application value is not a complete SEQUENCE")
 		}
 		return decodeBare(innerTag, innerContent, destination, depth+1)
+	}
+	if tagNumber, field, ok := choiceField(destination); ok {
+		if tag != 0xa0|byte(tagNumber) {
+			return fmt.Errorf("unexpected choice tag 0x%x", tag)
+		}
+		return decodeValue(content, destination.Field(field), depth+1)
 	}
 	return decodeBare(tag, content, destination, depth)
 }
@@ -546,12 +560,42 @@ func parseFieldTag(field reflect.StructField) (fieldTag, bool, error) {
 			result.number = number
 		case part == "optional":
 			result.optional = true
+		case part == "choice":
+			result.choice = true
 		default:
 			return fieldTag{}, false, fmt.Errorf("unknown krb5 field option %q", part)
 		}
 		position = end + 1
 	}
 	return result, true, nil
+}
+
+func choiceField(value reflect.Value) (int, int, bool) {
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return 0, 0, false
+	}
+	found, tagNumber := -1, 0
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		tag, hasTag, err := parseFieldTag(field)
+		if err != nil || !hasTag || !tag.choice {
+			continue
+		}
+		if found >= 0 {
+			return 0, 0, false
+		}
+		found, tagNumber = i, tag.number
+	}
+	if found < 0 {
+		return 0, 0, false
+	}
+	return tagNumber, found, true
 }
 
 func isAbsent(value reflect.Value) bool {
