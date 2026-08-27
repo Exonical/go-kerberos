@@ -97,9 +97,11 @@ without exposing password material.
 The Go client implements a focused MIT `kadm5` administrative RPC subset over
 RFC 5531 record-marked TCP with RPCSEC_GSS privacy and strict hand-written XDR.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
-covers `GET_PRINCIPAL`, `CREATE_PRINCIPAL`, `DELETE_PRINCIPAL`, and
-`CHPASS_PRINCIPAL`. Key management, policies, aliases, renaming, principal
-listing, and other procedures remain out of scope. MIT's legacy
+covers `GET_PRINCIPAL`, `CREATE_PRINCIPAL`, `MODIFY_PRINCIPAL`,
+`RENAME_PRINCIPAL`, `DELETE_PRINCIPAL`, `CHPASS_PRINCIPAL`,
+`CHRAND_PRINCIPAL`, policy create/get/modify/delete, `GET_PRINCS`,
+`GET_POLS`, and `GET_PRIVS`. Key-data management, aliases, and less-common
+procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 
