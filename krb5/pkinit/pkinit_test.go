@@ -47,7 +47,7 @@ func TestAuthPackGoldenDER(t *testing.T) {
 	}
 }
 
-func testCertificate(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
+func testCertificate(t testing.TB) (*x509.Certificate, *rsa.PrivateKey) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -88,6 +88,40 @@ func TestCMSRoundTripAndTamperRejection(t *testing.T) {
 	tampered[len(tampered)-1] ^= 1
 	if _, _, err := verifyCMSChoice(tampered, nil); err == nil {
 		t.Fatal("tampered CMS accepted")
+	}
+}
+
+func TestCMSRejectsSignerWithoutSignedAttributes(t *testing.T) {
+	cert, key := testCertificate(t)
+	content := []byte{0x30, 0x00}
+	cms, err := signCMS(content, cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer, err := sequenceFields(cms)
+	if err != nil || len(outer) != 2 {
+		t.Fatalf("CMS outer fields: %v", err)
+	}
+	signedData, err := sequenceFields(mustContent(outer[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signerInfos, err := collectionFields(signedData[4])
+	if err != nil || len(signerInfos) != 1 {
+		t.Fatalf("signer infos: %v", err)
+	}
+	signer, err := sequenceFields(signerInfos[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutAttrs := derSeq(signer[0], signer[1], signer[2], signer[4], signer[5])
+	signedData[4] = derSet(withoutAttrs)
+	malformed := derSeq(
+		derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}),
+		derExplicit(0, derSeq(signedData...)),
+	)
+	if _, _, err := verifyCMSChoice(malformed, nil); err == nil {
+		t.Fatal("CMS signer without signed attributes accepted")
 	}
 }
 
@@ -180,5 +214,9 @@ func TestValidateKDCEKU(t *testing.T) {
 	cert.UnknownExtKeyUsage = []asn1.ObjectIdentifier{{1, 2, 3}}
 	if err := validateKDC(nil, cert); err == nil {
 		t.Fatal("certificate with incorrect EKU accepted")
+	}
+	cert.UnknownExtKeyUsage = nil
+	if err := validateKDC(nil, cert); err == nil {
+		t.Fatal("certificate without EKU accepted")
 	}
 }
