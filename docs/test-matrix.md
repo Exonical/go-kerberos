@@ -17,7 +17,7 @@ when absent.
 | FILE ccache | RED | RED | RED |
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
-| Cross-realm TGS | unit coverage | unit coverage | unit coverage |
+| Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump) | unit + golden | MIT pass | read-only |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
@@ -25,8 +25,12 @@ when absent.
 The matrix will be extended for later client features such as renewal,
 canonicalization, referrals, FAST, GSS-API, S4U, and PKINIT.
 
-Cross-realm support is limited to direct single-hop trust. Capaths and
-transited-policy checking are not implemented.
+Cross-realm clients follow ordered `[capaths]` paths (up to ten hops), with
+direct trust as the fallback. KDC tickets use RFC 4120
+DOMAIN-X500-COMPRESS transited contents and validate transited realms against
+the configured server capath or the default hierarchical path. Server-side
+capaths are supplied through `kdc.Server.Capaths`; a full MIT policy-module
+configuration interface is not implemented.
 
 The current PKINIT client implements the RFC 4556 Diffie-Hellman profile
 using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.

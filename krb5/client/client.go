@@ -319,34 +319,58 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 		if c.Now != nil {
 			now = c.Now().UTC()
 		}
-		crossTGTService := principal.Principal{
-			Realm: currentRealm, NameType: principal.NTSrvInstance,
-			Components: []string{"krbtgt", realm},
+		realmPath := []string{currentRealm, realm}
+		if c.Config != nil {
+			if configuredPath, configured, err := c.Config.RealmPath(currentRealm, realm); err != nil {
+				return nil, fmt.Errorf("TGS exchange: %w", err)
+			} else if configured {
+				realmPath = configuredPath
+			}
 		}
-		request, nonce, err := c.newTGSReq(currentTGT, crossTGTService, currentRealm, now, true)
-		if err != nil {
-			return nil, err
+		if len(realmPath) < 2 || len(realmPath) > 11 {
+			return nil, fmt.Errorf("TGS exchange: invalid capath")
 		}
-		response, err := c.exchangePayload(ctx, currentRealm, request, "cross-realm TGS exchange request")
-		if err != nil {
-			return nil, err
+		for hop := 1; hop < len(realmPath); hop++ {
+			nextRealm := realmPath[hop]
+			if nextRealm == "" || strings.EqualFold(nextRealm, currentRealm) {
+				return nil, fmt.Errorf("TGS exchange: capath realm loop at %s", nextRealm)
+			}
+			crossTGTService := principal.Principal{
+				Realm: currentRealm, NameType: principal.NTSrvInstance,
+				Components: []string{"krbtgt", nextRealm},
+			}
+			request, nonce, err := c.newTGSReq(currentTGT, crossTGTService, currentRealm, now,
+				true)
+			if err != nil {
+				return nil, err
+			}
+			response, err := c.exchangePayload(ctx, currentRealm, request, "cross-realm TGS exchange request")
+			if err != nil {
+				return nil, err
+			}
+			crossRequestedService := crossTGTService
+			crossRequestedService.Realm = nextRealm
+			result, referral, err := c.decodeTGSRepForExchange(
+				response, currentTGT.Client, crossTGTService, crossRequestedService,
+				true, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if referral || len(result.Server.Components) != 2 ||
+				result.Server.Components[0] != "krbtgt" ||
+				result.Server.Components[1] != nextRealm ||
+				!strings.EqualFold(result.Server.Realm, currentRealm) {
+				return nil, fmt.Errorf("TGS exchange: malformed cross-realm TGT")
+			}
+			currentTGT = result
+			currentRealm = nextRealm
+			now = time.Now().UTC()
+			if c.Now != nil {
+				now = c.Now().UTC()
+			}
 		}
-		crossRequestedService := crossTGTService
-		crossRequestedService.Realm = realm
-		result, referral, err := c.decodeTGSRepForExchange(
-			response, currentTGT.Client, crossTGTService, crossRequestedService,
-			true, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if referral || len(result.Server.Components) != 2 ||
-			result.Server.Components[0] != "krbtgt" ||
-			result.Server.Components[1] != realm ||
-			result.Server.Realm != currentRealm {
-			return nil, fmt.Errorf("TGS exchange: malformed cross-realm TGT")
-		}
-		currentTGT = result
+		realm = currentRealm
 	}
 	for hops := 0; ; hops++ {
 		if visited[realm] {

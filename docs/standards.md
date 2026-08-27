@@ -35,7 +35,7 @@ requirements.
 | METHOD-DATA | RFC 4120 | 5.9.1 | RED | not started |
 | ETYPE-INFO / ETYPE-INFO2 | RFC 4120 | 5.2.7, 5.9.1 | RED | not started |
 | LastReq | RFC 4120 | 5.2.8 | RED | not started |
-| TransitedEncoding | RFC 4120 | 5.3.1 | RED | not started |
+| TransitedEncoding | RFC 4120 | 5.3.1 | implemented | DOMAIN-X500-COMPRESS codec and policy checks |
 | AES CTS primitive | RFC 3962 | 5 | RED | not started |
 | Kerberos crypto framework | RFC 3961 | 4–6 | RED | not started |
 | AES128/AES256 CTS HMAC SHA1 | RFC 3962 | 4–5 | RED | not started |
@@ -46,7 +46,7 @@ requirements.
 | Checksums | RFC 3961, RFC 3962, RFC 8009 | 4, 5 | RED | not started |
 | FILE keytab format | MIT krb5 format | v2 record layout | RED | not started |
 | FILE ccache format | MIT krb5 format | v4 header and credential layout | RED | not started |
-| `krb5.conf` | MIT krb5 format | `libdefaults`, `realms`, `domain_realm`, `capaths` | RED | not started |
+| `krb5.conf` | MIT krb5 format | `libdefaults`, `realms`, `domain_realm`, `capaths` | implemented | ordered client capaths |
 | Generalized preauthentication / FAST | RFC 6113 | later client phase | not started | not started |
 | Principal canonicalization and referrals | RFC 6806 | later client phase | not started | not started |
 | Kerberos GSS-API mechanism | RFC 4121 | later client phase | not started | not started |

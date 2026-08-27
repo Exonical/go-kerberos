@@ -33,6 +33,64 @@ type Config struct {
 	CapathOptions           map[string]map[string][]string
 }
 
+// RealmPath returns the configured direct authentication path from client to
+// server. A "." value means that the realms are directly connected. The
+// returned slice includes both endpoints. If no capath is configured, the
+// second return value is false.
+func (cfg *Config) RealmPath(client, server string) ([]string, bool, error) {
+	if cfg == nil {
+		return nil, false, nil
+	}
+	values, ok := cfg.CapathOptions[client][server]
+	if !ok {
+		for source, targets := range cfg.CapathOptions {
+			if !strings.EqualFold(source, client) {
+				continue
+			}
+			for target, candidate := range targets {
+				if strings.EqualFold(target, server) {
+					values, ok = candidate, true
+					break
+				}
+			}
+		}
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	if len(values) == 0 {
+		return nil, false, fmt.Errorf("capath %s to %s is empty", client, server)
+	}
+	path := []string{client}
+	seen := map[string]bool{strings.ToUpper(client): true}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "." {
+			if len(values) != 1 {
+				return nil, false, fmt.Errorf("capath %s to %s mixes direct and intermediate values", client, server)
+			}
+			path = append(path, server)
+			return path, true, nil
+		}
+		if value == "" {
+			return nil, false, fmt.Errorf("capath %s to %s contains an empty realm", client, server)
+		}
+		if len(path) >= 10 {
+			return nil, false, fmt.Errorf("capath %s to %s exceeds hop limit", client, server)
+		}
+		normalized := strings.ToUpper(value)
+		if seen[normalized] {
+			return nil, false, fmt.Errorf("capath %s to %s contains a loop", client, server)
+		}
+		seen[normalized] = true
+		path = append(path, value)
+	}
+	if seen[strings.ToUpper(server)] {
+		return nil, false, fmt.Errorf("capath %s to %s contains a loop", client, server)
+	}
+	return append(path, server), true, nil
+}
+
 func Parse(data []byte) (*Config, error) {
 	const maxConfigSize = 16 << 20
 	if len(data) > maxConfigSize {
