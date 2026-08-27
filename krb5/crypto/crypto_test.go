@@ -60,6 +60,38 @@ func TestCF2UsesDistinctPepperInputs(t *testing.T) {
 	}
 }
 
+func TestCF2RFC6113Vectors(t *testing.T) {
+	vectors := []struct {
+		etype int32
+		want  string
+	}{
+		{EnctypeAES128SHA1, "97df97e4b798b29eb31ed7280287a92a"},
+		{EnctypeAES256SHA1, "4d6ca4e629785c1f01baf55e2e548566b9617ae3a96868c337cb93b5e72b1c7b"},
+	}
+	for _, vector := range vectors {
+		etype, err := NewRegistry().Get(vector.etype)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key1, err := etype.StringToKey([]byte("key1"), []byte("key1"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key2, err := etype.StringToKey([]byte("key2"), []byte("key2"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := CF2(etype, key1, key2, []byte("a"), []byte("b"))
+		if err != nil {
+			t.Fatalf("CF2(%d): %v", vector.etype, err)
+		}
+		want, _ := hex.DecodeString(vector.want)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("CF2(%d) = %x, want %x", vector.etype, got, want)
+		}
+	}
+}
+
 func TestRegistrySupportsModernEnctypes(t *testing.T) {
 	registry := NewRegistry()
 	for _, id := range []int32{EnctypeAES128SHA1, EnctypeAES256SHA1, EnctypeAES128SHA256, EnctypeAES256SHA384} {
