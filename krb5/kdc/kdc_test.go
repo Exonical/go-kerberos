@@ -671,6 +671,63 @@ func TestTGSRejectsExpiredRenewal(t *testing.T) {
 	}
 }
 
+func TestTGSRejectsRenewalAfterTicketEndTime(t *testing.T) {
+	now := time.Unix(2000001450, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := issueASTicket(t, server, user, now, types.KDCRenewable, now.Add(3*time.Hour))
+	expired := now.Add(2 * time.Hour)
+	server.Now = func() time.Time { return expired }
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, expired, types.KDCRenew))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("expired-ticket renew response: %v", err)
+	}
+	if kerberosError.ErrorCode != krbAPErrTktExpired {
+		t.Fatalf("expired-ticket renew error code = %d, want %d", kerberosError.ErrorCode, krbAPErrTktExpired)
+	}
+}
+
+func TestTGSRejectsRenewalOfInvalidTicket(t *testing.T) {
+	now := time.Unix(2000001475, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	start := now.Add(time.Hour)
+	tgt := issueASTicket(t, server, user, now,
+		types.KDCAllowPostdate|types.KDCPostdated|types.KDCRenewable, start)
+	renewNow := start.Add(time.Minute)
+	server.Now = func() time.Time { return renewNow }
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, renewNow, types.KDCRenew))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("invalid-ticket renew response: %v", err)
+	}
+	if kerberosError.ErrorCode != krbAPErrTktNYV {
+		t.Fatalf("invalid-ticket renew error code = %d, want %d", kerberosError.ErrorCode, krbAPErrTktNYV)
+	}
+}
+
+func TestTGSValidateRejectsExpiredTicket(t *testing.T) {
+	now := time.Unix(2000001500, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	start := now.Add(time.Hour)
+	tgt := issueASTicket(t, server, user, now, types.KDCAllowPostdate|types.KDCPostdated, start)
+	expired := start.Add(2 * time.Hour)
+	server.Now = func() time.Time { return expired }
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"krbtgt", "TEST.REALM"}}
+	response := server.HandleMessage(rawTGSRequest(t, tgt, service, expired, types.KDCValidate))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("expired-ticket validate response: %v", err)
+	}
+	if kerberosError.ErrorCode != krbAPErrTktExpired {
+		t.Fatalf("expired-ticket validate error code = %d, want %d", kerberosError.ErrorCode, krbAPErrTktExpired)
+	}
+}
+
 func TestTGSValidateRequiresInvalidTicket(t *testing.T) {
 	now := time.Unix(2000001500, 0).UTC()
 	server, kclient := testServer(t, now)
