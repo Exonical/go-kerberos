@@ -16,12 +16,12 @@ type Key struct {
 	Enctype int32
 	KVNO    uint32
 	Key     []byte
+	Salt    string
 }
 
 // PrincipalRecord contains a principal and its KDC policy.
 type PrincipalRecord struct {
 	Name     principal.Principal
-	Salt     string
 	Keys     map[int32]Key
 	KVNO     uint32
 	Flags    uint32
@@ -29,9 +29,11 @@ type PrincipalRecord struct {
 	MaxRenew time.Duration
 }
 
-// Store resolves principal records for the KDC.
+// Store resolves principal records for the KDC. Lookup returns false with a
+// nil error when the principal does not exist, and a non-nil error only for
+// backend failures.
 type Store interface {
-	Lookup(principal.Principal) (PrincipalRecord, bool)
+	Lookup(principal.Principal) (PrincipalRecord, bool, error)
 }
 
 // Database is a concurrency-safe in-memory principal store.
@@ -89,9 +91,9 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 		if err != nil {
 			return fmt.Errorf("add principal enctype %d: %w", enctype, err)
 		}
-		keys[enctype] = Key{Enctype: enctype, KVNO: latest, Key: derived}
+		keys[enctype] = Key{Enctype: enctype, KVNO: latest, Key: derived, Salt: string(salt)}
 	}
-	record := PrincipalRecord{Name: *parsedName, Salt: parsedName.Realm + strings.Join(parsedName.Components, ""), Keys: keys, KVNO: latest}
+	record := PrincipalRecord{Name: *parsedName, Keys: keys, KVNO: latest}
 	db.mu.Lock()
 	db.principals[canonical(*parsedName)] = record
 	db.mu.Unlock()
@@ -99,18 +101,18 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 }
 
 // Lookup returns a copy of the record for name.
-func (db *Database) Lookup(name principal.Principal) (PrincipalRecord, bool) {
+func (db *Database) Lookup(name principal.Principal) (PrincipalRecord, bool, error) {
 	if db == nil {
-		return PrincipalRecord{}, false
+		return PrincipalRecord{}, false, nil
 	}
 	db.mu.RLock()
 	record, ok := db.principals[canonical(name)]
 	db.mu.RUnlock()
 	if !ok {
-		return PrincipalRecord{}, false
+		return PrincipalRecord{}, false, nil
 	}
 	record.Keys = copyKeys(record.Keys)
-	return record, true
+	return record, true, nil
 }
 
 func parseName(name, realm string) (*principal.Principal, error) {
@@ -140,7 +142,7 @@ func canonical(name principal.Principal) string {
 func copyKeys(keys map[int32]Key) map[int32]Key {
 	result := make(map[int32]Key, len(keys))
 	for enctype, key := range keys {
-		result[enctype] = Key{KVNO: key.KVNO, Key: append([]byte(nil), key.Key...)}
+		result[enctype] = Key{Enctype: key.Enctype, KVNO: key.KVNO, Key: append([]byte(nil), key.Key...), Salt: key.Salt}
 	}
 	return result
 }

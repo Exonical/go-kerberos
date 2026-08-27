@@ -18,7 +18,10 @@ func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, ok := db.Lookup(*name)
+	record, ok, err := db.Lookup(*name)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
 	if !ok {
 		t.Fatal("principal was not stored")
 	}
@@ -39,6 +42,9 @@ func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 		}
 		if len(key.Key) != etype.KeySize() {
 			t.Fatalf("enctype %d key length = %d, want %d", enctype, len(key.Key), etype.KeySize())
+		}
+		if key.Salt != "TEST.REALMalice" {
+			t.Fatalf("enctype %d salt = %q, want MIT default", enctype, key.Salt)
 		}
 		if key.KVNO != 7 {
 			t.Fatalf("enctype %d KVNO = %d, want 7", enctype, key.KVNO)

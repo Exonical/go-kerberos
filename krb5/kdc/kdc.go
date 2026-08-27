@@ -33,7 +33,7 @@ const (
 	krbAPErrInKeyUsage    = 44
 )
 
-// Server is an in-memory Kerberos KDC.
+// Server is a Kerberos KDC backed by a pluggable principal store.
 type Server struct {
 	Realm            string
 	DB               kdb.Store
@@ -145,12 +145,18 @@ func (s *Server) handleASReq(request protocol.ASReq) []byte {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	clientName := principalFromProtocol(*request.ReqBody.CName, request.ReqBody.Realm)
-	clientRecord, ok := s.DB.Lookup(clientName)
+	clientRecord, ok, err := s.DB.Lookup(clientName)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
 	if !ok {
 		return s.errorResponse(kdcErrCPrincipal, request.ReqBody.SName)
 	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
-	serviceRecord, ok := s.DB.Lookup(serviceName)
+	serviceRecord, ok, err := s.DB.Lookup(serviceName)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
@@ -166,7 +172,7 @@ func (s *Server) handleASReq(request protocol.ASReq) []byte {
 				PADataType: 19,
 				PADataValue: marshalDER(protocol.ETypeInfo2{{
 					EType: etypeID,
-					Salt:  stringPointer(principalSalt(clientRecord, clientName)),
+					Salt:  stringPointer(principalSalt(clientKey, clientName)),
 				}}),
 			},
 		}
@@ -272,7 +278,10 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		Realm: apRequest.Ticket.Realm, NameType: principal.NTSrvInstance,
 		Components: apRequest.Ticket.SName.NameString,
 	}
-	tgtRecord, ok := s.DB.Lookup(tgtName)
+	tgtRecord, ok, err := s.DB.Lookup(tgtName)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
@@ -325,7 +334,10 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		return s.errorResponse(krbAPErrBadIntegrity, request.ReqBody.SName)
 	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
-	serviceRecord, ok := s.DB.Lookup(serviceName)
+	serviceRecord, ok, err := s.DB.Lookup(serviceName)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
@@ -530,9 +542,9 @@ func joinComponents(values []string) string {
 	return result
 }
 
-func principalSalt(record kdb.PrincipalRecord, name principal.Principal) string {
-	if record.Salt != "" {
-		return record.Salt
+func principalSalt(key kdb.Key, name principal.Principal) string {
+	if key.Salt != "" {
+		return key.Salt
 	}
 	return name.Realm + joinComponents(name.Components)
 }

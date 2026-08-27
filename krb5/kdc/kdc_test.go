@@ -417,3 +417,107 @@ func TestTGSRejectsExpiredAndPostdatedTickets(t *testing.T) {
 		})
 	}
 }
+
+type stubStore struct {
+	db  *kdb.Database
+	err error
+}
+
+func (s *stubStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool, error) {
+	if s.err != nil {
+		return kdb.PrincipalRecord{}, false, s.err
+	}
+	record, ok, err := s.db.Lookup(name)
+	if err != nil || !ok {
+		return record, ok, err
+	}
+	for enctype, key := range record.Keys {
+		key.Salt = "custom-salt"
+		record.Keys[enctype] = key
+	}
+	return record, true, nil
+}
+
+func TestASAdvertisesPerKeySalt(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DB = &stubStore{db: server.DB.(*kdb.Database)}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 1)
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("preauth response: %v", err)
+	}
+	if kerberosError.ErrorCode != 25 {
+		t.Fatalf("error code = %d, want 25", kerberosError.ErrorCode)
+	}
+	var methodData protocol.MethodData
+	if err := asn1.Unmarshal(kerberosError.EData, &methodData); err != nil {
+		t.Fatalf("METHOD-DATA: %v", err)
+	}
+	var salt string
+	for _, pa := range methodData {
+		if pa.PADataType != 19 {
+			continue
+		}
+		var info protocol.ETypeInfo2
+		if err := asn1.Unmarshal(pa.PADataValue, &info); err != nil {
+			t.Fatalf("ETYPE-INFO2: %v", err)
+		}
+		if len(info) == 0 || info[0].Salt == nil {
+			t.Fatalf("ETYPE-INFO2 = %#v", info)
+		}
+		salt = *info[0].Salt
+	}
+	if salt != "custom-salt" {
+		t.Fatalf("advertised salt = %q, want custom-salt", salt)
+	}
+}
+
+func TestStoreErrorMapsToGeneric(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DB = &stubStore{err: errors.New("backend unavailable")}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 1)
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("error response: %v", err)
+	}
+	if kerberosError.ErrorCode != 60 {
+		t.Fatalf("error code = %d, want KRB_ERR_GENERIC (60)", kerberosError.ErrorCode)
+	}
+}
+
+func TestStubStoreServesASEndToEnd(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := kdb.NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("carol", "carol-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddPrincipal("krbtgt/TEST.REALM", "krbtgt-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	server.DB = delegatingStore{db}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"carol"}}
+	credentials, err := kclient.ASExchange(context.Background(), user, "carol-password")
+	if err != nil {
+		t.Fatalf("AS exchange through stub store: %v", err)
+	}
+	if credentials.Client.String() != "carol@TEST.REALM" {
+		t.Fatalf("client = %s", credentials.Client)
+	}
+}
+
+type delegatingStore struct{ db *kdb.Database }
+
+func (d delegatingStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool, error) {
+	return d.db.Lookup(name)
+}
