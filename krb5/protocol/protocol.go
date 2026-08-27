@@ -237,6 +237,32 @@ func (KRBError) ApplicationTag() int { return TagKRBError }
 
 type MethodData []PAData
 
+// Protocol transition padata types ([MS-SFU] section 2.2).
+const (
+	PADataForUser     = 129
+	PADataS4UX509User = 130
+)
+
+// S4UOptionsUseReplyKeyUsage asks the KDC to sign the PA-S4U-X509-USER reply
+// with key usage 27 instead of 26 ([MS-SFU] section 2.2.1).
+const S4UOptionsUseReplyKeyUsage = types.KDCOptions(1 << 2)
+
+// S4UUserID identifies the impersonated user of a protocol transition
+// request ([MS-SFU] section 2.2.1).
+type S4UUserID struct {
+	Nonce       uint32            `krb5:"tag:0"`
+	CName       *PrincipalName    `krb5:"tag:1,optional"`
+	CRealm      string            `krb5:"tag:2"`
+	SubjectCert []byte            `krb5:"tag:3,optional"`
+	Options     *types.KDCOptions `krb5:"tag:4,optional"`
+}
+
+// PAS4UX509User carries an S4UUserID and its keyed checksum.
+type PAS4UX509User struct {
+	UserID   S4UUserID `krb5:"tag:0"`
+	Checksum Checksum  `krb5:"tag:1"`
+}
+
 // FastOptions contains RFC 6113 FAST option bits.
 type FastOptions = types.KDCOptions
 
