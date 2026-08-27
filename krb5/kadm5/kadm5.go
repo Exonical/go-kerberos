@@ -506,6 +506,9 @@ func (c *Client) readRecord(ctx context.Context) ([]byte, error) {
 			return nil, err
 		}
 		n = binary.BigEndian.Uint32(h[:])
+		if n&0x7fffffff > 16<<20 {
+			return nil, errors.New("kadm5: oversized RPC fragment")
+		}
 	}
 }
 func (c *Client) deadline(ctx context.Context) error {

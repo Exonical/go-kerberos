@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
@@ -64,10 +65,19 @@ func TestContextAndPerMessageRoundTrip(t *testing.T) {
 			if err := initiator.VerifyToken(mutual); err != nil {
 				t.Fatal(err)
 			}
+			if initiator.ctx.acceptorSubkey {
+				t.Fatal("initiator treated its subkey as an acceptor subkey")
+			}
 			plain := []byte("gss-api sealed message")
 			wrapped, err := initiator.Wrap(plain, true)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if got, want := binary.BigEndian.Uint64(wrapped[8:16]), sequenceValue(initiator.state.SeqNumber); got != want {
+				t.Fatalf("initiator token sequence = %d, want %d", got, want)
+			}
+			if wrapped[2]&tokenFlagAcceptorSubkey != 0 {
+				t.Fatal("initiator token asserted an acceptor subkey")
 			}
 			got, err := acceptorContext.Unwrap(wrapped)
 			if err != nil {
@@ -94,7 +104,52 @@ func TestContextAndPerMessageRoundTrip(t *testing.T) {
 			if err := acceptorContext.VerifyMIC(plain, mic); err != nil {
 				t.Fatal(err)
 			}
+			reply, err := acceptorContext.Wrap(plain, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := binary.BigEndian.Uint64(reply[8:16]); got != 0 {
+				t.Fatalf("acceptor token sequence = %d, want 0", got)
+			}
+			if _, err := initiator.Unwrap(reply); err != nil {
+				t.Fatal(err)
+			}
 		})
+	}
+}
+
+func TestVerifyAPRepSeedsAcceptorSequenceAndTracksSubkey(t *testing.T) {
+	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700001000, 0).UTC()
+	initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.InitialToken(now); err != nil {
+		t.Fatal(err)
+	}
+	seq := uint32(17)
+	apRep := buildGSSAPRep(t, initiator.state, nil, &seq)
+	if err := initiator.VerifyToken(frameToken([]byte{0x02, 0x00}, apRep)); err != nil {
+		t.Fatal(err)
+	}
+	if initiator.ctx.recvSeq != uint64(seq) {
+		t.Fatalf("initiator receive sequence = %d, want %d", initiator.ctx.recvSeq, seq)
+	}
+	if initiator.ctx.acceptorSubkey {
+		t.Fatal("initiator treated its own subkey as an acceptor subkey")
+	}
+
+	acceptorSubkey := &protocol.EncryptionKey{
+		KeyType:  crypto.EnctypeAES256SHA1,
+		KeyValue: bytes.Repeat([]byte{0x73}, 32),
+	}
+	apRep = buildGSSAPRep(t, initiator.state, acceptorSubkey, nil)
+	if err := initiator.VerifyToken(frameToken([]byte{0x02, 0x00}, apRep)); err != nil {
+		t.Fatal(err)
+	}
+	if !initiator.ctx.acceptorSubkey || !bytes.Equal(initiator.ctx.key.KeyValue, acceptorSubkey.KeyValue) {
+		t.Fatal("initiator did not adopt the asserted acceptor subkey")
 	}
 }
 
@@ -138,6 +193,36 @@ func TestPerMessageRejectsTamperingDirectionAndReplay(t *testing.T) {
 	if _, err := initiator.Unwrap(wrapped); err == nil {
 		t.Fatal("wrong direction token unexpectedly accepted")
 	}
+}
+
+func buildGSSAPRep(t *testing.T, request *ap.APReq, subkey *protocol.EncryptionKey, sequence *uint32) []byte {
+	t.Helper()
+	part := protocol.EncAPRepPart{
+		Ctime:     types.KerberosTime{Time: request.AuthenticatorTime, Microseconds: request.Cusec, Present: true},
+		Cusec:     request.Cusec,
+		SubKey:    subkey,
+		SeqNumber: sequence,
+	}
+	plain, err := asn1.Marshal(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, err := etype.Encrypt(request.SessionKey.KeyValue, 12, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(protocol.APRep{
+		PVNO: 5, MsgType: 15,
+		EncPart: protocol.EncryptedData{EType: request.SessionKey.KeyType, Cipher: ciphertext},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
 }
 
 func TestPerMessageRRCIsRotatedOnReceive(t *testing.T) {

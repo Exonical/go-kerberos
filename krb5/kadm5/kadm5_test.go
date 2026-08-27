@@ -125,3 +125,23 @@ func TestRecordMarkingSupportsFragments(t *testing.T) {
 		t.Fatalf("record = %q, want %q", got, want)
 	}
 }
+
+func TestRecordMarkingRejectsOversizedContinuation(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	c := &Client{Conn: left}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var h [4]byte
+		binary.BigEndian.PutUint32(h[:], 0)
+		_, _ = right.Write(h[:])
+		binary.BigEndian.PutUint32(h[:], 16<<20+1)
+		_, _ = right.Write(h[:])
+	}()
+	if _, err := c.readRecord(context.Background()); err == nil {
+		t.Fatal("readRecord accepted oversized continuation fragment")
+	}
+	<-done
+}

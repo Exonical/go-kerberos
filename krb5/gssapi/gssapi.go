@@ -134,6 +134,7 @@ func (i *Initiator) initialToken(now time.Time, legacy bool, channelBindings []b
 		key:       contextKey(state.SessionKey, state.SubKey),
 		initiator: true,
 		flags:     i.flags,
+		sendSeq:   sequenceValue(state.SeqNumber),
 	}
 	if legacy {
 		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
@@ -150,11 +151,17 @@ func (i *Initiator) VerifyToken(token []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := ap.VerifyAPRep(i.state, inner); err != nil {
+	details, err := ap.VerifyAPRepWithDetails(i.state, inner)
+	if err != nil {
 		return fmt.Errorf("GSS AP-REP: %w", err)
 	}
-	i.ctx.key = contextKey(i.state.SessionKey, i.state.SubKey)
-	i.ctx.acceptorSubkey = i.state.SubKey != nil
+	if details.SubKey != nil {
+		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
+		i.ctx.acceptorSubkey = true
+	}
+	if details.SeqNumber != nil {
+		i.ctx.recvSeq = sequenceValue(details.SeqNumber)
+	}
 	return nil
 }
 
@@ -176,8 +183,9 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 		return nil, nil, err
 	}
 	ctx := &Context{
-		key:   contextKey(verified.SessionKey, verified.SubKey),
-		flags: flags,
+		key:     contextKey(verified.SessionKey, verified.SubKey),
+		flags:   flags,
+		recvSeq: sequenceValue(verified.SeqNumber),
 	}
 	if flags&GSSMutualFlag != 0 {
 		reply, err := ap.BuildAPRep(verified)
