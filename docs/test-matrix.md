@@ -18,6 +18,7 @@ when absent.
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
 | Cross-realm TGS | unit coverage | unit coverage | unit coverage |
+| KDB persistence (MIT dump) | unit + golden | MIT pass | read-only |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
