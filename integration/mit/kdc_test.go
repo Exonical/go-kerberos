@@ -124,6 +124,18 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	if !strings.Contains(klist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
 		t.Fatalf("klist does not show TGT:\n%s", klist)
 	}
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-r", "20h", "alice")
+	renewable := k.run(t, "", "/usr/bin/klist")
+	t.Logf("MIT klist after renewable kinit:\n%s", renewable)
+	if !strings.Contains(renewable, "renew until") {
+		t.Fatalf("klist does not show renewable TGT:\n%s", renewable)
+	}
+	k.run(t, "", "/usr/bin/kinit", "-R")
+	renewed := k.run(t, "", "/usr/bin/klist")
+	t.Logf("MIT klist after renewal:\n%s", renewed)
+	if !strings.Contains(renewed, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
+		t.Fatalf("klist after renewal does not show TGT:\n%s", renewed)
+	}
 	kvno := k.run(t, "", "/usr/bin/kvno", "host/service.test")
 	t.Logf("MIT kvno output:\n%s", kvno)
 	if !strings.Contains(kvno, "kvno = 1") {
