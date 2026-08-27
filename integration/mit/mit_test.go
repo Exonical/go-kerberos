@@ -272,7 +272,7 @@ func TestGoClientAPExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify Go AP request: %v", err)
 	}
-	if verified.Client != clientPrincipal {
+	if verified.Client.String() != clientPrincipal.String() {
 		t.Fatalf("verified client = %#v, want %#v", verified.Client, clientPrincipal)
 	}
 }
