@@ -7,6 +7,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
+var _ Store = (*Database)(nil)
+
 func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddPrincipal("alice", "alice-password", 3, 7); err != nil {
