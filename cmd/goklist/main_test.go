@@ -44,6 +44,9 @@ func TestParseListArgs(t *testing.T) {
 	if _, err := parseListArgs([]string{"unexpected"}); err == nil {
 		t.Fatal("unexpected argument accepted")
 	}
+	if got := resolveListCachePath("FILE:/tmp/cache", 42); got != "/tmp/cache" {
+		t.Fatalf("cache path = %q", got)
+	}
 }
 
 func TestListCacheSkipsConfigurationCredentials(t *testing.T) {

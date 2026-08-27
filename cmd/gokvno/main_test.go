@@ -27,6 +27,9 @@ func TestParseVNOArgsErrors(t *testing.T) {
 	if _, err := parseVNOArgs(nil); err == nil {
 		t.Fatal("missing service accepted")
 	}
+	if got := resolveVNOCachePath("FILE:/tmp/cache", 42); got != "/tmp/cache" {
+		t.Fatalf("cache path = %q", got)
+	}
 }
 
 func TestFindTGT(t *testing.T) {
