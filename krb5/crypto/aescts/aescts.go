@@ -1,20 +1,155 @@
 package aescts
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"fmt"
-
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 )
 
-// Encrypt applies the raw AES ciphertext-stealing primitive. Kerberos
-// confounders are intentionally outside this package.
+// Encrypt applies the raw AES CBC-CS3 ciphertext-stealing primitive.
+// Kerberos confounders and integrity checks are intentionally outside this
+// package.
 func Encrypt(key, iv, plaintext []byte) ([]byte, error) {
-	_, _, _ = key, iv, plaintext
-	return nil, fmt.Errorf("AES CTS encrypt: %w", krberrors.ErrNotImplemented)
+	block, err := newBlock(key, iv)
+	if err != nil {
+		return nil, err
+	}
+	if len(plaintext) < aes.BlockSize {
+		return nil, fmt.Errorf("AES CTS encrypt: plaintext shorter than one block")
+	}
+	if len(plaintext) == aes.BlockSize {
+		out := make([]byte, aes.BlockSize)
+		cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, plaintext)
+		return out, nil
+	}
+	if len(plaintext)%aes.BlockSize == 0 {
+		out := make([]byte, len(plaintext))
+		cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, plaintext)
+		last := len(out) - aes.BlockSize
+		previous := last - aes.BlockSize
+		swapped := append([]byte(nil), out[previous:last]...)
+		copy(out[previous:last], out[last:])
+		copy(out[last:], swapped)
+		return out, nil
+	}
+
+	fullBlocks := len(plaintext) / aes.BlockSize
+	remainder := len(plaintext) % aes.BlockSize
+	out := make([]byte, 0, len(plaintext))
+	previous := iv
+	for i := 0; i < fullBlocks-1; i++ {
+		encrypted := make([]byte, aes.BlockSize)
+		xorBlock(encrypted, plaintext[i*aes.BlockSize:(i+1)*aes.BlockSize], previous)
+		block.Encrypt(encrypted, encrypted)
+		out = append(out, encrypted...)
+		previous = encrypted
+	}
+
+	penultimate := plaintext[(fullBlocks-1)*aes.BlockSize : fullBlocks*aes.BlockSize]
+	last := plaintext[fullBlocks*aes.BlockSize:]
+	x := make([]byte, aes.BlockSize)
+	xorBlock(x, penultimate, previous)
+	block.Encrypt(x, x)
+
+	paddedLast := make([]byte, aes.BlockSize)
+	copy(paddedLast, last)
+	xorBlock(paddedLast, paddedLast, x)
+	y := make([]byte, aes.BlockSize)
+	block.Encrypt(y, paddedLast)
+
+	out = append(out, y...)
+	if remainder == 0 {
+		out = append(out, x...)
+	} else {
+		out = append(out, x[:remainder]...)
+	}
+	return out, nil
 }
 
-// Decrypt reverses the raw AES ciphertext-stealing primitive.
+// Decrypt reverses the raw AES CBC-CS3 ciphertext-stealing primitive.
 func Decrypt(key, iv, ciphertext []byte) ([]byte, error) {
-	_, _, _ = key, iv, ciphertext
-	return nil, fmt.Errorf("AES CTS decrypt: %w", krberrors.ErrNotImplemented)
+	block, err := newBlock(key, iv)
+	if err != nil {
+		return nil, err
+	}
+	if len(ciphertext) < aes.BlockSize {
+		return nil, fmt.Errorf("AES CTS decrypt: ciphertext shorter than one block")
+	}
+	if len(ciphertext) == aes.BlockSize {
+		out := make([]byte, aes.BlockSize)
+		cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, ciphertext)
+		return out, nil
+	}
+
+	fullBlocks := len(ciphertext) / aes.BlockSize
+	remainder := len(ciphertext) % aes.BlockSize
+	out := make([]byte, 0, len(ciphertext))
+	previous := iv
+	previousBlocks := fullBlocks - 2
+	if remainder != 0 {
+		previousBlocks = fullBlocks - 1
+	}
+	for i := 0; i < previousBlocks; i++ {
+		plain := make([]byte, aes.BlockSize)
+		cipher.NewCBCDecrypter(block, previous).CryptBlocks(plain, ciphertext[i*aes.BlockSize:(i+1)*aes.BlockSize])
+		out = append(out, plain...)
+		previous = ciphertext[i*aes.BlockSize : (i+1)*aes.BlockSize]
+	}
+
+	yBlock := fullBlocks - 2
+	if remainder != 0 {
+		yBlock = fullBlocks - 1
+	}
+	yOffset := yBlock * aes.BlockSize
+	y := ciphertext[yOffset : yOffset+aes.BlockSize]
+	xPart := ciphertext[yOffset+aes.BlockSize:]
+	if remainder == 0 {
+		x := xPart
+		dy := make([]byte, aes.BlockSize)
+		block.Decrypt(dy, y)
+		plainLast := make([]byte, aes.BlockSize)
+		xorBlock(plainLast, dy, x)
+		dx := make([]byte, aes.BlockSize)
+		block.Decrypt(dx, x)
+		plainPenultimate := make([]byte, aes.BlockSize)
+		xorBlock(plainPenultimate, dx, previous)
+		out = append(out, plainPenultimate...)
+		out = append(out, plainLast...)
+		return out, nil
+	}
+
+	dy := make([]byte, aes.BlockSize)
+	block.Decrypt(dy, y)
+	x := make([]byte, aes.BlockSize)
+	copy(x, xPart)
+	copy(x[remainder:], dy[remainder:])
+
+	plainLast := make([]byte, remainder)
+	for i := range plainLast {
+		plainLast[i] = dy[i] ^ x[i]
+	}
+	dx := make([]byte, aes.BlockSize)
+	block.Decrypt(dx, x)
+	plainPenultimate := make([]byte, aes.BlockSize)
+	xorBlock(plainPenultimate, dx, previous)
+	out = append(out, plainPenultimate...)
+	out = append(out, plainLast...)
+	return out, nil
+}
+
+func newBlock(key, iv []byte) (cipher.Block, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("AES CTS cipher: %w", err)
+	}
+	if len(iv) != block.BlockSize() {
+		return nil, fmt.Errorf("AES CTS IV length = %d, want %d", len(iv), block.BlockSize())
+	}
+	return block, nil
+}
+
+func xorBlock(dst, left, right []byte) {
+	for i := range dst {
+		dst[i] = left[i] ^ right[i]
+	}
 }
