@@ -23,6 +23,7 @@ when absent.
 | KDB persistence (MIT dump) | unit + golden | MIT pass (master enctypes 17/18/19/20) | read-only |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
+| RFC 3244 kpasswd password change | Go client + live MIT kadmind | MIT `kadmind` | Go client |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -76,7 +77,25 @@ client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
 available. The implementation currently uses the RFC 3526 MODP group 14
 profile and does not implement group 2 negotiation or newer algorithm-agility
 KDF profiles.
-using RFC 3526 MODP group 14. Group 2 negotiation is not implemented.
+
+The client implements RFC 3244 password changes against MIT `kadmind` on the
+kpasswd service port (464 by default; the isolated integration harness uses a
+high, configured port because it runs without root privileges). It sends an
+AP-REQ and KRB-PRIV request, verifies the AP-REP, and decrypts the result code.
+Because MIT `kadmind` enables sequence protection but does not request timestamp
+protection on its reply KRB-PRIV, a reply must contain either a fresh timestamp
+or a sequence number; replies containing neither are rejected.
+The live integration gate changes Alice's password and completes a subsequent
+Go AS exchange with the new password. Password policy and authorization errors
+are returned without exposing password material. RFC 3244 set-password
+requests for another principal are not currently exposed.
+
+The larger MIT `kadm5` administrative RPC is intentionally out of scope. The
+pinned MIT source requires generated XDR for a broad procedure set
+(`create_principal_2`, `create_principal3_2`, principal/key/modifying
+operations, and more), ONC-RPC transport, and AUTH-GSSAPI RPC authentication
+from `src/lib/kadm5` and `src/kadmin`. This focused slice does not claim
+general kadmin administrative RPC support.
 
 ## Testing layers
 

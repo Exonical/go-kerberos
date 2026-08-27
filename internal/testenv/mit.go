@@ -26,6 +26,7 @@ var requiredBinaries = []string{
 	"/usr/sbin/kdb5_util",
 	"/usr/sbin/kadmin.local",
 	"/usr/sbin/krb5kdc",
+	"/usr/sbin/kadmind",
 	"/usr/bin/kinit",
 	"/usr/bin/klist",
 	"/usr/bin/kvno",
@@ -34,14 +35,16 @@ var requiredBinaries = []string{
 
 // Realm is a disposable MIT KDC and its isolated configuration.
 type Realm struct {
-	Dir       string
-	Config    string
-	KDCConfig string
-	Keytab    string
-	Cache     string
-	Port      int
+	Dir         string
+	Config      string
+	KDCConfig   string
+	Keytab      string
+	Cache       string
+	Port        int
+	AdminPort   int
+	KPasswdPort int
 
-	cmd    *exec.Cmd
+	cmds   []*exec.Cmd
 	output bytes.Buffer
 }
 
@@ -68,13 +71,17 @@ func start(t *testing.T, masterEType string) *Realm {
 	}
 	dir := t.TempDir()
 	port := freePort(t)
+	adminPort := freePort(t)
+	kpasswdPort := freePort(t)
 	r := &Realm{
-		Dir:       dir,
-		Config:    filepath.Join(dir, "krb5.conf"),
-		KDCConfig: filepath.Join(dir, "kdc.conf"),
-		Keytab:    filepath.Join(dir, "services.keytab"),
-		Cache:     filepath.Join(dir, "alice.ccache"),
-		Port:      port,
+		Dir:         dir,
+		Config:      filepath.Join(dir, "krb5.conf"),
+		KDCConfig:   filepath.Join(dir, "kdc.conf"),
+		Keytab:      filepath.Join(dir, "services.keytab"),
+		Cache:       filepath.Join(dir, "alice.ccache"),
+		Port:        port,
+		AdminPort:   adminPort,
+		KPasswdPort: kpasswdPort,
 	}
 	writeFile(t, r.Config, fmt.Sprintf(`[libdefaults]
  default_realm = %s
@@ -88,8 +95,9 @@ func start(t *testing.T, masterEType string) *Realm {
  %s = {
   kdc = 127.0.0.1:%d
   admin_server = 127.0.0.1:%d
+  kpasswd_port = %d
  }
-`, RealmName, RealmName, port, port))
+`, RealmName, RealmName, port, adminPort, kpasswdPort))
 	writeFile(t, r.KDCConfig, fmt.Sprintf(`[kdcdefaults]
  kdc_ports = %d
  kdc_tcp_ports = %d
@@ -112,6 +120,7 @@ func start(t *testing.T, masterEType string) *Realm {
 	createArgs = append(createArgs, "-P", MasterKey)
 	run(t, r.env(), "", "/usr/sbin/kdb5_util", createArgs...)
 	for _, command := range []string{
+		"ktadd -k " + filepath.Join(dir, "kadm5.keytab") + " kadmin/admin kadmin/changepw",
 		"addprinc -pw alice-password alice",
 		"addprinc -pw bob-password bob",
 		"addprinc -pw host-password host/server.test",
@@ -122,6 +131,7 @@ func start(t *testing.T, masterEType string) *Realm {
 		run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
 	}
 	r.startKDC(t)
+	r.startKadmind(t)
 	t.Cleanup(func() {
 		r.stop()
 	})
@@ -145,13 +155,14 @@ func (r *Realm) env() []string {
 
 func (r *Realm) startKDC(t *testing.T) {
 	t.Helper()
-	r.cmd = exec.Command("/usr/sbin/krb5kdc", "-n")
-	r.cmd.Env = r.env()
-	r.cmd.Stdout = &r.output
-	r.cmd.Stderr = &r.output
-	if err := r.cmd.Start(); err != nil {
+	cmd := exec.Command("/usr/sbin/krb5kdc", "-n")
+	cmd.Env = r.env()
+	cmd.Stdout = &r.output
+	cmd.Stderr = &r.output
+	if err := cmd.Start(); err != nil {
 		t.Fatalf("start krb5kdc: %v", err)
 	}
+	r.cmds = append(r.cmds, cmd)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(r.Port)), 100*time.Millisecond)
@@ -159,7 +170,7 @@ func (r *Realm) startKDC(t *testing.T) {
 			conn.Close()
 			return
 		}
-		if r.cmd.ProcessState != nil {
+		if cmd.ProcessState != nil {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -168,13 +179,42 @@ func (r *Realm) startKDC(t *testing.T) {
 	t.Fatalf("krb5kdc did not become ready: %s", r.output.String())
 }
 
-func (r *Realm) stop() {
-	if r.cmd == nil || r.cmd.Process == nil {
-		return
+func (r *Realm) startKadmind(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command("/usr/sbin/kadmind", "-nofork", "-port", strconv.Itoa(r.AdminPort))
+	cmd.Env = r.env()
+	cmd.Stdout = &r.output
+	cmd.Stderr = &r.output
+	if err := cmd.Start(); err != nil {
+		r.stop()
+		t.Fatalf("start kadmind: %v", err)
 	}
-	_ = r.cmd.Process.Kill()
-	_, _ = r.cmd.Process.Wait()
-	r.cmd = nil
+	r.cmds = append(r.cmds, cmd)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(r.KPasswdPort)), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		if cmd.ProcessState != nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	r.stop()
+	t.Fatalf("kadmind did not become ready: %s", r.output.String())
+}
+
+func (r *Realm) stop() {
+	for _, cmd := range r.cmds {
+		if cmd == nil || cmd.Process == nil {
+			continue
+		}
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}
+	r.cmds = nil
 }
 
 // Run executes a command with the realm's isolated environment.

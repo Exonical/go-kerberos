@@ -143,6 +143,96 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, now)
 }
 
+// ASExchangeService obtains initial credentials for a specific service
+// principal, rather than the realm TGT. This is used by protocols such as
+// RFC 3244 kpasswd whose service principal intentionally rejects TGT-based
+// service-ticket requests.
+func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principal.Principal, password string, service principal.Principal) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("AS service exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("AS service exchange: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("AS service exchange: %w", err)
+	}
+	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
+		return nil, fmt.Errorf("AS service exchange: invalid client principal")
+	}
+	if service.Realm == "" {
+		service.Realm = clientPrincipal.Realm
+	}
+	if service.NameType == 0 {
+		service.NameType = principal.NTSrvInstance
+	}
+	if len(service.Components) == 0 {
+		return nil, fmt.Errorf("AS service exchange: invalid service principal")
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, err := c.newASReqForService(clientPrincipal, service, now)
+	if err != nil {
+		return nil, err
+	}
+	registry := crypto.NewRegistry()
+	var initialETypeID int32
+	var initialEType crypto.EType
+	for _, candidate := range request.ReqBody.EType {
+		initialEType, err = registry.Get(candidate)
+		if err == nil {
+			initialETypeID = candidate
+			break
+		}
+	}
+	if initialEType == nil {
+		return nil, fmt.Errorf("AS service exchange: %w", krberrors.ErrUnsupportedEType)
+	}
+	initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
+	initialKey, err := initialEType.StringToKey([]byte(password), initialSalt, nil)
+	if err != nil {
+		return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+	}
+	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		if kerberosError.Code != 25 {
+			return nil, kerberosError
+		}
+		methodData, err := preauth.ParseMethodData(kerberosError.ErrorData())
+		if err != nil {
+			return nil, fmt.Errorf("AS service exchange preauthentication: %w", err)
+		}
+		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
+		if err != nil {
+			return nil, err
+		}
+		etype, err := registry.Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		key, err := etype.StringToKey([]byte(password), salt, params)
+		if err != nil {
+			return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+		}
+		timestamp, err := preauth.BuildEncryptedTimestamp(etype, key, now, 0)
+		if err != nil {
+			return nil, err
+		}
+		request.PAData = protocol.MethodData{timestamp}
+		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+		if err != nil {
+			return nil, err
+		}
+		return c.decodeASRepForService(response, clientPrincipal, service, request.ReqBody.Nonce, etypeID, key, now)
+	}
+	return c.decodeASRepForService(response, clientPrincipal, service, request.ReqBody.Nonce, initialETypeID, initialKey, now)
+}
+
 // ASExchangeFAST obtains initial credentials using an RFC 6113 armor TGT.
 func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.Principal, password string, armorTGT *Credentials) (*Credentials, error) {
 	if c == nil {
@@ -789,6 +879,13 @@ func randomNonce(value []byte) uint32 {
 }
 
 func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (protocol.ASReq, error) {
+	return c.newASReqForService(clientPrincipal, principal.Principal{
+		Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", clientPrincipal.Realm},
+	}, now)
+}
+
+func (c *Client) newASReqForService(clientPrincipal, service principal.Principal, now time.Time) (protocol.ASReq, error) {
 	nonceBytes := make([]byte, 4)
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
 		return protocol.ASReq{}, fmt.Errorf("AS exchange nonce: %w", err)
@@ -819,8 +916,8 @@ func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (p
 			CName:      protocolPrincipal(clientPrincipal),
 			Realm:      clientPrincipal.Realm,
 			SName: &protocol.PrincipalName{
-				NameType:   int32(principal.NTSrvInstance),
-				NameString: []string{"krbtgt", clientPrincipal.Realm},
+				NameType:   int32(service.NameType),
+				NameString: append([]string(nil), service.Components...),
 			},
 			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
 			Nonce: randomNonce(nonceBytes),
@@ -869,6 +966,13 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 }
 
 func (c *Client) decodeASRep(data []byte, clientPrincipal principal.Principal, nonce uint32, etypeID int32, key []byte, now time.Time) (*Credentials, error) {
+	return c.decodeASRepForService(data, clientPrincipal, principal.Principal{
+		Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", clientPrincipal.Realm},
+	}, nonce, etypeID, key, now)
+}
+
+func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service principal.Principal, nonce uint32, etypeID int32, key []byte, now time.Time) (*Credentials, error) {
 	var reply protocol.ASRep
 	if len(data) > 0 && data[0] == 0x7a {
 		data = append([]byte(nil), data...)
@@ -909,16 +1013,14 @@ func (c *Client) decodeASRep(data []byte, clientPrincipal principal.Principal, n
 	if part.Nonce != nonce {
 		return nil, fmt.Errorf("AS exchange: AS-REP nonce mismatch")
 	}
-	if reply.Ticket.Realm != clientPrincipal.Realm ||
-		reply.Ticket.SName.NameType != int32(principal.NTSrvInstance) ||
-		len(reply.Ticket.SName.NameString) != 2 ||
-		reply.Ticket.SName.NameString[0] != "krbtgt" ||
-		reply.Ticket.SName.NameString[1] != clientPrincipal.Realm ||
-		part.SRealm != clientPrincipal.Realm ||
-		part.SName.NameType != int32(principal.NTSrvInstance) ||
-		len(part.SName.NameString) != 2 ||
-		part.SName.NameString[0] != "krbtgt" ||
-		part.SName.NameString[1] != clientPrincipal.Realm {
+	if reply.Ticket.Realm != service.Realm ||
+		reply.Ticket.SName.NameType != int32(service.NameType) ||
+		len(reply.Ticket.SName.NameString) != len(service.Components) ||
+		!slicesEqual(reply.Ticket.SName.NameString, service.Components) ||
+		part.SRealm != service.Realm ||
+		part.SName.NameType != int32(service.NameType) ||
+		len(part.SName.NameString) != len(service.Components) ||
+		!slicesEqual(part.SName.NameString, service.Components) {
 		return nil, fmt.Errorf("AS exchange: invalid ticket server principal")
 	}
 	if !validTimes(part.AuthTime, part.StartTime, part.EndTime, now, c.clockSkew()) {
