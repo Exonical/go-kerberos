@@ -14,7 +14,8 @@ disposable integration test environments.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
 - **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and
-  KRB-PRIV framing on the kpasswd service port.
+  KRB-PRIV framing on the kpasswd service port, including setting another
+  principal's password with administrator credentials.
 - **MIT kadm5 administrative RPC** over ONC-RPC/RFC 5531 record-marked TCP
   with RPCSEC_GSS privacy, covering API negotiation and principal
   create/get/delete/password-change operations.

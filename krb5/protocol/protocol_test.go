@@ -96,7 +96,7 @@ func TestApplicationTagNumbers(t *testing.T) {
 func TestProtocolStructuresHaveEncodingContract(t *testing.T) {
 	values := []any{
 		PrincipalName{}, HostAddress{}, HostAddresses{}, AuthorizationData{},
-		PAData{}, EncryptedData{}, EncryptionKey{}, Checksum{}, Ticket{},
+		PAData{}, EncryptedData{}, EncryptionKey{}, ChangePasswdData{}, Checksum{}, Ticket{},
 		EncTicketPart{}, Authenticator{}, KDCReq{}, KDCReqBody{}, ASReq{},
 		TGSReq{}, KDCRep{}, ASRep{}, TGSRep{}, EncASRepPart{}, EncTGSRepPart{},
 		APReq{}, APRep{}, EncAPRepPart{}, KRBError{}, MethodData{}, ETypeInfo{},

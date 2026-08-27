@@ -42,3 +42,33 @@ func TestGoClientChangesPasswordAgainstMITKadmind(t *testing.T) {
 		t.Fatalf("Go AS exchange with changed password: %v", err)
 	}
 }
+
+func TestGoClientSetsPasswordAgainstMITKadmind(t *testing.T) {
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	now := func() time.Time { return time.Now().UTC().Truncate(time.Second) }
+	goClient := &client.Client{Config: cfg, Now: now}
+	admin := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal,
+		Components: []string{"admin", "admin"},
+	}
+	alice := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	if err := (&kpasswd.Client{Kerberos: goClient}).SetPassword(
+		context.Background(), admin, "admin-password", alice, "alice-setpw-password",
+	); err != nil {
+		t.Fatalf("Go RFC 3244 set-password: %v", err)
+	}
+	if _, err := goClient.ASExchange(context.Background(), alice, "alice-setpw-password"); err != nil {
+		t.Fatalf("Go AS exchange with set password: %v", err)
+	}
+}

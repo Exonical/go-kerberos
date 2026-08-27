@@ -2,14 +2,18 @@ package kpasswd
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -39,6 +43,17 @@ func TestBuildPasswordChangePacket(t *testing.T) {
 	}
 	if got := int(binary.BigEndian.Uint16(packet[:2])); got != len(packet) {
 		t.Fatalf("length = %d, want %d", got, len(packet))
+	}
+}
+
+func TestBuildSetPasswordPacket(t *testing.T) {
+	packet, err := buildPasswordPacket(setPasswordVersion, []byte{0xaa, 0xbb}, []byte{0xcc, 0xdd, 0xee})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0, 11, 0xff, 0x80, 0, 2, 0xaa, 0xbb, 0xcc, 0xdd, 0xee}
+	if !bytes.Equal(packet, want) {
+		t.Fatalf("packet = %x, want %x", packet, want)
 	}
 }
 
@@ -94,6 +109,47 @@ func TestParsePasswordChangeReply(t *testing.T) {
 	}
 	if result.Code != 0 || result.Message != "" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestParseSetPasswordReplyAcceptsBothVersions(t *testing.T) {
+	now := time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC)
+	state := testKpasswdState(now)
+	apRep := testAPRep(t, state)
+	priv, err := buildKRBPriv(state, []byte{0, 0}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := make([]byte, 6+len(apRep)+len(priv))
+	binary.BigEndian.PutUint16(packet[:2], uint16(len(packet)))
+	binary.BigEndian.PutUint16(packet[4:6], uint16(len(apRep)))
+	copy(packet[6:], apRep)
+	copy(packet[6+len(apRep):], priv)
+	for _, version := range []uint16{kpasswdVersion, setPasswordVersion} {
+		t.Run(strconv.Itoa(int(version)), func(t *testing.T) {
+			binary.BigEndian.PutUint16(packet[2:4], version)
+			result, err := parsePasswordReply(packet, state, now, time.Minute, kpasswdVersion, setPasswordVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Code != 0 {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestSetPasswordRejectsInvalidTarget(t *testing.T) {
+	c := &Client{Kerberos: &client.Client{}}
+	admin := principal.Principal{Realm: "TEST.REALM", Components: []string{"admin", "admin"}}
+	tests := []principal.Principal{
+		{Components: []string{"alice"}},
+		{Realm: "TEST.REALM"},
+	}
+	for _, target := range tests {
+		if err := c.SetPassword(context.Background(), admin, "admin-password", target, "new-password"); err == nil {
+			t.Fatalf("SetPassword accepted invalid target %#v", target)
+		}
 	}
 }
 

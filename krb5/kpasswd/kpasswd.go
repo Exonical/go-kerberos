@@ -22,14 +22,16 @@ import (
 )
 
 const (
-	kpasswdPort       = 464
-	kpasswdVersion    = 1
-	kpasswdPrivUsage  = 13
-	kpasswdMaxPacket  = 1<<16 - 1
-	kpasswdResultCode = 2
+	kpasswdPort        = 464
+	kpasswdVersion     = 1
+	setPasswordVersion = 0xff80
+	kpasswdPrivUsage   = 13
+	kpasswdMaxPacket   = 1<<16 - 1
+	kpasswdResultCode  = 2
 )
 
-// Client performs RFC 3244 password changes using a Kerberos client.
+// Client performs RFC 3244 password changes and set-password requests using a
+// Kerberos client.
 type Client struct {
 	Kerberos *client.Client
 	// Port overrides the RFC 3244 default port 464 for isolated services.
@@ -97,12 +99,104 @@ func (c *Client) ChangePasswordWithCredentials(ctx context.Context, changepw *cl
 	if newPassword == "" {
 		return fmt.Errorf("password change: empty new password")
 	}
+	return c.sendPasswordRequest(ctx, changepw, kpasswdVersion, []byte(newPassword),
+		"password change", kpasswdVersion)
+}
+
+// SetPassword authenticates an administrator to kadmin/changepw and sets the
+// password of target.
+func (c *Client) SetPassword(ctx context.Context, adminPrincipal principal.Principal, adminPassword string, target principal.Principal, newPassword string) error {
+	if c == nil {
+		return fmt.Errorf("set password: nil client")
+	}
+	if c.Kerberos == nil {
+		return fmt.Errorf("set password: nil Kerberos client")
+	}
+	if ctx == nil {
+		return fmt.Errorf("set password: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if adminPrincipal.Realm == "" || len(adminPrincipal.Components) == 0 {
+		return fmt.Errorf("set password: invalid admin principal")
+	}
+	if adminPassword == "" {
+		return fmt.Errorf("set password: empty admin password")
+	}
+	if err := validateTarget(target); err != nil {
+		return err
+	}
+	if newPassword == "" {
+		return fmt.Errorf("set password: empty new password")
+	}
+	service := principal.Principal{
+		Realm: adminPrincipal.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"kadmin", "changepw"},
+	}
+	changepw, err := c.Kerberos.ASExchangeService(ctx, adminPrincipal, adminPassword, service)
+	if err != nil {
+		return fmt.Errorf("set password service ticket: %w", err)
+	}
+	return c.SetPasswordWithCredentials(ctx, changepw, target, newPassword)
+}
+
+// SetPasswordWithCredentials sets target's password using a kadmin/changepw
+// service credential obtained by ASExchangeService or another compatible
+// Kerberos exchange.
+func (c *Client) SetPasswordWithCredentials(ctx context.Context, changepw *client.Credentials, target principal.Principal, newPassword string) error {
+	if c == nil {
+		return fmt.Errorf("set password: nil client")
+	}
+	if c.Kerberos == nil {
+		return fmt.Errorf("set password: nil Kerberos client")
+	}
+	if ctx == nil {
+		return fmt.Errorf("set password: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if changepw == nil || len(changepw.Ticket) == 0 || len(changepw.Key.KeyValue) == 0 {
+		return fmt.Errorf("set password: incomplete service credentials")
+	}
+	if err := validateTarget(target); err != nil {
+		return err
+	}
+	if newPassword == "" {
+		return fmt.Errorf("set password: empty new password")
+	}
+	targetName := protocol.PrincipalName{
+		NameType:   int32(target.NameType),
+		NameString: append([]string(nil), target.Components...),
+	}
+	targetRealm := target.Realm
+	userData, err := asn1.Marshal(protocol.ChangePasswdData{
+		NewPassword: []byte(newPassword),
+		TargetName:  &targetName,
+		TargetRealm: &targetRealm,
+	})
+	if err != nil {
+		return fmt.Errorf("set password data: %w", err)
+	}
+	return c.sendPasswordRequest(ctx, changepw, setPasswordVersion, userData,
+		"set password", kpasswdVersion, setPasswordVersion)
+}
+
+func validateTarget(target principal.Principal) error {
+	if target.Realm == "" || len(target.Components) == 0 {
+		return fmt.Errorf("set password: invalid target principal")
+	}
+	return nil
+}
+
+func (c *Client) sendPasswordRequest(ctx context.Context, changepw *client.Credentials, version uint16, userData []byte, operation string, replyVersions ...uint16) error {
 	realm := changepw.Client.Realm
 	if realm == "" {
 		realm = changepw.Server.Realm
 	}
 	if realm == "" {
-		return fmt.Errorf("password change: missing realm")
+		return fmt.Errorf("%s: missing realm", operation)
 	}
 	now := time.Now().UTC()
 	if c.Kerberos.Now != nil {
@@ -110,26 +204,26 @@ func (c *Client) ChangePasswordWithCredentials(ctx context.Context, changepw *cl
 	}
 	apState, apDER, err := ap.BuildAPReq(changepw, types.APMutualRequired, now)
 	if err != nil {
-		return fmt.Errorf("password change AP-REQ: %w", err)
+		return fmt.Errorf("%s AP-REQ: %w", operation, err)
 	}
-	privDER, err := buildKRBPriv(apState, []byte(newPassword), now)
+	privDER, err := buildKRBPriv(apState, userData, now)
 	if err != nil {
-		return fmt.Errorf("password change KRB-PRIV: %w", err)
+		return fmt.Errorf("%s KRB-PRIV: %w", operation, err)
 	}
-	packet, err := buildPasswordChangePacket(apDER, privDER)
+	packet, err := buildPasswordPacket(version, apDER, privDER)
 	if err != nil {
-		return fmt.Errorf("password change packet: %w", err)
+		return fmt.Errorf("%s packet: %w", operation, err)
 	}
 	response, err := c.passwordChangeRoundTrip(ctx, realm, packet)
 	if err != nil {
 		return err
 	}
-	result, err := parsePasswordChangeReply(response, apState, now, c.clockSkew())
+	result, err := parsePasswordReply(response, apState, now, c.clockSkew(), replyVersions...)
 	if err != nil {
 		return err
 	}
 	if result.Code != 0 {
-		return fmt.Errorf("password change rejected (%d): %s", result.Code, result.Message)
+		return fmt.Errorf("%s rejected (%d): %s", operation, result.Code, result.Message)
 	}
 	return nil
 }
@@ -140,6 +234,10 @@ type passwordChangeResult struct {
 }
 
 func buildPasswordChangePacket(apReq, priv []byte) ([]byte, error) {
+	return buildPasswordPacket(kpasswdVersion, apReq, priv)
+}
+
+func buildPasswordPacket(version uint16, apReq, priv []byte) ([]byte, error) {
 	if len(apReq) > 0xffff {
 		return nil, fmt.Errorf("AP-REQ exceeds 16-bit length")
 	}
@@ -149,7 +247,7 @@ func buildPasswordChangePacket(apReq, priv []byte) ([]byte, error) {
 	}
 	packet := make([]byte, total)
 	binary.BigEndian.PutUint16(packet[0:2], uint16(total))
-	binary.BigEndian.PutUint16(packet[2:4], kpasswdVersion)
+	binary.BigEndian.PutUint16(packet[2:4], version)
 	binary.BigEndian.PutUint16(packet[4:6], uint16(len(apReq)))
 	copy(packet[6:], apReq)
 	copy(packet[6+len(apReq):], priv)
@@ -195,6 +293,10 @@ func buildKRBPriv(state *ap.APReq, password []byte, now time.Time) ([]byte, erro
 }
 
 func parsePasswordChangeReply(data []byte, state *ap.APReq, now time.Time, skew time.Duration) (passwordChangeResult, error) {
+	return parsePasswordReply(data, state, now, skew, kpasswdVersion)
+}
+
+func parsePasswordReply(data []byte, state *ap.APReq, now time.Time, skew time.Duration, versions ...uint16) (passwordChangeResult, error) {
 	if result, ok := decodeKRBError(data); ok {
 		return passwordChangeResult{}, fmt.Errorf("password change: %w", result)
 	}
@@ -204,7 +306,15 @@ func parsePasswordChangeReply(data []byte, state *ap.APReq, now time.Time, skew 
 	if int(binary.BigEndian.Uint16(data[0:2])) != len(data) {
 		return passwordChangeResult{}, fmt.Errorf("password change reply: inconsistent length")
 	}
-	if binary.BigEndian.Uint16(data[2:4]) != kpasswdVersion {
+	version := binary.BigEndian.Uint16(data[2:4])
+	accepted := false
+	for _, candidate := range versions {
+		if version == candidate {
+			accepted = true
+			break
+		}
+	}
+	if !accepted {
 		return passwordChangeResult{}, fmt.Errorf("password change reply: unsupported version")
 	}
 	apLength := int(binary.BigEndian.Uint16(data[4:6]))

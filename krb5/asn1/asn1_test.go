@@ -58,6 +58,37 @@ func TestPrimitiveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChangePasswdDataGoldenDER(t *testing.T) {
+	realm := "TEST.REALM"
+	value := protocol.ChangePasswdData{
+		NewPassword: []byte("new-password"),
+		TargetName:  &protocol.PrincipalName{NameType: 1, NameString: []string{"alice"}},
+		TargetRealm: &realm,
+	}
+	got, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{
+		0x30, 0x32,
+		0xa0, 0x0e, 0x04, 0x0c, 0x6e, 0x65, 0x77, 0x2d, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64,
+		0xa1, 0x12, 0x30, 0x10, 0xa0, 0x03, 0x02, 0x01, 0x01, 0xa1, 0x09, 0x30, 0x07, 0x1b, 0x05, 0x61, 0x6c, 0x69, 0x63, 0x65,
+		0xa2, 0x0c, 0x1b, 0x0a, 0x54, 0x45, 0x53, 0x54, 0x2e, 0x52, 0x45, 0x41, 0x4c, 0x4d,
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("ChangePasswdData = %x, want %x", got, want)
+	}
+	var decoded protocol.ChangePasswdData
+	if err := Unmarshal(got, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded.NewPassword, value.NewPassword) ||
+		decoded.TargetName == nil || decoded.TargetRealm == nil ||
+		*decoded.TargetRealm != realm {
+		t.Fatalf("decoded ChangePasswdData = %#v", decoded)
+	}
+}
+
 func TestFieldTGSReqBody(t *testing.T) {
 	body := protocol.KDCReqBody{
 		KDCOptions: types.KDCOptions(0),
