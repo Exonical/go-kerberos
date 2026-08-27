@@ -11,6 +11,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -36,6 +37,122 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 	if !samePrincipal(credentials.Server, service) {
 		t.Fatalf("service server = %v, want %v", credentials.Server, service)
+	}
+}
+
+func TestServerFASTASExchange(t *testing.T) {
+	now := time.Unix(2000000050, 0).UTC()
+	_, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	credentials, err := kclient.ASExchangeFAST(context.Background(), user, "alice-password", armorTGT)
+	if err != nil {
+		t.Fatalf("FAST ASExchange: %v", err)
+	}
+	if !samePrincipal(credentials.Client, user) || credentials.Server.Components[0] != "krbtgt" {
+		t.Fatalf("FAST credentials = %#v", credentials)
+	}
+}
+
+func TestServerFASTRejectsMalformedArmor(t *testing.T) {
+	now := time.Unix(2000000060, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		t.Fatalf("new armor: %v", err)
+	}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}, 7)
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("wrap FAST request: %v", err)
+	}
+	fastData.PADataValue[len(fastData.PADataValue)-1] ^= 0xff
+	request.PAData = protocol.MethodData{fastData}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("malformed FAST response: %v", err)
+	}
+	if kerberosError.ErrorCode == 0 {
+		t.Fatal("malformed FAST request unexpectedly succeeded")
+	}
+}
+
+func TestServerFASTRejectsBadChecksumAndGarbage(t *testing.T) {
+	now := time.Unix(2000000070, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		t.Fatalf("new armor: %v", err)
+	}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}, 8)
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("wrap FAST request: %v", err)
+	}
+	var wrapper protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(fastData.PADataValue, &wrapper); err != nil {
+		t.Fatalf("decode FAST request: %v", err)
+	}
+	wrapper.ArmoredData.ReqChecksum.Checksum[0] ^= 0xff
+	fastData.PADataValue = mustMarshal(t, wrapper)
+	request.PAData = protocol.MethodData{fastData}
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	fastData, err = armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("rewrap FAST request: %v", err)
+	}
+	if err := asn1.Unmarshal(fastData.PADataValue, &wrapper); err != nil {
+		t.Fatalf("decode fresh FAST request: %v", err)
+	}
+	wrapper.ArmoredData.Armor.ArmorValue[len(wrapper.ArmoredData.Armor.ArmorValue)-1] ^= 0xff
+	request.PAData[0].PADataValue = mustMarshal(t, wrapper)
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	fastData, err = armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		t.Fatalf("rewrap FAST request: %v", err)
+	}
+	fastData.PADataValue[len(fastData.PADataValue)-1] ^= 0xff
+	request.PAData[0].PADataValue = fastData.PADataValue
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+
+	request.PAData[0].PADataValue = []byte{0x01, 0x02, 0x03}
+	assertKRBError(t, server.HandleMessage(mustMarshal(t, request)))
+}
+
+func assertKRBError(t *testing.T, response []byte) {
+	t.Helper()
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("FAST error response: %v", err)
+	}
+	if kerberosError.ErrorCode == 0 {
+		t.Fatal("FAST request unexpectedly succeeded")
 	}
 }
 
