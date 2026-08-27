@@ -617,6 +617,11 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
 		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
+	} else if serviceName.Realm != s.Realm {
+		serviceName = principal.Principal{
+			Realm: s.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", request.ReqBody.Realm},
+		}
 	}
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
@@ -702,7 +707,11 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		CRealm: ticketPart.CRealm, CName: ticketPart.CName,
-		AuthTime: authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
+		Transited: ticketPart.Transited,
+		AuthTime:  authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
+	}
+	if ticketPart.Transited.TrType == 0 {
+		ticketPart.Transited.TrType = 1
 	}
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
 	if err != nil {
@@ -710,7 +719,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	ticketKVNO := serviceKey.KVNO
 	ticket := protocol.Ticket{
-		TktVNO: 5, Realm: serviceName.Realm, SName: *request.ReqBody.SName,
+		TktVNO: 5, Realm: serviceName.Realm, SName: *protocolPrincipal(serviceName),
 		EncPart: protocol.EncryptedData{EType: etypeID, KVNO: &ticketKVNO, Cipher: ticketCipher},
 	}
 	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
@@ -721,7 +730,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		Key:     protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		LastReq: protocol.LastReq{{LRType: 0, LRValue: types.KerberosTime{Time: now, Present: true}}},
 		Nonce:   request.ReqBody.Nonce, Flags: flags, AuthTime: authTime, StartTime: startTime,
-		EndTime: endTime, SRealm: serviceName.Realm, SName: *request.ReqBody.SName,
+		EndTime: endTime, SRealm: serviceName.Realm, SName: *protocolPrincipal(serviceName),
 		RenewTill: renewTill,
 	}
 	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
@@ -930,6 +939,10 @@ func findPA(data protocol.MethodData, kind int32) *protocol.PAData {
 
 func principalFromProtocol(value protocol.PrincipalName, realm string) principal.Principal {
 	return principal.Principal{Realm: realm, NameType: principal.NameType(value.NameType), Components: append([]string(nil), value.NameString...)}
+}
+
+func protocolPrincipal(value principal.Principal) *protocol.PrincipalName {
+	return &protocol.PrincipalName{NameType: int32(value.NameType), NameString: append([]string(nil), value.Components...)}
 }
 
 func sameProtocolPrincipal(left, right protocol.PrincipalName) bool {

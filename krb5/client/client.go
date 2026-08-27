@@ -307,6 +307,47 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	service = serviceWithRealm(service, realm)
 	visited := make(map[string]bool)
 	currentTGT := tgt
+	currentRealm := currentTGT.Server.Realm
+	if currentRealm == "" {
+		currentRealm = currentTGT.Client.Realm
+	}
+	if currentRealm == "" {
+		return nil, fmt.Errorf("TGS exchange: missing TGT realm")
+	}
+	if currentRealm != realm {
+		now := time.Now().UTC()
+		if c.Now != nil {
+			now = c.Now().UTC()
+		}
+		crossTGTService := principal.Principal{
+			Realm: currentRealm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", realm},
+		}
+		request, nonce, err := c.newTGSReq(currentTGT, crossTGTService, currentRealm, now, true)
+		if err != nil {
+			return nil, err
+		}
+		response, err := c.exchangePayload(ctx, currentRealm, request, "cross-realm TGS exchange request")
+		if err != nil {
+			return nil, err
+		}
+		crossRequestedService := crossTGTService
+		crossRequestedService.Realm = realm
+		result, referral, err := c.decodeTGSRepForExchange(
+			response, currentTGT.Client, crossTGTService, crossRequestedService,
+			true, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if referral || len(result.Server.Components) != 2 ||
+			result.Server.Components[0] != "krbtgt" ||
+			result.Server.Components[1] != realm ||
+			result.Server.Realm != currentRealm {
+			return nil, fmt.Errorf("TGS exchange: malformed cross-realm TGT")
+		}
+		currentTGT = result
+	}
 	for hops := 0; ; hops++ {
 		if visited[realm] {
 			return nil, fmt.Errorf("TGS exchange: referral realm loop at %s", realm)
