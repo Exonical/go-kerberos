@@ -3,6 +3,7 @@ package gssapi
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -168,6 +169,61 @@ func TestPerMessageRRCIsRotatedOnReceive(t *testing.T) {
 	}
 	if string(plain) != "rotation" {
 		t.Fatalf("rotated token payload = %q", plain)
+	}
+}
+
+func TestRFC4121PerMessageTokenLayouts(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0xa5}, 16)))
+	defer restore()
+
+	sealedContext := &Context{
+		key:       protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		initiator: true,
+	}
+	sealed, err := sealedContext.Wrap([]byte("golden"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(sealed[:16]); got != "050402ff000000000000000000000000" {
+		t.Fatalf("sealed header = %s", got)
+	}
+	if got := hex.EncodeToString(sealed); got != "050402ff000000000000000000000000baa4162f84bc1b8a4672581ac3000dfa15a3628d7479ed990b15db1dc619f7775a12f6e98f33aa18f4e48d0bf82f7a845942" {
+		t.Fatalf("sealed token = %s", got)
+	}
+	decrypted, err := etype.Decrypt(key, 24, sealed[16:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSealedPlaintext := append([]byte("golden"), sealed[:16]...)
+	if !bytes.Equal(decrypted, wantSealedPlaintext) {
+		t.Fatalf("sealed plaintext = %x, want %x", decrypted, wantSealedPlaintext)
+	}
+	micContext := &Context{
+		key:       protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		initiator: true,
+	}
+	mic, err := micContext.MIC([]byte("golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(mic[:16]); got != "040400ffffffffff0000000000000000" {
+		t.Fatalf("MIC header = %s", got)
+	}
+	if got := hex.EncodeToString(mic); got != "040400ffffffffff0000000000000000a0eb91295c829986e1b4607c" {
+		t.Fatalf("MIC token = %s", got)
+	}
+	wantMICHeader := append([]byte("golden"), mic[:16]...)
+	wantMIC, err := etype.Checksum(key, 25, wantMICHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(mic[16:], wantMIC) {
+		t.Fatalf("MIC checksum = %x, want %x", mic[16:], wantMIC)
 	}
 }
 
