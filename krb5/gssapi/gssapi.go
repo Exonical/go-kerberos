@@ -224,7 +224,9 @@ func (c *Context) wrap(data []byte, sealed bool) ([]byte, error) {
 	}
 	payload := append([]byte(nil), data...)
 	if sealed {
-		payload, err = etype.Encrypt(c.key.KeyValue, usage, payload)
+		header := messageHeader([]byte{0x05, 0x04}, flags, 0, 0, seq)
+		encryptedInput := append(append([]byte(nil), payload...), header...)
+		payload, err = etype.Encrypt(c.key.KeyValue, usage, encryptedInput)
 		if err != nil {
 			return nil, fmt.Errorf("GSS wrap encryption: %w", err)
 		}
@@ -239,7 +241,9 @@ func (c *Context) wrap(data []byte, sealed bool) ([]byte, error) {
 		if !c.initiator {
 			signUsage = 23
 		}
-		mac, err := etype.Checksum(c.key.KeyValue, signUsage, append(header, data...))
+		canonical := messageHeader(header[:2], header[2], ec, 0, seq)
+		signed := append(append([]byte(nil), data...), canonical...)
+		mac, err := etype.Checksum(c.key.KeyValue, signUsage, signed)
 		if err != nil {
 			return nil, fmt.Errorf("GSS wrap checksum: %w", err)
 		}
@@ -275,8 +279,20 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("GSS unwrap: %w", err)
 		}
+		if len(plain) < 16 {
+			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+		}
+		ec := int(binary.BigEndian.Uint16(header[4:6]))
+		expectedHeader := messageHeader(header[:2], header[2], ec, 0, binary.BigEndian.Uint64(header[8:]))
+		if !equalBytes(plain[len(plain)-16:], expectedHeader) {
+			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+		}
+		body := plain[:len(plain)-16]
+		if ec > len(body) {
+			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+		}
 		c.recvSeq++
-		return plain, nil
+		return body[:len(body)-ec], nil
 	}
 	ec := int(binary.BigEndian.Uint16(header[4:6]))
 	if ec != etype.ChecksumSize() || len(payload) < ec {
@@ -288,7 +304,8 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 	if c.initiator {
 		signUsage = 23
 	}
-	if err := etype.VerifyChecksum(c.key.KeyValue, signUsage, append(canonical, data...), mac); err != nil {
+	signed := append(append([]byte(nil), data...), canonical...)
+	if err := etype.VerifyChecksum(c.key.KeyValue, signUsage, signed, mac); err != nil {
 		return nil, fmt.Errorf("GSS unwrap: %w", err)
 	}
 	c.recvSeq++
@@ -309,13 +326,13 @@ func (c *Context) mic(data []byte) ([]byte, error) {
 	}
 	seq := c.sendSeq
 	c.sendSeq++
-	ec := etype.ChecksumSize()
-	header := messageHeader([]byte{0x04, 0x04}, flags, ec, 0, seq)
+	header := micHeader(flags, seq)
 	usage := uint32(25)
 	if !c.initiator {
 		usage = 23
 	}
-	mac, err := etype.Checksum(c.key.KeyValue, usage, append(header, data...))
+	signed := append(append([]byte(nil), data...), header...)
+	mac, err := etype.Checksum(c.key.KeyValue, usage, signed)
 	if err != nil {
 		return nil, fmt.Errorf("GSS MIC: %w", err)
 	}
@@ -330,25 +347,25 @@ func (c *Context) verifyMIC(data, token []byte) error {
 	if err := c.validateIncoming(header); err != nil {
 		return err
 	}
+	for _, value := range header[3:8] {
+		if value != 0xff {
+			return fmt.Errorf("GSS MIC: %w", krberrors.ErrIntegrity)
+		}
+	}
 	etype, err := crypto.NewRegistry().Get(c.key.KeyType)
 	if err != nil {
 		return err
 	}
-	rrc := int(binary.BigEndian.Uint16(header[6:8]))
-	payload, err = rotateLeft(payload, rrc)
-	if err != nil {
-		return err
-	}
-	ec := int(binary.BigEndian.Uint16(header[4:6]))
-	if ec != etype.ChecksumSize() || len(payload) != ec {
+	if len(payload) != etype.ChecksumSize() {
 		return fmt.Errorf("GSS MIC: %w", krberrors.ErrIntegrity)
 	}
-	canonical := messageHeader(header[:2], header[2], ec, 0, binary.BigEndian.Uint64(header[8:]))
+	canonical := micHeader(header[2], binary.BigEndian.Uint64(header[8:]))
 	usage := uint32(25)
 	if c.initiator {
 		usage = 23
 	}
-	if err := etype.VerifyChecksum(c.key.KeyValue, usage, append(canonical, data...), payload); err != nil {
+	signed := append(append([]byte(nil), data...), canonical...)
+	if err := etype.VerifyChecksum(c.key.KeyValue, usage, signed, payload); err != nil {
 		return fmt.Errorf("GSS MIC: %w", err)
 	}
 	c.recvSeq++
@@ -471,6 +488,28 @@ func messageHeader(tokenID []byte, flags byte, ec, rrc int, seq uint64) []byte {
 	binary.BigEndian.PutUint16(header[6:8], uint16(rrc))
 	binary.BigEndian.PutUint64(header[8:], seq)
 	return header
+}
+
+func micHeader(flags byte, seq uint64) []byte {
+	header := make([]byte, 16)
+	header[0], header[1], header[2] = 0x04, 0x04, flags
+	for index := 3; index < 8; index++ {
+		header[index] = 0xff
+	}
+	binary.BigEndian.PutUint64(header[8:], seq)
+	return header
+}
+
+func equalBytes(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func parseMessage(token, tokenID []byte) ([]byte, []byte, error) {
