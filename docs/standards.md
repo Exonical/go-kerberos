@@ -8,45 +8,45 @@ requirements.
 
 | Component | RFC | Sections | Tests | Implementation |
 | --- | --- | --- | --- | --- |
-| PrincipalName | RFC 4120 | 4.1.1, 4.2.1 | not started | not started |
-| KerberosTime | RFC 4120 | 5.2.3 | not started | not started |
-| KDCOptions | RFC 4120 | 5.4.1 | not started | not started |
-| TicketFlags | RFC 4120 | 5.3.1 | not started | not started |
-| APOptions | RFC 4120 | 5.5.1 | not started | not started |
-| HostAddress / HostAddresses | RFC 4120 | 5.2.5 | not started | not started |
-| AuthorizationData | RFC 4120 | 5.2.6 | not started | not started |
-| PA-DATA | RFC 4120 | 5.2.7, 5.9 | not started | not started |
-| EncryptedData | RFC 4120 | 5.2.9 | not started | not started |
-| EncryptionKey | RFC 4120 | 5.2.9 | not started | not started |
-| Checksum | RFC 4120 | 5.2.9 | not started | not started |
-| Ticket | RFC 4120 | 5.3 | not started | not started |
-| EncTicketPart | RFC 4120 | 5.3.1 | not started | not started |
-| Authenticator | RFC 4120 | 5.5.1 | not started | not started |
-| KDC-REQ / KDC-REQ-BODY | RFC 4120 | 5.4.1 | not started | not started |
-| AS-REQ | RFC 4120 | 5.4.1 | not started | not started |
-| TGS-REQ | RFC 4120 | 5.4.1 | not started | not started |
-| KDC-REP | RFC 4120 | 5.4.2 | not started | not started |
-| AS-REP | RFC 4120 | 5.4.2 | not started | not started |
-| TGS-REP | RFC 4120 | 5.4.2 | not started | not started |
-| EncASRepPart / EncTGSRepPart | RFC 4120 | 5.4.2 | not started | not started |
-| AP-REQ / AP-REP | RFC 4120 | 5.5.1 | not started | not started |
-| EncAPRepPart | RFC 4120 | 5.5.2 | not started | not started |
-| KRB-ERROR | RFC 4120 | 5.9.1 | not started | not started |
-| METHOD-DATA | RFC 4120 | 5.9.1 | not started | not started |
-| ETYPE-INFO / ETYPE-INFO2 | RFC 4120 | 5.2.7, 5.9.1 | not started | not started |
-| LastReq | RFC 4120 | 5.2.8 | not started | not started |
-| TransitedEncoding | RFC 4120 | 5.3.1 | not started | not started |
-| AES CTS primitive | RFC 3962 | 5 | not started | not started |
-| Kerberos crypto framework | RFC 3961 | 4–6 | not started | not started |
-| AES128/AES256 CTS HMAC SHA1 | RFC 3962 | 4–5 | not started | not started |
-| AES CTS HMAC SHA2 | RFC 8009 | 3–6 | not started | not started |
-| AES enctype assignments and deprecations | RFC 8429 | 2–3 | not started | not started |
-| String-to-key | RFC 3961, RFC 3962, RFC 8009 | 5, 4 | not started | not started |
-| Key derivation and key usage | RFC 3961 | 5.1–5.2 | not started | not started |
-| Checksums | RFC 3961, RFC 3962, RFC 8009 | 4, 5 | not started | not started |
-| FILE keytab format | MIT krb5 format | v2 record layout | not started | not started |
-| FILE ccache format | MIT krb5 format | v4 header and credential layout | not started | not started |
-| `krb5.conf` | MIT krb5 format | `libdefaults`, `realms`, `domain_realm`, `capaths` | not started | not started |
+| PrincipalName | RFC 4120 | 4.1.1, 4.2.1 | RED | not started |
+| KerberosTime | RFC 4120 | 5.2.3 | RED | not started |
+| KDCOptions | RFC 4120 | 5.4.1 | RED | not started |
+| TicketFlags | RFC 4120 | 5.3.1 | RED | not started |
+| APOptions | RFC 4120 | 5.5.1 | RED | not started |
+| HostAddress / HostAddresses | RFC 4120 | 5.2.5 | RED | not started |
+| AuthorizationData | RFC 4120 | 5.2.6 | RED | not started |
+| PA-DATA | RFC 4120 | 5.2.7, 5.9 | RED | not started |
+| EncryptedData | RFC 4120 | 5.2.9 | RED | not started |
+| EncryptionKey | RFC 4120 | 5.2.9 | RED | not started |
+| Checksum | RFC 4120 | 5.2.9 | RED | not started |
+| Ticket | RFC 4120 | 5.3 | RED | not started |
+| EncTicketPart | RFC 4120 | 5.3.1 | RED | not started |
+| Authenticator | RFC 4120 | 5.5.1 | RED | not started |
+| KDC-REQ / KDC-REQ-BODY | RFC 4120 | 5.4.1 | RED | not started |
+| AS-REQ | RFC 4120 | 5.4.1 | RED | not started |
+| TGS-REQ | RFC 4120 | 5.4.1 | RED | not started |
+| KDC-REP | RFC 4120 | 5.4.2 | RED | not started |
+| AS-REP | RFC 4120 | 5.4.2 | RED | not started |
+| TGS-REP | RFC 4120 | 5.4.2 | RED | not started |
+| EncASRepPart / EncTGSRepPart | RFC 4120 | 5.4.2 | RED | not started |
+| AP-REQ / AP-REP | RFC 4120 | 5.5.1 | RED | not started |
+| EncAPRepPart | RFC 4120 | 5.5.2 | RED | not started |
+| KRB-ERROR | RFC 4120 | 5.9.1 | RED | not started |
+| METHOD-DATA | RFC 4120 | 5.9.1 | RED | not started |
+| ETYPE-INFO / ETYPE-INFO2 | RFC 4120 | 5.2.7, 5.9.1 | RED | not started |
+| LastReq | RFC 4120 | 5.2.8 | RED | not started |
+| TransitedEncoding | RFC 4120 | 5.3.1 | RED | not started |
+| AES CTS primitive | RFC 3962 | 5 | RED | not started |
+| Kerberos crypto framework | RFC 3961 | 4–6 | RED | not started |
+| AES128/AES256 CTS HMAC SHA1 | RFC 3962 | 4–5 | RED | not started |
+| AES CTS HMAC SHA2 | RFC 8009 | 3–6 | RED | not started |
+| AES enctype assignments and deprecations | RFC 8429 | 2–3 | RED | not started |
+| String-to-key | RFC 3961, RFC 3962, RFC 8009 | 5, 4 | RED | not started |
+| Key derivation and key usage | RFC 3961 | 5.1–5.2 | RED | not started |
+| Checksums | RFC 3961, RFC 3962, RFC 8009 | 4, 5 | RED | not started |
+| FILE keytab format | MIT krb5 format | v2 record layout | RED | not started |
+| FILE ccache format | MIT krb5 format | v4 header and credential layout | RED | not started |
+| `krb5.conf` | MIT krb5 format | `libdefaults`, `realms`, `domain_realm`, `capaths` | RED | not started |
 | Generalized preauthentication / FAST | RFC 6113 | later client phase | not started | not started |
 | Principal canonicalization and referrals | RFC 6806 | later client phase | not started | not started |
 | Kerberos GSS-API mechanism | RFC 4121 | later client phase | not started | not started |

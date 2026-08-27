@@ -1,21 +1,21 @@
 # Client test matrix
 
-All Phase 0 cells are planned. Protocol tests and fixtures are intentionally
-deferred to the next handoff.
+All listed Phase 0 cells now have RED test coverage. Production behavior and
+MIT-generated fixtures are intentionally deferred to later handoffs.
 
 | Feature | Go client -> MIT KDC | MIT-generated fixture -> Go | Go-generated artifact -> MIT |
 | --- | --- | --- | --- |
-| Principal parsing | planned | planned | planned |
-| ASN.1 | planned | planned | planned |
-| AES128 SHA1 | planned | planned | planned |
-| AES256 SHA1 | planned | planned | planned |
-| AES128 SHA256 | planned | planned | planned |
-| AES256 SHA384 | planned | planned | planned |
-| keytab | planned | planned | planned |
-| FILE ccache | planned | planned | planned |
-| AS exchange | planned | planned | planned |
-| TGS exchange | planned | planned | planned |
-| AP exchange | planned | planned | planned |
+| Principal parsing | RED | RED | RED |
+| ASN.1 | RED | RED | RED |
+| AES128 SHA1 | RED | RED | RED |
+| AES256 SHA1 | RED | RED | RED |
+| AES128 SHA256 | RED | RED | RED |
+| AES256 SHA384 | RED | RED | RED |
+| keytab | RED | RED | RED |
+| FILE ccache | RED | RED | RED |
+| AS exchange | RED | RED | RED |
+| TGS exchange | RED | RED | RED |
+| AP exchange | RED | RED | RED |
 
 The matrix will be extended for later client features such as renewal,
 canonicalization, referrals, FAST, GSS-API, S4U, and PKINIT.
