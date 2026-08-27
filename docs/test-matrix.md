@@ -17,13 +17,20 @@ when absent.
 | FILE ccache | RED | RED | RED |
 | AS exchange | RED | RED | RED |
 | TGS exchange | RED | RED | RED |
+| KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump) | unit + golden | MIT pass | read-only |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | implemented | unit + golden | MIT pass |
 
-The matrix will be extended for later client features such as renewal,
-canonicalization, referrals, FAST, GSS-API, S4U, and PKINIT.
+The KDC supports optional server-wide preauthentication disablement, a
+default lifetime for requests with an omitted maximum `till`, and optional
+forwardable/renewable/proxiable flag policy. A nil policy preserves permissive
+issuance, including proxiable tickets when requested; a non-nil policy clears
+disallowed flags, matching MIT's `get_ticket_flags` behavior. MIT normally
+configures preauthentication and flag restrictions per principal, while this
+implementation exposes server-level knobs. Renewable, postdated, and
+validation behavior is covered by unit and MIT integration tests.
 
 Cross-realm clients follow ordered `[capaths]` paths (up to ten hops), with
 direct trust as the fallback. KDC tickets use RFC 4120

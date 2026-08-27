@@ -44,12 +44,19 @@ const (
 
 // Server is a Kerberos KDC backed by a pluggable principal store.
 type Server struct {
-	Realm            string
-	DB               kdb.Store
-	Now              func() time.Time
-	ClockSkew        time.Duration
-	MaxTicketLife    time.Duration
-	MaxRenewableLife time.Duration
+	Realm         string
+	DB            kdb.Store
+	Now           func() time.Time
+	ClockSkew     time.Duration
+	MaxTicketLife time.Duration
+	// DefaultTicketLife applies when a request omits its maximum till time.
+	DefaultTicketLife time.Duration
+	MaxRenewableLife  time.Duration
+	// DisablePreauth disables the server-wide preauthentication requirement.
+	// MIT normally configures this per principal with requires_preauth.
+	DisablePreauth bool
+	// Policy optionally restricts forwardable, renewable, and proxiable flags.
+	Policy *Policy
 	// Capaths optionally configures permitted server-side transited paths.
 	Capaths map[string]map[string][]string
 
@@ -159,6 +166,15 @@ type fastContext struct {
 	cookie *protocol.PAData
 }
 
+// Policy controls optional ticket-flag issuance. A nil policy preserves the
+// permissive defaults; disallowed flags are cleared, matching MIT's KDC
+// behavior for per-principal flag restrictions.
+type Policy struct {
+	AllowForwardable bool
+	AllowRenewable   bool
+	AllowProxiable   bool
+}
+
 func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if request.PVNO != 5 || request.MsgType != 10 ||
 		request.ReqBody.CName == nil || request.ReqBody.SName == nil ||
@@ -198,6 +214,10 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	if timestampPA == nil {
+		if s.DisablePreauth {
+			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+				etypeID, clientKey, serviceKey, armor, false)
+		}
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp, PADataValue: []byte{}},
 			{
@@ -241,7 +261,8 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
-	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord, etypeID, clientKey, serviceKey, armor)
+	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+		etypeID, clientKey, serviceKey, armor, true)
 }
 
 func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.ASReq, *fastContext, int32) {
@@ -353,7 +374,7 @@ func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.A
 	return request, armor, 0
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext) []byte {
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -365,10 +386,17 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	now := s.now().UTC().Truncate(time.Second)
 	authTime := types.KerberosTime{Time: now, Present: true}
 	startTime := authTime
-	flags := types.TicketInitial | types.TicketPreAuthent
+	flags := types.TicketInitial
+	if preauthenticated {
+		flags |= types.TicketPreAuthent
+	}
 	if request.ReqBody.KDCOptions&types.KDCForwardable != 0 {
 		flags |= types.TicketForwardable
 	}
+	if request.ReqBody.KDCOptions&types.KDCProxiable != 0 {
+		flags |= types.TicketProxiable
+	}
+	s.applyFlagPolicy(&flags)
 	if request.ReqBody.KDCOptions&types.KDCAllowPostdate != 0 {
 		flags |= types.TicketMayPostdate
 	}
@@ -384,6 +412,9 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	}
 	endTime := s.ticketEndFrom(request.ReqBody.Till, startTime.Time)
 	renewTill := s.renewTill(request.ReqBody.KDCOptions, request.ReqBody.RTime, request.ReqBody.Till, startTime.Time, endTime.Time)
+	if s.Policy != nil && !s.Policy.AllowRenewable {
+		renewTill = nil
+	}
 	if renewTill != nil {
 		flags |= types.TicketRenewable
 	}
@@ -719,6 +750,10 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 			flags |= types.TicketRenewable
 		}
 	}
+	if s.Policy != nil && !s.Policy.AllowRenewable {
+		renewTill = nil
+	}
+	s.applyFlagPolicy(&flags)
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
@@ -875,12 +910,16 @@ func (s *Server) withinSkew(value time.Time) bool {
 }
 
 func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.KerberosTime {
-	lifetime := s.MaxTicketLife
-	if lifetime <= 0 {
-		lifetime = 10 * time.Hour
+	maxLife := s.MaxTicketLife
+	if maxLife <= 0 {
+		maxLife = 10 * time.Hour
 	}
-	end := start.Add(lifetime)
-	if till.Present && till.Time.Before(end) {
+	end := start.Add(maxLife)
+	if !ticketTillSet(till) {
+		if s.DefaultTicketLife > 0 && s.DefaultTicketLife < maxLife {
+			end = start.Add(s.DefaultTicketLife)
+		}
+	} else if till.Time.Before(end) {
 		end = till.Time
 	}
 	if end.Before(start) {
@@ -891,11 +930,12 @@ func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.K
 
 func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTime, till types.KerberosTime, start, end time.Time) *types.KerberosTime {
 	renewable := options&types.KDCRenewable != 0
-	if !renewable && (options&types.KDCRenewableOK == 0 || !till.Present || !till.Time.After(end)) {
+	hasTill := ticketTillSet(till)
+	if !renewable && (options&types.KDCRenewableOK == 0 || (hasTill && !till.Time.After(end))) {
 		return nil
 	}
 	target := start.Add(s.MaxRenewableLife)
-	if till.Present {
+	if hasTill {
 		target = till.Time
 	}
 	if renewable && requested != nil && requested.Present {
@@ -919,6 +959,25 @@ func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTi
 	}
 	result := types.KerberosTime{Time: target.Truncate(time.Second), Present: true}
 	return &result
+}
+
+func ticketTillSet(till types.KerberosTime) bool {
+	return till.Present && !till.Time.Equal(time.Unix(0, 0).UTC())
+}
+
+func (s *Server) applyFlagPolicy(flags *types.TicketFlags) {
+	if s.Policy == nil {
+		return
+	}
+	if !s.Policy.AllowForwardable {
+		*flags &^= types.TicketForwardable
+	}
+	if !s.Policy.AllowProxiable {
+		*flags &^= types.TicketProxiable
+	}
+	if !s.Policy.AllowRenewable {
+		*flags &^= types.TicketRenewable
+	}
 }
 
 func (s *Server) replayed(realm string, name protocol.PrincipalName, authenticator protocol.Authenticator) bool {

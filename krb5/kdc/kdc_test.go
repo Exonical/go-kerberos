@@ -207,6 +207,161 @@ func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 	}
 }
 
+func TestASDisablePreauth(t *testing.T) {
+	now := time.Unix(2000000150, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DisablePreauth = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+
+	request := asRequest(user, service, 150)
+	request.PAData = nil
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.Flags&types.TicketPreAuthent != 0 {
+		t.Fatalf("unpreauthenticated AS reply flags = %#x, has preauthenticated flag", part.Flags)
+	}
+
+	request = asRequest(user, service, 151)
+	addPreauth(t, &request, now)
+	part = asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.Flags&types.TicketPreAuthent == 0 {
+		t.Fatalf("preauthenticated AS reply flags = %#x, missing preauthenticated flag", part.Flags)
+	}
+}
+
+func TestASAndTGSApplyDefaultTicketLife(t *testing.T) {
+	now := time.Unix(2000000175, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.DefaultTicketLife = 4 * time.Hour
+	server.MaxTicketLife = 10 * time.Hour
+	if got := server.ticketEndFrom(kerberosTime(now.Add(8*time.Hour)), now); !got.Time.Equal(now.Add(8 * time.Hour)) {
+		t.Fatalf("explicit-till end-time = %v, want %v", got.Time, now.Add(8*time.Hour))
+	}
+	server.DefaultTicketLife = 2 * time.Hour
+	server.MaxTicketLife = 3 * time.Hour
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+
+	if got := server.ticketEndFrom(types.KerberosTime{}, now); !got.Time.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("zero-till end-time = %v, want %v", got.Time, now.Add(2*time.Hour))
+	}
+
+	request := asRequest(user, service, 175)
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if !part.EndTime.Time.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("AS end-time = %v, want %v", part.EndTime.Time, now.Add(2*time.Hour))
+	}
+
+	request = asRequest(user, service, 176)
+	request.ReqBody.Till = kerberosTime(time.Unix(0, 0).UTC())
+	addPreauth(t, &request, now)
+	part = asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if !part.EndTime.Time.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("AS epoch-till end-time = %v, want %v", part.EndTime.Time, now.Add(2*time.Hour))
+	}
+
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgsResponse := server.HandleMessage(rawTGSRequestWithTill(t, tgt, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"},
+	}, now, kerberosTime(time.Unix(0, 0).UTC()), 0))
+	tgsPart := tgsReplyPart(t, tgsResponse, tgt.Key)
+	if !tgsPart.EndTime.Time.Equal(now.Add(2 * time.Hour)) {
+		t.Fatalf("TGS end-time = %v, want %v", tgsPart.EndTime.Time, now.Add(2*time.Hour))
+	}
+	server.DefaultTicketLife = 4 * time.Hour
+	tgsResponse = server.HandleMessage(rawTGSRequestWithTill(t, tgt, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"},
+	}, now.Add(time.Second), kerberosTime(time.Unix(0, 0).UTC()), 0))
+	tgsPart = tgsReplyPart(t, tgsResponse, tgt.Key)
+	if !tgsPart.EndTime.Time.Equal(now.Add(3 * time.Hour)) {
+		t.Fatalf("TGS max-capped end-time = %v, want %v", tgsPart.EndTime.Time, now.Add(3*time.Hour))
+	}
+}
+
+func TestServerPolicyClearsDisallowedFlags(t *testing.T) {
+	now := time.Unix(2000000180, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := issueASTicket(t, server, user, now,
+		types.KDCForwardable|types.KDCProxiable|types.KDCRenewable, now.Add(2*time.Hour))
+	server.Policy = &Policy{}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	for i, option := range []types.KDCOptions{types.KDCForwardable, types.KDCProxiable, types.KDCRenewable} {
+		request := asRequest(user, service, uint32(180+i))
+		request.ReqBody.KDCOptions = option
+		addPreauth(t, &request, now)
+		part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+		var flag types.TicketFlags
+		switch option {
+		case types.KDCForwardable:
+			flag = types.TicketForwardable
+		case types.KDCProxiable:
+			flag = types.TicketProxiable
+		case types.KDCRenewable:
+			flag = types.TicketRenewable
+		}
+		if part.Flags&flag != 0 {
+			t.Fatalf("AS option %#x granted disallowed flag %#x", option, flag)
+		}
+	}
+
+	service = principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	for _, option := range []types.KDCOptions{types.KDCForwardable, types.KDCProxiable, types.KDCRenewable} {
+		response := server.HandleMessage(rawTGSRequest(t, tgt, service, now, option))
+		part := tgsReplyPart(t, response, tgt.Key)
+		var flag types.TicketFlags
+		switch option {
+		case types.KDCForwardable:
+			flag = types.TicketForwardable
+		case types.KDCProxiable:
+			flag = types.TicketProxiable
+		case types.KDCRenewable:
+			flag = types.TicketRenewable
+		}
+		if part.Flags&flag != 0 {
+			t.Fatalf("TGS option %#x granted disallowed flag %#x", option, flag)
+		}
+	}
+}
+
+func TestASAndTGSIssueAndPropagateProxiable(t *testing.T) {
+	now := time.Unix(2000000190, 0).UTC()
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+
+	server, _ := testServer(t, now)
+	request := asRequest(user, service, 190)
+	request.ReqBody.KDCOptions = types.KDCProxiable
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.Flags&types.TicketProxiable == 0 {
+		t.Fatalf("nil-policy AS flags = %#x, missing proxiable", part.Flags)
+	}
+	tgt := issueASTicket(t, server, user, now, types.KDCProxiable, now.Add(time.Hour))
+	service = principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	tgsPart := tgsReplyPart(t, server.HandleMessage(rawTGSRequest(t, tgt, service, now, 0)), tgt.Key)
+	if tgsPart.Flags&types.TicketProxiable == 0 {
+		t.Fatalf("propagated TGS flags = %#x, missing proxiable", tgsPart.Flags)
+	}
+
+	server, _ = testServer(t, now)
+	server.Policy = &Policy{AllowProxiable: true}
+	request = asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"},
+	}, 191)
+	request.ReqBody.KDCOptions = types.KDCProxiable
+	addPreauth(t, &request, now)
+	part = asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.Flags&types.TicketProxiable == 0 {
+		t.Fatalf("allowed-policy AS flags = %#x, missing proxiable", part.Flags)
+	}
+}
+
 func TestASDirectServiceRequestEchoesSName(t *testing.T) {
 	now := time.Unix(2000000200, 0).UTC()
 	server, _ := testServer(t, now)
@@ -1262,6 +1417,11 @@ func issueASTicket(t *testing.T, server *Server, user principal.Principal, now t
 
 func rawTGSRequest(t *testing.T, tgt *client.Credentials, service principal.Principal, now time.Time, options types.KDCOptions) []byte {
 	t.Helper()
+	return rawTGSRequestWithTill(t, tgt, service, now, kerberosTime(now.Add(time.Hour)), options)
+}
+
+func rawTGSRequestWithTill(t *testing.T, tgt *client.Credentials, service principal.Principal, now time.Time, till types.KerberosTime, options types.KDCOptions) []byte {
+	t.Helper()
 	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
 	if err != nil {
 		t.Fatal(err)
@@ -1270,7 +1430,7 @@ func rawTGSRequest(t *testing.T, tgt *client.Credentials, service principal.Prin
 		KDCOptions: options,
 		Realm:      service.Realm,
 		SName:      &protocol.PrincipalName{NameType: int32(service.NameType), NameString: service.Components},
-		Till:       types.KerberosTime{Time: now.Add(time.Hour), Present: true},
+		Till:       till,
 		Nonce:      101,
 		EType:      []int32{tgt.Key.KeyType},
 	}
@@ -1312,4 +1472,72 @@ func protocolPrincipalForTest(value principal.Principal) *protocol.PrincipalName
 
 func kerberosTime(value time.Time) types.KerberosTime {
 	return types.KerberosTime{Time: value, Present: true}
+}
+
+func addPreauth(t *testing.T, request *protocol.ASReq, now time.Time) {
+	t.Helper()
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := etype.StringToKey([]byte("alice-password"), []byte("TEST.REALMalice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := mustMarshal(t, preauth.EncTimestamp{PATimestamp: kerberosTime(now)})
+	cipher, err := etype.Encrypt(key, 1, timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{{PADataType: paEncTimestamp, PADataValue: cipher}}
+}
+
+func asReplyPart(t *testing.T, response []byte) protocol.EncASRepPart {
+	t.Helper()
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatalf("AS response: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := etype.StringToKey([]byte("alice-password"), []byte("TEST.REALMalice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key, 3, reply.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("AS reply decrypt: %v", err)
+	}
+	var part protocol.EncASRepPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatalf("AS reply part: %v", err)
+	}
+	return part
+}
+
+func tgsReplyPart(t *testing.T, response []byte, key protocol.EncryptionKey) protocol.EncTGSRepPart {
+	t.Helper()
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		var kerberosError protocol.KRBError
+		if decodeErr := asn1.Unmarshal(response, &kerberosError); decodeErr == nil {
+			t.Fatalf("TGS error code %d", kerberosError.ErrorCode)
+		}
+		t.Fatalf("TGS response: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key.KeyValue, 8, reply.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("TGS reply decrypt: %v", err)
+	}
+	var part protocol.EncTGSRepPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatalf("TGS reply part: %v", err)
+	}
+	return part
 }
