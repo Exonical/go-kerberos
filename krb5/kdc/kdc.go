@@ -219,12 +219,21 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
-	etypeID, clientKey, serviceKey, ok := s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
+	timestampPA := findPA(request.PAData, paEncTimestamp)
+	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
+	var etypeID int32
+	var clientKey, serviceKey kdb.Key
+	if pkinitPA != nil {
+		etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
+	} else {
+		etypeID, clientKey, serviceKey, ok = s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
+		if !ok && s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
+			etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
+		}
+	}
 	if !ok {
 		return s.errorResponse(14, request.ReqBody.SName)
 	}
-	timestampPA := findPA(request.PAData, paEncTimestamp)
-	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
 	if pkinitPA != nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil || s.PKINITClientCAs == nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -235,7 +244,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		verified, err := pkinit.VerifyPAASReqForKDC(pkinitPA.PADataValue, bodyDER)
 		if err != nil || verified.Authenticator.Nonce != request.ReqBody.Nonce ||
-			!verified.Authenticator.CTime.IsZero() && !s.withinSkew(verified.Authenticator.CTime) {
+			verified.Authenticator.CTime.IsZero() || !s.withinSkew(verified.Authenticator.CTime) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
@@ -258,13 +267,15 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp, PADataValue: []byte{}},
-			{
+		}
+		if clientKey.Enctype != 0 {
+			methodData = append(methodData, protocol.PAData{
 				PADataType: 19,
 				PADataValue: marshalDER(protocol.ETypeInfo2{{
 					EType: etypeID,
 					Salt:  stringPointer(principalSalt(clientKey, clientName)),
 				}}),
-			},
+			})
 		}
 		if s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
 			methodData = append(methodData, protocol.PAData{PADataType: protocol.PADataPKASReq})
@@ -507,10 +518,10 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	if armor == nil {
 		return marshalDER(reply)
 	}
-	return s.wrapFASTASRep(reply, replyKey, armor)
+	return s.wrapFASTASRep(reply, replyKey, armor, replyPA)
 }
 
-func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext) []byte {
+func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext, replyPA *protocol.PAData) []byte {
 	strengthenValue := make([]byte, armor.etype.KeySize())
 	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
@@ -554,6 +565,9 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 	}
 	if armor.cookie != nil {
 		fastResponse.PAData = protocol.MethodData{*armor.cookie}
+	}
+	if replyPA != nil {
+		fastResponse.PAData = append(fastResponse.PAData, *replyPA)
 	}
 	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
 	if err != nil {
@@ -1000,6 +1014,20 @@ func (s *Server) selectASKeys(enctypes []int32, client, service kdb.PrincipalRec
 		}
 	}
 	return 0, kdb.Key{}, kdb.Key{}, false
+}
+
+func selectPKINITServiceKey(enctypes []int32, service kdb.PrincipalRecord) (int32, kdb.Key, bool) {
+	registry := crypto.NewRegistry()
+	for _, enctype := range enctypes {
+		if _, err := registry.Get(enctype); err != nil {
+			continue
+		}
+		if key, ok := service.Keys[enctype]; ok {
+			key.Enctype = enctype
+			return enctype, key, true
+		}
+	}
+	return 0, kdb.Key{}, false
 }
 
 func selectServiceKey(enctypes []int32, service kdb.PrincipalRecord) (int32, kdb.Key, bool) {
