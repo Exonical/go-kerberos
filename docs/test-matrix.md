@@ -50,10 +50,13 @@ also applies to `RENEWABLE-OK` requests whose `till` is omitted.
 
 Cross-realm clients follow ordered `[capaths]` paths (up to ten hops), with
 direct trust as the fallback. KDC tickets use RFC 4120
-DOMAIN-X500-COMPRESS transited contents and validate transited realms against
-the configured server capath or the default hierarchical path. Server-side
-capaths are supplied through `kdc.Server.Capaths`; a full MIT policy-module
-configuration interface is not implemented.
+DOMAIN-X500-COMPRESS transited contents. KDC transited-policy checks follow
+MIT's `krb5_check_transited_list`: a configured server capath replaces the
+hierarchical path, and `.` permits only a direct path. Without a configured
+capath, domain-style realms use the common-suffix hierarchy; X.500-style
+`/` realms are accepted only through an explicit capath, matching MIT's
+policy walker. Server-side capaths are supplied through `kdc.Server.Capaths`;
+a full MIT policy-module configuration interface is not implemented.
 
 FAST-armored TGS exchanges use the implicit RFC 6113 armor derived from the
 PA-TGS-REQ authenticator subkey and TGT session key. The Go client and Go KDC

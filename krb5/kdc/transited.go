@@ -121,50 +121,75 @@ func unescapeTransited(value string) string {
 }
 
 func transitedPermitted(contents []byte, clientRealm, serverRealm string, capaths map[string]map[string][]string) bool {
+	if len(contents) > 0 && contents[len(contents)-1] == 0 {
+		contents = contents[:len(contents)-1]
+	}
 	realms, err := decodeTransited(contents)
 	if err != nil {
 		return false
 	}
-	allowed := make(map[string]bool)
-	path := []string{clientRealm, serverRealm}
-	for source, targets := range capaths {
-		if !strings.EqualFold(source, clientRealm) {
-			continue
-		}
-		for target, values := range targets {
-			if !strings.EqualFold(target, serverRealm) {
-				continue
-			}
-			path = []string{clientRealm}
-			if len(values) == 1 && values[0] == "." {
-				path = append(path, serverRealm)
-			} else {
-				path = append(path, values...)
-				path = append(path, serverRealm)
-			}
-		}
+	if strings.EqualFold(clientRealm, "WELLKNOWN:ANONYMOUS") {
+		return true
 	}
-	for _, realm := range path {
-		allowed[strings.ToUpper(realm)] = true
-	}
-	for _, realm := range append([]string{clientRealm, serverRealm}, hierarchyRealms(clientRealm, serverRealm)...) {
-		allowed[strings.ToUpper(realm)] = true
+	allowed := map[string]bool{clientRealm: true, serverRealm: true}
+	values, configured := transitedCapath(clientRealm, serverRealm, capaths)
+	if configured {
+		if len(values) == 0 {
+			return false
+		}
+		if len(values) == 1 && strings.TrimSpace(values[0]) == "." {
+			return len(realms) == 0
+		}
+		for _, realm := range values {
+			realm = strings.TrimSpace(realm)
+			if realm == "" || realm == "." {
+				return false
+			}
+			allowed[realm] = true
+		}
+	} else {
+		for _, realm := range hierarchyRealms(clientRealm, serverRealm) {
+			allowed[realm] = true
+		}
 	}
 	for _, realm := range realms {
-		if !allowed[strings.ToUpper(realm)] {
+		if !allowed[realm] {
 			return false
 		}
 	}
 	return true
 }
 
+func transitedCapath(clientRealm, serverRealm string, capaths map[string]map[string][]string) ([]string, bool) {
+	targets, ok := capaths[clientRealm]
+	if !ok {
+		return nil, false
+	}
+	values, ok := targets[serverRealm]
+	return values, ok
+}
+
 func hierarchyRealms(clientRealm, serverRealm string) []string {
-	var result []string
-	for _, realm := range []string{clientRealm, serverRealm} {
-		parts := strings.Split(realm, ".")
-		for i := 1; i < len(parts); i++ {
-			result = append(result, strings.Join(parts[i:], "."))
-		}
+	if clientRealm == "" || serverRealm == "" ||
+		strings.HasPrefix(clientRealm, "/") || strings.HasPrefix(serverRealm, "/") {
+		return nil
+	}
+	clientParts := strings.Split(clientRealm, ".")
+	serverParts := strings.Split(serverRealm, ".")
+	common := 0
+	for common < len(clientParts) && common < len(serverParts) &&
+		clientParts[len(clientParts)-common-1] == serverParts[len(serverParts)-common-1] {
+		common++
+	}
+	if common == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(clientParts)+len(serverParts))
+	for i := 1; i <= len(clientParts)-common; i++ {
+		result = append(result, strings.Join(clientParts[i:], "."))
+	}
+	for i := 1; i < len(serverParts)-common; i++ {
+		result = append(result, strings.Join(serverParts[i:], "."))
 	}
 	return result
 }
