@@ -190,7 +190,7 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 			NameType: int32(service.NameType), NameString: append([]string(nil), service.Components...),
 		},
 		Till:  types.KerberosTime{Time: now.Add(c.ticketLifetime()), Present: true},
-		Nonce: binary.BigEndian.Uint32(nonceBytes),
+		Nonce: randomNonce(nonceBytes),
 		EType: c.requestEnctypes(),
 	}
 	bodyDER, err := asn1.Marshal(body)
@@ -382,6 +382,10 @@ func serviceWithRealm(value principal.Principal, realm string) principal.Princip
 	return value
 }
 
+func randomNonce(value []byte) uint32 {
+	return binary.BigEndian.Uint32(value) & 0x7fffffff
+}
+
 func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (protocol.ASReq, error) {
 	nonceBytes := make([]byte, 4)
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
@@ -414,7 +418,7 @@ func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (p
 				NameString: []string{"krbtgt", clientPrincipal.Realm},
 			},
 			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
-			Nonce: binary.BigEndian.Uint32(nonceBytes),
+			Nonce: randomNonce(nonceBytes),
 			EType: enctypes,
 		},
 	}, nil
