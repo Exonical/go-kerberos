@@ -1,6 +1,7 @@
 package asn1
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestPrimitiveGoldenDER(t *testing.T) {
@@ -53,6 +55,43 @@ func TestPrimitiveRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded, value) {
 		t.Fatalf("round trip = %#v, want %#v", decoded, value)
+	}
+}
+
+func TestFieldTGSReqBody(t *testing.T) {
+	body := protocol.KDCReqBody{
+		KDCOptions: types.KDCOptions(0),
+		CName:      &protocol.PrincipalName{NameType: 1, NameString: []string{"alice"}},
+		Realm:      "EXAMPLE.COM",
+		SName:      &protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", "EXAMPLE.COM"}},
+		Nonce:      1,
+		EType:      []int32{18},
+	}
+	bodyDER, err := Marshal(body)
+	if err != nil {
+		t.Fatalf("Marshal body: %v", err)
+	}
+	requestDER, err := Marshal(protocol.TGSReq{
+		PVNO:    5,
+		MsgType: 12,
+		ReqBody: body,
+	})
+	if err != nil {
+		t.Fatalf("Marshal TGS-REQ: %v", err)
+	}
+	raw, err := Field(requestDER, 12, 4)
+	if err != nil {
+		t.Fatalf("Field: %v", err)
+	}
+	content, err := FieldContent(requestDER, 12, 4)
+	if err != nil {
+		t.Fatalf("FieldContent: %v", err)
+	}
+	if !bytes.Equal(content, bodyDER) {
+		t.Fatalf("body content = %x, want %x", content, bodyDER)
+	}
+	if !bytes.HasSuffix(raw, bodyDER) {
+		t.Fatalf("raw body field = %x, want field containing %x", raw, bodyDER)
 	}
 }
 
