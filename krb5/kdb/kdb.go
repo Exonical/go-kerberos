@@ -21,12 +21,14 @@ type Key struct {
 
 // PrincipalRecord contains a principal and its KDC policy.
 type PrincipalRecord struct {
-	Name     principal.Principal
-	Keys     map[int32]Key
-	KVNO     uint32
-	Flags    uint32
-	MaxLife  time.Duration
-	MaxRenew time.Duration
+	Name               principal.Principal
+	Keys               map[int32]Key
+	KVNO               uint32
+	Flags              uint32
+	MaxLife            time.Duration
+	MaxRenew           time.Duration
+	Expiration         time.Time
+	PasswordExpiration time.Time
 }
 
 // Store resolves principal records for the KDC. Lookup returns false with a
