@@ -15,6 +15,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -319,6 +320,88 @@ func TestGoClientAPExchange(t *testing.T) {
 	}
 	if verified.Client.String() != clientPrincipal.String() {
 		t.Fatalf("verified client = %#v, want %#v", verified.Client, clientPrincipal)
+	}
+}
+
+func TestGoGSSAPIExchange(t *testing.T) {
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	now := time.Now().UTC()
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	kclient := &client.Client{Config: cfg, Now: func() time.Time { return now }}
+	tgt, err := kclient.ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go AS exchange: %v", err)
+	}
+	servicePrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	}
+	serviceTicket, err := kclient.TGSExchange(context.Background(), tgt, servicePrincipal)
+	if err != nil {
+		t.Fatalf("Go TGS exchange: %v", err)
+	}
+	keytabFile, err := os.Open(realm.Keytab)
+	if err != nil {
+		t.Fatalf("open MIT keytab: %v", err)
+	}
+	defer keytabFile.Close()
+	kt, err := keytab.Read(keytabFile)
+	if err != nil {
+		t.Fatalf("read MIT keytab: %v", err)
+	}
+	initiator, err := gssapi.NewInitiator(serviceTicket, gssapi.GSSMutualFlag|gssapi.GSSIntegrityFlag|gssapi.GSSConfidentialityFlag)
+	if err != nil {
+		t.Fatalf("new GSS initiator: %v", err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("GSS initial token: %v", err)
+	}
+	acceptorContext, mutual, err := gssapi.NewAcceptor(kt).Accept(token, now)
+	if err != nil {
+		t.Fatalf("GSS accept: %v", err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatalf("GSS mutual auth: %v", err)
+	}
+	message := []byte("GSS interoperability")
+	wrapped, err := initiator.Wrap(message, true)
+	if err != nil {
+		t.Fatalf("GSS initiator wrap: %v", err)
+	}
+	if got, err := acceptorContext.Unwrap(wrapped); err != nil || !strings.EqualFold(string(got), string(message)) {
+		t.Fatalf("GSS acceptor unwrap: got %q, err %v", got, err)
+	}
+	reply, err := acceptorContext.Wrap(message, false)
+	if err != nil {
+		t.Fatalf("GSS acceptor wrap: %v", err)
+	}
+	if got, err := initiator.Unwrap(reply); err != nil || !strings.EqualFold(string(got), string(message)) {
+		t.Fatalf("GSS initiator unwrap: got %q, err %v", got, err)
+	}
+	mic, err := initiator.MIC(message)
+	if err != nil {
+		t.Fatalf("GSS initiator MIC: %v", err)
+	}
+	if err := acceptorContext.VerifyMIC(message, mic); err != nil {
+		t.Fatalf("GSS acceptor MIC: %v", err)
+	}
+	mic, err = acceptorContext.MIC(message)
+	if err != nil {
+		t.Fatalf("GSS acceptor MIC: %v", err)
+	}
+	if err := initiator.VerifyMIC(message, mic); err != nil {
+		t.Fatalf("GSS initiator MIC: %v", err)
 	}
 }
 
