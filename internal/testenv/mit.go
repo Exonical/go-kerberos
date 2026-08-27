@@ -47,6 +47,16 @@ type Realm struct {
 
 // Start creates and starts an MIT realm entirely below t.TempDir.
 func Start(t *testing.T) *Realm {
+	return start(t, "")
+}
+
+// StartWithMasterEType creates and starts an MIT realm with the requested
+// database master-key enctype.
+func StartWithMasterEType(t *testing.T, enctype string) *Realm {
+	return start(t, enctype)
+}
+
+func start(t *testing.T, masterEType string) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -95,7 +105,12 @@ func Start(t *testing.T) *Realm {
  }
 `, port, port, RealmName, dir, dir, dir, dir, dir, dir, RealmName))
 	writeFile(t, filepath.Join(dir, "kadm5.acl"), "*/admin@"+RealmName+" *\n")
-	run(t, r.env(), "", "/usr/sbin/kdb5_util", "create", "-s", "-P", MasterKey)
+	createArgs := []string{"create", "-s"}
+	if masterEType != "" {
+		createArgs = append(createArgs, "-k", masterEType)
+	}
+	createArgs = append(createArgs, "-P", MasterKey)
+	run(t, r.env(), "", "/usr/sbin/kdb5_util", createArgs...)
 	for _, command := range []string{
 		"addprinc -pw alice-password alice",
 		"addprinc -pw bob-password bob",

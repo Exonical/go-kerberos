@@ -3,6 +3,7 @@
 package mit_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/internal/testenv"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/kdc"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 func TestMITDumpToGoKDCPersistence(t *testing.T) {
@@ -99,5 +102,54 @@ func TestMITDumpToGoKDCPersistence(t *testing.T) {
 	listing := run("", "/usr/bin/klist", "-e")
 	if !strings.Contains(listing, "host/service.test@"+testenv.RealmName) {
 		t.Fatalf("klist does not show persisted service ticket:\n%s", listing)
+	}
+}
+
+func TestMITDumpMasterKeyEnctypes(t *testing.T) {
+	for _, enctype := range []string{
+		"aes128-cts-hmac-sha1-96",
+		"aes256-cts-hmac-sha1-96",
+		"aes128-cts-hmac-sha256-128",
+		"aes256-cts-hmac-sha384-192",
+	} {
+		t.Run(enctype, func(t *testing.T) {
+			mitRealm := testenv.StartWithMasterEType(t, enctype)
+			dumpPath := filepath.Join(mitRealm.Dir, "principal.dump")
+			mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "dump", "-r18", dumpPath)
+			store, err := mitdump.LoadWithMasterPassword(dumpPath, testenv.MasterKey)
+			if err != nil {
+				t.Fatalf("load %s MIT dump: %v", enctype, err)
+			}
+			record, ok, err := store.Lookup(principal.Principal{
+				Realm: testenv.RealmName, Components: []string{"alice"},
+			})
+			if err != nil {
+				t.Fatalf("lookup alice: %v", err)
+			}
+			if !ok {
+				t.Fatal("alice missing")
+			}
+			for _, keyType := range []int32{
+				crypto.EnctypeAES128SHA1,
+				crypto.EnctypeAES256SHA1,
+			} {
+				key, ok := record.Keys[keyType]
+				if !ok || (len(key.Key) != 16 && len(key.Key) != 32) {
+					t.Fatalf("alice key %d = %#v", keyType, key)
+				}
+				etype, err := crypto.NewRegistry().Get(keyType)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected, err := etype.StringToKey([]byte("alice-password"),
+					[]byte(testenv.RealmName+"alice"), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(key.Key, expected) {
+					t.Fatalf("alice key %d does not match MIT string-to-key", keyType)
+				}
+			}
+		})
 	}
 }
