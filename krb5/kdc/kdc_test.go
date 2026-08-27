@@ -20,7 +20,7 @@ import (
 
 func TestServerASAndTGSExchange(t *testing.T) {
 	now := time.Unix(2000000000, 0).UTC()
-	server, kclient := testServer(t, now)
+	_, kclient := testServer(t, now)
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
 	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
 	if err != nil {
@@ -58,7 +58,16 @@ func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 	if err := asn1.Unmarshal(kerberosError.EData, &methodData); err != nil {
 		t.Fatalf("ETYPE-INFO2: %v", err)
 	}
-	if len(methodData) != 1 || methodData[0].PADataType != 19 {
+	var hasETypeInfo2, hasEncTimestampHint bool
+	for _, pa := range methodData {
+		switch pa.PADataType {
+		case 19:
+			hasETypeInfo2 = true
+		case 2:
+			hasEncTimestampHint = true
+		}
+	}
+	if !hasETypeInfo2 || !hasEncTimestampHint {
 		t.Fatalf("preauth method data = %#v", methodData)
 	}
 
@@ -227,4 +236,148 @@ func mustMarshal(t *testing.T, value any) []byte {
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+func hasKRBCode(err error, code int32) bool {
+	var kerberosError *krberrors.KRBError
+	if !errors.As(err, &kerberosError) {
+		return false
+	}
+	return int32(kerberosError.Code) == code
+}
+
+func TestASUnknownServiceReturnsCode7(t *testing.T) {
+	now := time.Unix(2000000400, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	unknown := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "missing.test"}}
+	response := server.HandleMessage(mustMarshal(t, asRequest(user, unknown, 3)))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("unknown service response: %v", err)
+	}
+	if kerberosError.ErrorCode != 7 {
+		t.Fatalf("unknown service code = %d, want 7", kerberosError.ErrorCode)
+	}
+}
+
+func TestASNoSharedEnctypeReturnsCode14(t *testing.T) {
+	now := time.Unix(2000000450, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgtService := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, tgtService, 4)
+	request.ReqBody.EType = []int32{1, 3, 23}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("no shared enctype response: %v", err)
+	}
+	if kerberosError.ErrorCode != 14 {
+		t.Fatalf("no shared enctype code = %d, want 14", kerberosError.ErrorCode)
+	}
+}
+
+func TestASRejectsSkewedTimestamp(t *testing.T) {
+	now := time.Unix(2000000500, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgtService := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := etype.StringToKey([]byte("alice-password"), []byte("TEST.REALMalice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := asRequest(user, tgtService, 5)
+	skewed := types.KerberosTime{Time: now.Add(-time.Hour), Present: true}
+	timestampDER := mustMarshal(t, preauth.EncTimestamp{PATimestamp: skewed})
+	timestampCipher, err := etype.Encrypt(key, 1, timestampDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{{PADataType: 2, PADataValue: timestampCipher}}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("skewed timestamp response: %v", err)
+	}
+	if kerberosError.ErrorCode != 37 {
+		t.Fatalf("skewed timestamp code = %d, want 37", kerberosError.ErrorCode)
+	}
+}
+
+func TestTGSUsesAuthenticatorSubkeyAtUsage9(t *testing.T) {
+	now := time.Unix(2000000600, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := protocol.KDCReqBody{
+		KDCOptions: types.KDCRenewableOK,
+		Realm:      "TEST.REALM",
+		SName:      &protocol.PrincipalName{NameType: int32(principal.NTSrvHst), NameString: []string{"host", "service.test"}},
+		Till:       types.KerberosTime{Time: now.Add(8 * time.Hour), Present: true},
+		Nonce:      42,
+		EType:      []int32{tgt.Key.KeyType},
+	}
+	bodyDER := mustMarshal(t, body)
+	checksum, err := etype.Checksum(tgt.Key.KeyValue, 6, bodyDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subkeyValue := bytes.Repeat([]byte{0x42}, etype.KeySize())
+	subkey := protocol.EncryptionKey{KeyType: tgt.Key.KeyType, KeyValue: subkeyValue}
+	authenticator := protocol.Authenticator{
+		AuthenticatorVNO: 5,
+		CRealm:           "TEST.REALM",
+		CName:            protocol.PrincipalName{NameType: int32(user.NameType), NameString: user.Components},
+		Checksum:         &protocol.Checksum{ChecksumType: mandatoryChecksumType(tgt.Key.KeyType), Checksum: checksum},
+		Ctime:            types.KerberosTime{Time: now, Present: true},
+		SubKey:           &subkey,
+	}
+	authCipher, err := etype.Encrypt(tgt.Key.KeyValue, 7, mustMarshal(t, authenticator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	apReq := protocol.APReq{
+		PVNO: 5, MsgType: 14, Ticket: ticket,
+		Authenticator: protocol.EncryptedData{EType: tgt.Key.KeyType, Cipher: authCipher},
+	}
+	request := protocol.TGSReq{
+		PVNO: 5, MsgType: 12,
+		PAData:  protocol.MethodData{{PADataType: 1, PADataValue: mustMarshal(t, apReq)}},
+		ReqBody: body,
+	}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatalf("TGS-REP: %v", err)
+	}
+	if _, err := etype.Decrypt(tgt.Key.KeyValue, 8, reply.EncPart.Cipher); err == nil {
+		t.Fatal("reply decrypted with session key at usage 8, want subkey usage 9")
+	}
+	plain, err := etype.Decrypt(subkeyValue, 9, reply.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt with subkey usage 9: %v", err)
+	}
+	var part protocol.EncTGSRepPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatalf("EncTGSRepPart: %v", err)
+	}
+	if part.Nonce != 42 {
+		t.Fatalf("nonce = %d, want 42", part.Nonce)
+	}
 }
