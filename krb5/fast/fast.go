@@ -194,6 +194,11 @@ func principalProtocol(value principal.Principal) *protocol.PrincipalName {
 }
 
 func checksumType(id int32) int32 {
+	return ChecksumType(id)
+}
+
+// ChecksumType returns the mandatory keyed checksum type for an enctype.
+func ChecksumType(id int32) int32 {
 	switch id {
 	case crypto.EnctypeAES128SHA1:
 		return crypto.ChecksumHMACSHA196AES128

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -67,7 +68,7 @@ func (s *Server) HandleMessage(data []byte) []byte {
 		if err := asn1.Unmarshal(data, &request); err != nil {
 			return s.errorResponse(kdcErrGeneric, nil)
 		}
-		return s.handleASReq(request)
+		return s.handleASReq(request, data)
 	case 0x6c:
 		var request protocol.TGSReq
 		if err := asn1.Unmarshal(data, &request); err != nil {
@@ -148,11 +149,29 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 	_ = transport.WriteTCPFrame(conn, s.HandleMessage(request))
 }
 
-func (s *Server) handleASReq(request protocol.ASReq) []byte {
+type fastContext struct {
+	etype  crypto.EType
+	key    []byte
+	nonce  uint32
+	cookie *protocol.PAData
+}
+
+func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if request.PVNO != 5 || request.MsgType != 10 ||
 		request.ReqBody.CName == nil || request.ReqBody.SName == nil ||
 		request.ReqBody.Realm == "" || request.ReqBody.SName.NameString == nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
+	var armor *fastContext
+	if findPA(request.PAData, fast.PAFXFast) != nil {
+		var errCode int32
+		request, armor, errCode = s.unwrapFASTASReq(request, raw)
+		if errCode != 0 {
+			if armor != nil {
+				return s.fastErrorResponse(errCode, request.ReqBody.SName, nil, armor.nonce, armor)
+			}
+			return s.errorResponse(errCode, request.ReqBody.SName)
+		}
 	}
 	clientName := principalFromProtocol(*request.ReqBody.CName, request.ReqBody.Realm)
 	clientRecord, ok, err := s.DB.Lookup(clientName)
@@ -186,6 +205,12 @@ func (s *Server) handleASReq(request protocol.ASReq) []byte {
 				}}),
 			},
 		}
+		if armor != nil {
+			if cookie := findPA(request.PAData, fast.PAFXCookie); cookie != nil {
+				methodData = append(methodData, *cookie)
+			}
+			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
+		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
 	etype, err := crypto.NewRegistry().Get(etypeID)
@@ -200,17 +225,132 @@ func (s *Server) handleASReq(request protocol.ASReq) []byte {
 	}
 	timestampPlain, err := etype.Decrypt(clientKey.Key, 1, timestampCipher)
 	if err != nil {
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+		}
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
 	var timestamp preauth.EncTimestamp
 	if err := asn1.Unmarshal(timestampPlain, &timestamp); err != nil ||
 		!timestamp.PATimestamp.Present || !s.withinSkew(timestamp.PATimestamp.Time) {
+		if armor != nil {
+			return s.fastErrorResponse(krbAPErrSkew, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+		}
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
-	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord, etypeID, clientKey, serviceKey)
+	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord, etypeID, clientKey, serviceKey, armor)
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key) []byte {
+func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.ASReq, *fastContext, int32) {
+	pa := findPA(request.PAData, fast.PAFXFast)
+	if pa == nil {
+		return request, nil, 0
+	}
+	var wrapper protocol.PAFXFastRequest
+	if err := asn1.Unmarshal(pa.PADataValue, &wrapper); err != nil ||
+		wrapper.ArmoredData.Armor == nil ||
+		wrapper.ArmoredData.Armor.ArmorType != fast.ArmorTypeAPReq {
+		return request, nil, kdcErrPreauthFailed
+	}
+	var apRequest protocol.APReq
+	if err := asn1.Unmarshal(wrapper.ArmoredData.Armor.ArmorValue, &apRequest); err != nil ||
+		apRequest.PVNO != 5 || apRequest.MsgType != 14 ||
+		apRequest.Ticket.Realm != s.Realm ||
+		len(apRequest.Ticket.SName.NameString) != 2 ||
+		apRequest.Ticket.SName.NameString[0] != "krbtgt" ||
+		apRequest.Ticket.SName.NameString[1] != s.Realm {
+		return request, nil, kdcErrPreauthFailed
+	}
+	tgtName := principal.Principal{
+		Realm: apRequest.Ticket.Realm, NameType: principal.NTSrvInstance,
+		Components: apRequest.Ticket.SName.NameString,
+	}
+	tgtRecord, ok, err := s.DB.Lookup(tgtName)
+	if err != nil || !ok {
+		return request, nil, kdcErrPreauthFailed
+	}
+	ticketKey, ok := selectKVNO(tgtRecord, apRequest.Ticket.EncPart.EType, apRequest.Ticket.EncPart.KVNO)
+	if !ok {
+		return request, nil, kdcErrPreauthFailed
+	}
+	ticketEType, err := crypto.NewRegistry().Get(ticketKey.Enctype)
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	ticketPlain, err := ticketEType.Decrypt(ticketKey.Key, 2, apRequest.Ticket.EncPart.Cipher)
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	var ticketPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	if code, valid := s.ticketValidity(ticketPart); !valid {
+		return request, nil, code
+	}
+	if apRequest.Authenticator.EType != ticketPart.Key.KeyType {
+		return request, nil, kdcErrPreauthFailed
+	}
+	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	authPlain, err := sessionEType.Decrypt(ticketPart.Key.KeyValue, 11, apRequest.Authenticator.Cipher)
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	var authenticator protocol.Authenticator
+	if err := asn1.Unmarshal(authPlain, &authenticator); err != nil ||
+		authenticator.AuthenticatorVNO != 5 ||
+		authenticator.CRealm != ticketPart.CRealm ||
+		!sameProtocolPrincipal(authenticator.CName, ticketPart.CName) ||
+		!authenticator.Ctime.Present ||
+		!s.withinSkew(authenticator.Ctime.Time) ||
+		authenticator.SubKey == nil ||
+		authenticator.SubKey.KeyType != ticketPart.Key.KeyType {
+		return request, nil, kdcErrPreauthFailed
+	}
+	if len(authenticator.SubKey.KeyValue) != sessionEType.KeySize() {
+		return request, nil, kdcErrPreauthFailed
+	}
+	armorKey, err := crypto.CF2(sessionEType, authenticator.SubKey.KeyValue, ticketPart.Key.KeyValue,
+		[]byte("subkeyarmor"), []byte("ticketarmor"))
+	if err != nil {
+		return request, nil, kdcErrPreauthFailed
+	}
+	armor := &fastContext{etype: sessionEType, key: armorKey}
+	body, err := asn1.FieldContent(raw, protocol.TagASReq, 4)
+	if err != nil {
+		return request, armor, kdcErrPreauthFailed
+	}
+	if wrapper.ArmoredData.EncFastReq.EType != sessionEType.ID() ||
+		wrapper.ArmoredData.ReqChecksum.ChecksumType != fast.ChecksumType(sessionEType.ID()) ||
+		wrapper.ArmoredData.ReqChecksum.Checksum == nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	plaintext, err := sessionEType.Decrypt(armorKey, fast.UsageReq, wrapper.ArmoredData.EncFastReq.Cipher)
+	if err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	var fastRequest protocol.KrbFastReq
+	if err := asn1.Unmarshal(plaintext, &fastRequest); err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	if err := sessionEType.VerifyChecksum(armorKey, fast.UsageReqChecksum, body, wrapper.ArmoredData.ReqChecksum.Checksum); err != nil {
+		return request, armor, krbAPErrBadIntegrity
+	}
+	if cookie := findPA(fastRequest.PAData, fast.PAFXCookie); cookie != nil {
+		copy := *cookie
+		copy.PADataValue = append([]byte(nil), cookie.PADataValue...)
+		armor.cookie = &copy
+	}
+	request.ReqBody = fastRequest.ReqBody
+	request.PAData = fastRequest.PAData
+	armor.nonce = fastRequest.ReqBody.Nonce
+	return request, armor, 0
+}
+
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -281,7 +421,93 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		Ticket:  ticket,
 		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
 	}
+	if armor == nil {
+		return marshalDER(reply)
+	}
+	return s.wrapFASTASRep(reply, clientKey, armor)
+}
+
+func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext) []byte {
+	strengthenValue := make([]byte, armor.etype.KeySize())
+	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyKey, err := crypto.CF2(armor.etype, strengthenValue, clientKey.Key,
+		[]byte("strengthenkey"), []byte("replykey"))
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyPlain, err := replyEType.Decrypt(clientKey.Key, 3, reply.EncPart.Cipher)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	replyCipher, err := replyEType.Encrypt(replyKey, 3, replyPlain)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	reply.EncPart = protocol.EncryptedData{EType: reply.EncPart.EType, Cipher: replyCipher}
+	ticketDER := marshalDER(reply.Ticket)
+	ticketChecksum, err := armor.etype.Checksum(armor.key, fast.UsageFinished, ticketDER)
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	now := s.now().UTC()
+	fastResponse := protocol.KrbFastResponse{
+		StrengthenKey: &protocol.EncryptionKey{KeyType: armor.etype.ID(), KeyValue: strengthenValue},
+		Finished: &protocol.KrbFastFinished{
+			Timestamp: types.KerberosTime{Time: now, Present: true},
+			Usec:      int32(now.Nanosecond() / 1000),
+			CRealm:    reply.CRealm, CName: reply.CName,
+			TicketChecksum: protocol.Checksum{
+				ChecksumType: fast.ChecksumType(armor.etype.ID()),
+				Checksum:     ticketChecksum,
+			},
+		},
+		Nonce: armor.nonce,
+	}
+	if armor.cookie != nil {
+		fastResponse.PAData = protocol.MethodData{*armor.cookie}
+	}
+	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
+	if err != nil {
+		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
+	}
+	reply.PAData = protocol.MethodData{{
+		PADataType: fast.PAFXFast,
+		PADataValue: marshalDER(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+			EncFastRep: protocol.EncryptedData{EType: armor.etype.ID(), Cipher: responseCipher},
+		}}),
+	}}
 	return marshalDER(reply)
+}
+
+func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, data []byte, nonce uint32, armor *fastContext) []byte {
+	var inner protocol.MethodData
+	if armor.cookie != nil {
+		inner = append(inner, *armor.cookie)
+	}
+	if len(data) > 0 {
+		var errorData protocol.MethodData
+		if asn1.Unmarshal(data, &errorData) == nil {
+			inner = append(inner, errorData...)
+		}
+	}
+	fastResponse := protocol.KrbFastResponse{PAData: inner, Nonce: nonce}
+	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
+	if err != nil {
+		return s.errorResponse(code, service)
+	}
+	outer := protocol.MethodData{{
+		PADataType: fast.PAFXFast,
+		PADataValue: marshalDER(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+			EncFastRep: protocol.EncryptedData{EType: armor.etype.ID(), Cipher: responseCipher},
+		}}),
+	}}
+	return s.errorResponseWithData(code, service, marshalDER(outer))
 }
 
 func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
