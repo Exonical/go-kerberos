@@ -676,7 +676,7 @@ func (s *Server) dispatch(clientName principal.Principal, proc uint32, body []by
 		if len(s.MasterKey) != 0 {
 			converted, err = EntryFromRecordWithMasterKey(entry.Record, s.MasterEnctype, s.MasterKey)
 		} else {
-			converted = EntryFromRecord(entry.Record)
+			converted, err = EntryFromRecord(entry.Record)
 		}
 		if err != nil {
 			return IncrementalResult{LastEntry: current, Ret: UpdateError}.MarshalXDR()

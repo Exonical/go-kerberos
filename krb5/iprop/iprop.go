@@ -188,7 +188,7 @@ func UnmarshalFullResyncResult(data []byte) (FullResyncResult, error) {
 	return v, err
 }
 
-func EntryFromRecord(record kdb.PrincipalRecord) Entry {
+func EntryFromRecord(record kdb.PrincipalRecord) (Entry, error) {
 	return entryFromRecord(record, nil, nil)
 }
 
@@ -203,11 +203,15 @@ func EntryFromRecordWithMasterKey(record kdb.PrincipalRecord, masterEnctype int3
 	if len(masterKey) != etype.KeySize() {
 		return nil, fmt.Errorf("iprop master key has invalid length")
 	}
-	return entryFromRecord(record, etype, masterKey), nil
+	return entryFromRecord(record, etype, masterKey)
 }
 
 func entryFromRecord(record kdb.PrincipalRecord, masterEType crypto.EType,
-	masterKey []byte) Entry {
+	masterKey []byte) (Entry, error) {
+	keys, err := keyValues(record.Name, record.Keys, masterEType, masterKey)
+	if err != nil {
+		return nil, err
+	}
 	entry := Entry{
 		{Type: ATAttrFlags, Uint32: record.Flags},
 		{Type: ATMaxLife, Uint32: seconds(record.MaxLife)},
@@ -218,7 +222,7 @@ func entryFromRecord(record kdb.PrincipalRecord, masterEType crypto.EType,
 		{Type: ATLastFailed, Uint32: unix(record.LastFailed)},
 		{Type: ATFailAuthCount, Uint32: record.FailAuthCount},
 		{Type: ATPrinc, Principal: principalValue(record.Name)},
-		{Type: ATKeyData, Keys: keyValues(record.Name, record.Keys, masterEType, masterKey)},
+		{Type: ATKeyData, Keys: keys},
 		{Type: ATTlData, TLData: tlValues(record.TLData)},
 		{Type: ATLen, Int16: 38},
 		{Type: ATPWLastChange, Uint32: unix(record.LastPasswordChange)},
@@ -226,7 +230,7 @@ func entryFromRecord(record kdb.PrincipalRecord, masterEType crypto.EType,
 	if record.Policy != "" {
 		entry = append(entry, Value{Type: ATPWPolicy, String: []byte(record.Policy)})
 	}
-	return entry
+	return entry, nil
 }
 
 func RecordFromEntry(name principal.Principal, entry Entry) (kdb.PrincipalRecord, error) {
@@ -326,14 +330,14 @@ func principalFromValue(value Principal) (principal.Principal, error) {
 }
 
 func keyValues(name principal.Principal, values map[int32]kdb.Key,
-	masterEType crypto.EType, masterKey []byte) []Key {
+	masterEType crypto.EType, masterKey []byte) ([]Key, error) {
 	keys := make([]Key, 0, len(values))
 	for _, value := range values {
 		content := append([]byte(nil), value.Key...)
 		if masterEType != nil {
 			ciphertext, err := masterEType.Encrypt(masterKey, 0, value.Key)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("iprop encrypt key enctype %d: %w", value.Enctype, err)
 			}
 			content = make([]byte, 2+len(ciphertext))
 			binary.LittleEndian.PutUint16(content, uint16(len(value.Key)))
@@ -351,7 +355,7 @@ func keyValues(name principal.Principal, values map[int32]kdb.Key,
 		}
 		keys = append(keys, key)
 	}
-	return keys
+	return keys, nil
 }
 
 func saltData(name principal.Principal, salt string) (int32, []byte) {

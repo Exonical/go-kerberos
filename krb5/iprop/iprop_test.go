@@ -2,12 +2,36 @@ package iprop
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
+
+type failingEType struct{}
+
+func (failingEType) ID() int32                                  { return 18 }
+func (failingEType) KeySize() int                               { return 32 }
+func (failingEType) StringToKey(_, _, _ []byte) ([]byte, error) { return nil, nil }
+func (failingEType) Encrypt([]byte, uint32, []byte) ([]byte, error) {
+	return nil, fmt.Errorf("encryption failed")
+}
+func (failingEType) Decrypt([]byte, uint32, []byte) ([]byte, error)      { return nil, nil }
+func (failingEType) Checksum([]byte, uint32, []byte) ([]byte, error)     { return nil, nil }
+func (failingEType) ChecksumSize() int                                   { return 0 }
+func (failingEType) VerifyChecksum([]byte, uint32, []byte, []byte) error { return nil }
+
+func TestKeyValuesPropagatesEncryptionFailure(t *testing.T) {
+	name := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"alice"}}
+	_, err := keyValues(name, map[int32]kdb.Key{
+		18: {Enctype: 18, Key: []byte{1, 2, 3}},
+	}, failingEType{}, []byte("master"))
+	if err == nil {
+		t.Fatal("key encryption failure was discarded")
+	}
+}
 
 func TestLastGoldenEncoding(t *testing.T) {
 	got := Last{LastSno: 0x01020304, LastTime: Time{Seconds: 5, Useconds: 6}}.MarshalXDR()
@@ -110,7 +134,11 @@ func TestPrincipalRecordAttributeRoundTrip(t *testing.T) {
 		Policy:             "default",
 		TLData:             []kdb.TLData{{Type: 42, Data: []byte{9, 8, 7}}},
 	}
-	converted, err := RecordFromEntry(*name, EntryFromRecord(record))
+	encoded, err := EntryFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := RecordFromEntry(*name, encoded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,9 +176,13 @@ func TestReplicaAppliesCommittedAndDeletedUpdates(t *testing.T) {
 		Keys:  map[int32]kdb.Key{18: {Enctype: 18, KVNO: 2, Key: []byte{1, 2}}},
 		Flags: 7,
 	}
+	encoded, err := EntryFromRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := replica.apply([]Update{{
 		PrincipalName: master.String(),
-		Entry:         EntryFromRecord(record),
+		Entry:         encoded,
 		Commit:        true,
 	}}); err != nil {
 		t.Fatal(err)
@@ -164,7 +196,7 @@ func TestReplicaAppliesCommittedAndDeletedUpdates(t *testing.T) {
 	}
 	if err := replica.apply([]Update{{
 		PrincipalName: master.String(),
-		Entry:         EntryFromRecord(record),
+		Entry:         encoded,
 		Commit:        false,
 	}}); err != nil {
 		t.Fatal(err)
