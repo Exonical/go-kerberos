@@ -316,6 +316,90 @@ func TestServerFASTTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerFASTS4U2SelfReplyCarriesReplyChecksum(t *testing.T) {
+	now := time.Unix(2000000058, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatalf("service AS exchange: %v", err)
+	}
+	var response []byte
+	s4uClient := &client.Client{
+		Now: func() time.Time { return now },
+		Exchange: func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+			response = server.HandleMessage(payload)
+			return response, nil
+		},
+	}
+	if _, err := s4uClient.S4U2Self(context.Background(), tgt, user); err != nil {
+		t.Fatalf("S4U2Self: %v", err)
+	}
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatalf("TGS-REP: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(tgt.Key.KeyValue, 8, reply.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt TGS-REP: %v", err)
+	}
+	var replyPart protocol.EncTGSRepPart
+	if err := asn1.Unmarshal(plain, &replyPart); err != nil {
+		t.Fatalf("EncTGSRepPart: %v", err)
+	}
+	subkey := protocol.EncryptionKey{
+		KeyType: tgt.Key.KeyType, KeyValue: bytes.Repeat([]byte{0x5a}, etype.KeySize()),
+	}
+	armor, err := fast.NewTGSArmor(fast.TGT{Key: tgt.Key}, subkey)
+	if err != nil {
+		t.Fatalf("TGS armor: %v", err)
+	}
+	armorContext := &fastContext{
+		etype: armor.EType,
+		key:   armor.Key,
+		nonce: replyPart.Nonce,
+	}
+	wrappedDER := server.wrapFASTTGSRep(reply, tgt.Key, 8, armorContext)
+	var wrapped protocol.TGSRep
+	if err := asn1.Unmarshal(wrappedDER, &wrapped); err != nil {
+		t.Fatalf("FAST TGS-REP: %v", err)
+	}
+	fastReply, err := armor.UnwrapReply(wrapped.PAData, mustMarshal(t, wrapped.Ticket), replyPart.Nonce)
+	if err != nil {
+		t.Fatalf("unwrap FAST TGS-REP: %v", err)
+	}
+	var replyPA *protocol.PAData
+	for i := range fastReply.PAData {
+		if fastReply.PAData[i].PADataType == protocol.PADataS4UX509User {
+			replyPA = &fastReply.PAData[i]
+			break
+		}
+	}
+	if replyPA == nil {
+		t.Fatal("FAST response dropped PA-S4U-X509-USER")
+	}
+	var value protocol.PAS4UX509User
+	if err := asn1.Unmarshal(replyPA.PADataValue, &value); err != nil {
+		t.Fatalf("FAST S4U reply padata: %v", err)
+	}
+	userIDDER, err := asn1.FieldContent(replyPA.PADataValue, 0)
+	if err != nil {
+		t.Fatalf("FAST S4U reply user identity: %v", err)
+	}
+	if value.UserID.Nonce != replyPart.Nonce || value.UserID.CName == nil ||
+		value.UserID.CRealm != user.Realm || !sameProtocolPrincipal(*value.UserID.CName, *protocolPrincipal(user)) {
+		t.Fatalf("FAST S4U reply user ID = %#v", value.UserID)
+	}
+	if err := etype.VerifyChecksum(tgt.Key.KeyValue, 27, userIDDER, value.Checksum.Checksum); err != nil {
+		t.Fatalf("FAST S4U reply checksum: %v", err)
+	}
+}
+
 func TestServerFASTTGSRejectsBadChecksumAndGarbage(t *testing.T) {
 	now := time.Unix(2000000056, 0).UTC()
 	server, kclient := testServer(t, now)

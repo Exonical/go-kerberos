@@ -633,6 +633,7 @@ func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.Encrypt
 	if armor.cookie != nil {
 		fastResponse.PAData = protocol.MethodData{*armor.cookie}
 	}
+	fastResponse.PAData = append(fastResponse.PAData, reply.PAData...)
 	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
