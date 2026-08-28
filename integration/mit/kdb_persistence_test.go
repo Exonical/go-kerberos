@@ -16,6 +16,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/internal/testenv"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/kdc"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -151,5 +152,33 @@ func TestMITDumpMasterKeyEnctypes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGoDumpLoadsIntoMIT(t *testing.T) {
+	mitRealm := testenv.Start(t)
+	db := kdb.NewDatabase(testenv.RealmName)
+	if err := db.AddPrincipal("dumped-user", "dumped-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddPrincipal("host/dumped-service.test", "service-password"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := mitdump.Dump(db, testenv.MasterKey)
+	if err != nil {
+		t.Fatalf("dump Go database: %v", err)
+	}
+	dumpPath := filepath.Join(mitRealm.Dir, "go-principal.dump")
+	if err := os.WriteFile(dumpPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "load", "-update", dumpPath)
+
+	cachePath := filepath.Join(mitRealm.Dir, "dumped.ccache")
+	mitRealm.Run(t, "dumped-password\n", "/usr/bin/kinit", "-c", cachePath,
+		"dumped-user")
+	listing := mitRealm.Run(t, "", "/usr/bin/klist", "-c", cachePath)
+	if !strings.Contains(listing, "dumped-user@"+testenv.RealmName) {
+		t.Fatalf("klist does not show dumped principal:\n%s", listing)
 	}
 }

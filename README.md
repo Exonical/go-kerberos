@@ -112,12 +112,20 @@ notes, and the full test matrix.
 Principal aliases with MIT-compatible AS/TGS canonicalization, and S4U
 (constrained delegation), including KDC-side protocol transition and
 forwarded TGTs, PKINIT, KDC replay cache and renewals,
-kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
+kdb persistence (including encrypted MIT version-7 dump export), server-side
+FAST, RFC 3244 password changes, and a focused
 MIT kadm5 administrative RPC client and server subset are implemented. The
 kadm5 client also
 supports per-principal string attributes, principal-key extraction, and
 API-v4 explicit key setting. General kadmin RPC coverage beyond the documented
 operations remains out of scope.
+
+MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
+`mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
+include the encrypted `K/M@REALM` record, and encrypt principal key data with
+AES master enctypes 17, 18, 19, or 20. The dump writer is covered by
+decrypting round-trip tests and a live `kdb5_util load`/`kinit` integration
+gate; the existing MIT-to-Go loader path remains supported as well.
 
 PA-FOR-USER verification accepts the keyed checksum types supported by the
 TGT session enctype, plus the RFC 4757 HMAC-MD5 checksum used by legacy
