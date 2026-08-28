@@ -17,6 +17,8 @@ const (
 
 // KADMData is the decoded osa_princ_ent_rec stored in KRB5_TL_KADM_DATA.
 // OldKeys is ordered newest first, like PrincipalRecord.PasswordHistory.
+// OldKeyNext is the cursor from the decoded MIT circular queue. The encoder
+// normalizes it for the newest-first representation.
 type KADMData struct {
 	Policy           string
 	AuxAttributes    uint32
@@ -97,7 +99,9 @@ func EncodeKADMData(data KADMData, historyKey *Key) ([]byte, error) {
 		}
 		data.OldKeys = physical
 	}
-	out.u32(data.OldKeyNext)
+	// The newest-first API does not preserve the physical queue cursor. Emit
+	// MIT's unwrapped cursor; its full-queue guard normalizes len to slot zero.
+	out.u32(uint32(len(data.OldKeys)))
 	out.u32(data.AdminHistoryKVNO)
 	out.u32(uint32(len(data.OldKeys)))
 	for _, history := range data.OldKeys {
