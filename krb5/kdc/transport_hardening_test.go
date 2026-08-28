@@ -158,17 +158,17 @@ func TestKDCStalledTCPConnectionCloses(t *testing.T) {
 	}
 }
 
-func TestKDCDispatchDoesNotCacheErrors(t *testing.T) {
+func TestKDCDispatchCachesErrorReply(t *testing.T) {
 	now := time.Unix(2000000000, 0).UTC()
 	server, _ := testServer(t, now)
 	request := mustMarshal(t, asRequest(principalForKDC("missing"), principalForKDC("krbtgt", "TEST.REALM"), 11))
 	first := server.dispatch(request, true)
 	second := server.dispatch(request, true)
-	if !bytes.Equal(first, second) {
-		t.Fatal("error responses unexpectedly differ only by cache")
+	if len(first) == 0 || !bytes.Equal(first, second) {
+		t.Fatal("error reply was not replayed byte-identically")
 	}
-	if len(server.lookaside.entries) != 0 {
-		t.Fatalf("error request remained cached: %d entries", len(server.lookaside.entries))
+	if len(server.lookaside.entries) != 1 {
+		t.Fatalf("error request cache entries = %d, want 1", len(server.lookaside.entries))
 	}
 }
 

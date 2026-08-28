@@ -250,11 +250,7 @@ func (s *Server) dispatch(request []byte, isTCP bool) []byte {
 		return s.limitDatagramReply(cached, isTCP)
 	}
 	response := s.HandleMessage(request)
-	if isSuccessfulReply(response) {
-		cache.complete(request, response, s.now())
-	} else {
-		cache.complete(request, nil, s.now())
-	}
+	cache.complete(request, response, s.now())
 	return s.limitDatagramReply(response, isTCP)
 }
 
@@ -265,10 +261,6 @@ func (s *Server) getLookaside() *lookasideCache {
 		s.lookaside = newLookasideCache()
 	}
 	return s.lookaside
-}
-
-func isSuccessfulReply(response []byte) bool {
-	return len(response) > 0 && (response[0] == 0x6b || response[0] == 0x6d)
 }
 
 func (s *Server) limitDatagramReply(response []byte, isTCP bool) []byte {

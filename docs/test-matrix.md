@@ -45,8 +45,8 @@ codes and returning FAST-armored policy errors when denied.
 
 KDC UDP and TCP dispatches key the complete request packet in a bounded,
 two-minute lookaside cache. Successful AS-REP and TGS-REP responses are
-replayed verbatim; protocol-error responses are not cached, and an
-in-progress duplicate is discarded. UDP replies above the configured
+replayed verbatim, as are encoded protocol-error responses; an in-progress
+duplicate is discarded. UDP replies above the configured
 `MaxDatagramReplySize` are replaced with `KRB_ERR_RESPONSE_TOO_BIG`, allowing
 the client transport to retry over TCP. TCP connections use a one-minute
 idle deadline and a default 45-connection cap. The pinned MIT sources verify
