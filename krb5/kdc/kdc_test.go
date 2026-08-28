@@ -3,6 +3,9 @@ package kdc
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/md5"
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -41,6 +44,243 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
+	now := time.Unix(2000001800, 0).UTC()
+	server, kclient := testServer(t, now)
+	current := now
+	server.Now = func() time.Time { return current }
+	kclient.Now = func() time.Time { return current }
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	backend := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
+	db := server.DB.(*kdb.Database)
+	if err := db.AddPrincipal("HTTP/backend.test", "backend-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatalf("service AS exchange: %v", err)
+	}
+	self, err := kclient.S4U2Self(context.Background(), tgt, user)
+	if err != nil {
+		t.Fatalf("S4U2Self without policy: %v", err)
+	}
+	if !samePrincipal(self.Client, user) || !samePrincipal(self.Server, service) {
+		t.Fatalf("S4U2Self credentials = %#v", self)
+	}
+	if self.Flags&types.TicketForwardable != 0 {
+		t.Fatalf("S4U2Self without policy is forwardable: %#x", self.Flags)
+	}
+	if _, err := kclient.S4U2Proxy(context.Background(), tgt, self, backend); err == nil {
+		t.Fatal("S4U2Proxy without policy unexpectedly succeeded")
+	}
+	current = current.Add(time.Second)
+	server.DelegationPolicy = func(requester principal.Principal) (bool, []principal.Principal) {
+		if !samePrincipal(requester, service) {
+			t.Fatalf("delegation requester = %v, want %v", requester, service)
+		}
+		return true, []principal.Principal{backend}
+	}
+	nonForwardable, err := kclient.TGSExchange(context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("evidence TGS exchange: %v", err)
+	}
+	var evidenceTicket protocol.Ticket
+	if err := asn1.Unmarshal(nonForwardable.Ticket, &evidenceTicket); err != nil {
+		t.Fatal(err)
+	}
+	serviceRecord, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatal("missing service record")
+	}
+	evidenceKey, ok := selectKVNO(serviceRecord, evidenceTicket.EncPart.EType, evidenceTicket.EncPart.KVNO)
+	if !ok {
+		t.Fatal("missing evidence ticket key")
+	}
+	evidenceEType, err := crypto.NewRegistry().Get(evidenceKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidencePlain, err := evidenceEType.Decrypt(evidenceKey.Key, 2, evidenceTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidencePart protocol.EncTicketPart
+	if err := asn1.Unmarshal(evidencePlain, &evidencePart); err != nil {
+		t.Fatal(err)
+	}
+	evidencePart.Flags &^= types.TicketForwardable
+	evidenceTicket.EncPart.Cipher, err = evidenceEType.Encrypt(evidenceKey.Key, 2, mustMarshal(t, evidencePart))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonForwardable.Ticket = mustMarshal(t, evidenceTicket)
+	current = current.Add(time.Second)
+	if _, err := kclient.S4U2Proxy(context.Background(), tgt, nonForwardable, backend); err == nil {
+		t.Fatal("S4U2Proxy accepted non-forwardable evidence")
+	}
+	self, err = kclient.S4U2Self(context.Background(), tgt, user)
+	if err != nil {
+		t.Fatalf("S4U2Self with policy: %v", err)
+	}
+	if self.Flags&types.TicketForwardable == 0 {
+		t.Fatalf("S4U2Self with policy is not forwardable: %#x", self.Flags)
+	}
+	current = current.Add(time.Second)
+	proxy, err := kclient.S4U2Proxy(context.Background(), tgt, self, backend)
+	if err != nil {
+		t.Fatalf("S4U2Proxy: %v", err)
+	}
+	if !samePrincipal(proxy.Client, user) || !samePrincipal(proxy.Server, backend) {
+		t.Fatalf("S4U2Proxy credentials = %#v", proxy)
+	}
+	disallowed := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "other.test"}}
+	if err := db.AddPrincipal("host/other.test", "other-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kclient.S4U2Proxy(context.Background(), tgt, self, disallowed); err == nil {
+		t.Fatal("S4U2Proxy to disallowed target unexpectedly succeeded")
+	}
+}
+
+func TestPAForUserChecksum(t *testing.T) {
+	key := []byte("0123456789abcdef")
+	data := []byte("S4U checksum input")
+	var usage [4]byte
+	binary.LittleEndian.PutUint32(usage[:], 17)
+	digest := md5.Sum(append(append([]byte(nil), usage[:]...), data...))
+	signing := hmac.New(md5.New, key)
+	_, _ = signing.Write([]byte("signaturekey\x00"))
+	mac := hmac.New(md5.New, signing.Sum(nil))
+	_, _ = mac.Write(digest[:])
+	checksum := mac.Sum(nil)
+	if !verifyPAForUserChecksum(key, 17, data, checksum) {
+		t.Fatal("valid PA-FOR-USER checksum rejected")
+	}
+	checksum[0] ^= 0xff
+	if verifyPAForUserChecksum(key, 17, data, checksum) {
+		t.Fatal("bad PA-FOR-USER checksum accepted")
+	}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aesKey := bytes.Repeat([]byte{0x31}, etype.KeySize())
+	aesChecksum, err := etype.Checksum(aesKey, 17, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifyPAForUserChecksumForEType(etype, aesKey, crypto.ChecksumHMACSHA196AES128, data, aesChecksum) {
+		t.Fatal("valid AES PA-FOR-USER checksum rejected")
+	}
+}
+
+func TestServerS4U2SelfLegacyPAForUser(t *testing.T) {
+	now := time.Unix(2000001810, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := make([]byte, 4)
+	binary.LittleEndian.PutUint32(input, uint32(user.NameType))
+	for _, component := range user.Components {
+		input = append(input, component...)
+	}
+	input = append(input, user.Realm...)
+	input = append(input, "Kerberos"...)
+	checksum := makePAForUserChecksum(tgt.Key.KeyValue, input)
+	request := rawTGSRequestWithPadata(t, tgt, service, now, 0,
+		protocol.MethodData{{PADataType: protocol.PADataForUser, PADataValue: mustMarshal(t, protocol.PAForUser{
+			UserName: *protocolPrincipalForTest(user), UserRealm: user.Realm,
+			Checksum: protocol.Checksum{ChecksumType: -138, Checksum: checksum}, AuthPackage: "Kerberos",
+		})}}, nil)
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(server.HandleMessage(request), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if !sameProtocolPrincipal(reply.CName, *protocolPrincipalForTest(user)) || reply.CRealm != user.Realm {
+		t.Fatalf("legacy S4U reply client = %#v@%s", reply.CName, reply.CRealm)
+	}
+}
+
+func TestServerRejectsMalformedPAForUser(t *testing.T) {
+	now := time.Unix(2000001815, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := rawTGSRequestWithPadata(t, tgt, service, now, 0,
+		protocol.MethodData{{PADataType: protocol.PADataForUser, PADataValue: []byte{0x30, 0x01, 0x00}}}, nil)
+	var reply protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(request), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.ErrorCode != krbAPErrBadIntegrity {
+		t.Fatalf("malformed PA-FOR-USER code = %d, want %d", reply.ErrorCode, krbAPErrBadIntegrity)
+	}
+}
+
+func TestServerIssuesForwardedTGT(t *testing.T) {
+	now := time.Unix(2000001820, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgtService := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addresses := protocol.HostAddresses{{AddrType: 2, Address: []byte{192, 0, 2, 10}}}
+	response := server.HandleMessage(rawTGSRequestWithPadata(t, tgt, tgtService, now,
+		types.KDCForwarded, nil, nil, addresses))
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatal(err)
+	}
+	part := tgsReplyPart(t, response, tgt.Key)
+	if part.Flags&types.TicketForwarded == 0 {
+		t.Fatalf("forwarded TGT flags = %#x, missing FORWARDED", part.Flags)
+	}
+	record, ok, err := server.DB.Lookup(tgtService)
+	if err != nil || !ok {
+		t.Fatal("missing krbtgt record")
+	}
+	key, ok := selectKVNO(record, reply.Ticket.EncPart.EType, reply.Ticket.EncPart.KVNO)
+	if !ok {
+		t.Fatal("missing krbtgt ticket key")
+	}
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key.Key, 2, reply.Ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticketPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(plain, &ticketPart); err != nil {
+		t.Fatal(err)
+	}
+	if len(ticketPart.CAddr) != 1 || !bytes.Equal(ticketPart.CAddr[0].Address, addresses[0].Address) {
+		t.Fatalf("forwarded TGT addresses = %#v, want %#v", ticketPart.CAddr, addresses)
+	}
+}
+
+func makePAForUserChecksum(key, data []byte) []byte {
+	var usage [4]byte
+	binary.LittleEndian.PutUint32(usage[:], 17)
+	digest := md5.Sum(append(append([]byte(nil), usage[:]...), data...))
+	signing := hmac.New(md5.New, key)
+	_, _ = signing.Write([]byte("signaturekey\x00"))
+	mac := hmac.New(md5.New, signing.Sum(nil))
+	_, _ = mac.Write(digest[:])
+	return mac.Sum(nil)
+}
+
 func TestServerFASTASExchange(t *testing.T) {
 	now := time.Unix(2000000050, 0).UTC()
 	_, kclient := testServer(t, now)
@@ -73,6 +313,90 @@ func TestServerFASTTGSExchange(t *testing.T) {
 	}
 	if !samePrincipal(credentials.Client, user) || !samePrincipal(credentials.Server, service) {
 		t.Fatalf("FAST TGS credentials = %#v", credentials)
+	}
+}
+
+func TestServerFASTS4U2SelfReplyCarriesReplyChecksum(t *testing.T) {
+	now := time.Unix(2000000058, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatalf("service AS exchange: %v", err)
+	}
+	var response []byte
+	s4uClient := &client.Client{
+		Now: func() time.Time { return now },
+		Exchange: func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+			response = server.HandleMessage(payload)
+			return response, nil
+		},
+	}
+	if _, err := s4uClient.S4U2Self(context.Background(), tgt, user); err != nil {
+		t.Fatalf("S4U2Self: %v", err)
+	}
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatalf("TGS-REP: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(tgt.Key.KeyValue, 8, reply.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt TGS-REP: %v", err)
+	}
+	var replyPart protocol.EncTGSRepPart
+	if err := asn1.Unmarshal(plain, &replyPart); err != nil {
+		t.Fatalf("EncTGSRepPart: %v", err)
+	}
+	subkey := protocol.EncryptionKey{
+		KeyType: tgt.Key.KeyType, KeyValue: bytes.Repeat([]byte{0x5a}, etype.KeySize()),
+	}
+	armor, err := fast.NewTGSArmor(fast.TGT{Key: tgt.Key}, subkey)
+	if err != nil {
+		t.Fatalf("TGS armor: %v", err)
+	}
+	armorContext := &fastContext{
+		etype: armor.EType,
+		key:   armor.Key,
+		nonce: replyPart.Nonce,
+	}
+	wrappedDER := server.wrapFASTTGSRep(reply, tgt.Key, 8, armorContext)
+	var wrapped protocol.TGSRep
+	if err := asn1.Unmarshal(wrappedDER, &wrapped); err != nil {
+		t.Fatalf("FAST TGS-REP: %v", err)
+	}
+	fastReply, err := armor.UnwrapReply(wrapped.PAData, mustMarshal(t, wrapped.Ticket), replyPart.Nonce)
+	if err != nil {
+		t.Fatalf("unwrap FAST TGS-REP: %v", err)
+	}
+	var replyPA *protocol.PAData
+	for i := range fastReply.PAData {
+		if fastReply.PAData[i].PADataType == protocol.PADataS4UX509User {
+			replyPA = &fastReply.PAData[i]
+			break
+		}
+	}
+	if replyPA == nil {
+		t.Fatal("FAST response dropped PA-S4U-X509-USER")
+	}
+	var value protocol.PAS4UX509User
+	if err := asn1.Unmarshal(replyPA.PADataValue, &value); err != nil {
+		t.Fatalf("FAST S4U reply padata: %v", err)
+	}
+	userIDDER, err := asn1.FieldContent(replyPA.PADataValue, 0)
+	if err != nil {
+		t.Fatalf("FAST S4U reply user identity: %v", err)
+	}
+	if value.UserID.Nonce != replyPart.Nonce || value.UserID.CName == nil ||
+		value.UserID.CRealm != user.Realm || !sameProtocolPrincipal(*value.UserID.CName, *protocolPrincipal(user)) {
+		t.Fatalf("FAST S4U reply user ID = %#v", value.UserID)
+	}
+	if err := etype.VerifyChecksum(tgt.Key.KeyValue, 27, userIDDER, value.Checksum.Checksum); err != nil {
+		t.Fatalf("FAST S4U reply checksum: %v", err)
 	}
 }
 
@@ -1628,6 +1952,50 @@ func rawTGSRequestWithTill(t *testing.T, tgt *client.Credentials, service princi
 	return mustMarshal(t, protocol.TGSReq{
 		PVNO: 5, MsgType: 12,
 		PAData:  protocol.MethodData{{PADataType: paTGSReq, PADataValue: mustMarshal(t, apReq)}},
+		ReqBody: body,
+	})
+}
+
+func rawTGSRequestWithPadata(t *testing.T, tgt *client.Credentials, service principal.Principal, now time.Time, options types.KDCOptions, padata protocol.MethodData, additional []protocol.Ticket, addresses ...protocol.HostAddresses) []byte {
+	t.Helper()
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := protocol.KDCReqBody{
+		KDCOptions: options, Realm: service.Realm,
+		SName: &protocol.PrincipalName{NameType: int32(service.NameType), NameString: service.Components},
+		Till:  types.KerberosTime{Time: now.Add(time.Hour), Present: true},
+		Nonce: 202, EType: []int32{tgt.Key.KeyType}, AdditionalTickets: additional,
+	}
+	if len(addresses) != 0 {
+		body.Addresses = addresses[0]
+	}
+	bodyDER := mustMarshal(t, body)
+	checksum, err := etype.Checksum(tgt.Key.KeyValue, 6, bodyDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := protocol.Authenticator{
+		AuthenticatorVNO: 5, CRealm: tgt.Client.Realm,
+		CName:    *protocolPrincipalForTest(tgt.Client),
+		Checksum: &protocol.Checksum{ChecksumType: mandatoryChecksumType(tgt.Key.KeyType), Checksum: checksum},
+		Ctime:    types.KerberosTime{Time: now, Present: true},
+	}
+	authCipher, err := etype.Encrypt(tgt.Key.KeyValue, 7, mustMarshal(t, authenticator))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	apReq := protocol.APReq{
+		PVNO: 5, MsgType: 14, Ticket: ticket,
+		Authenticator: protocol.EncryptedData{EType: tgt.Key.KeyType, Cipher: authCipher},
+	}
+	return mustMarshal(t, protocol.TGSReq{
+		PVNO: 5, MsgType: 12, PAData: append(protocol.MethodData{{PADataType: paTGSReq, PADataValue: mustMarshal(t, apReq)}}, padata...),
 		ReqBody: body,
 	})
 }

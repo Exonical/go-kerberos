@@ -12,6 +12,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -229,6 +230,50 @@ func TestS4U2SelfBuildsProtocolTransitionRequest(t *testing.T) {
 	}
 	if result.Server.String() != service.String() {
 		t.Fatalf("credential server = %s, want %s", result.Server, service)
+	}
+}
+
+func TestS4U2SelfVerifiesReplyChecksumFromFASTResponse(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	profile, sessionKey, tgt, service, user := s4uFixture(t)
+	directDER := makeS4UReply(t, profile, sessionKey, 42, now, user, service, false)
+	var direct protocol.TGSRep
+	if err := asn1.Unmarshal(directDER, &direct); err != nil {
+		t.Fatalf("direct TGS-REP: %v", err)
+	}
+	subkey := protocol.EncryptionKey{
+		KeyType: tgt.Key.KeyType, KeyValue: bytes.Repeat([]byte{0x5a}, profile.KeySize()),
+	}
+	armor, err := fast.NewTGSArmor(fast.TGT{Key: tgt.Key}, subkey)
+	if err != nil {
+		t.Fatalf("TGS armor: %v", err)
+	}
+	fastResponse, err := asn1.Marshal(protocol.KrbFastResponse{
+		PAData: direct.PAData, Nonce: 42,
+	})
+	if err != nil {
+		t.Fatalf("FAST response: %v", err)
+	}
+	cipher, err := armor.EType.Encrypt(armor.Key, fast.UsageRep, fastResponse)
+	if err != nil {
+		t.Fatalf("FAST response encryption: %v", err)
+	}
+	wrapper, err := asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+		EncFastRep: protocol.EncryptedData{EType: armor.EType.ID(), Cipher: cipher},
+	}})
+	if err != nil {
+		t.Fatalf("FAST reply armor: %v", err)
+	}
+	armored := direct
+	armored.PAData = protocol.MethodData{{PADataType: fast.PAFXFast, PADataValue: wrapper}}
+	ticketDER := mustMarshal(t, armored.Ticket)
+	reply, err := armor.UnwrapReply(armored.PAData, ticketDER, 42)
+	if err != nil {
+		t.Fatalf("unwrap FAST response: %v", err)
+	}
+	armored.PAData = reply.PAData
+	if err := verifyS4USelfReply(mustMarshal(t, armored), user, profile, sessionKey, 42); err != nil {
+		t.Fatalf("verify S4U reply from FAST response: %v", err)
 	}
 }
 

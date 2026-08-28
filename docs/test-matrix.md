@@ -25,6 +25,7 @@ when absent.
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
 | MIT kadm5 administrative RPC subset | Go client + live MIT kadmind | MIT `kadmind` | Go client |
+| KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -97,13 +98,26 @@ without exposing password material.
 The Go client implements a focused MIT `kadm5` administrative RPC subset over
 RFC 5531 record-marked TCP with RPCSEC_GSS privacy and strict hand-written XDR.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
-covers `GET_PRINCIPAL`, `CREATE_PRINCIPAL`, `MODIFY_PRINCIPAL`,
-`RENAME_PRINCIPAL`, `DELETE_PRINCIPAL`, `CHPASS_PRINCIPAL`,
+covers principal create/get/modify/rename/delete/password-change,
 `CHRAND_PRINCIPAL`, policy create/get/modify/delete, `GET_PRINCS`,
-`GET_POLS`, and `GET_PRIVS`. Key-data management, aliases, and less-common
-procedures remain out of scope. MIT's legacy
+`GET_POLS`, and `GET_PRIVS`. Key-data management beyond random-key, aliases,
+and other procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
+
+The installed MIT `kvno` supports `-U` and `-P`, but its S4U request is
+FAST-armored in a way this focused harness does not currently exercise; the
+Go-client ↔ Go-KDC gate therefore provides the live S4U coverage. The Go KDC
+accepts both PA-S4U-X509-USER and legacy PA-FOR-USER protocol
+transition requests. PA-FOR-USER validates keyed AES checksums matching the
+TGT session enctype and the RFC 4757 HMAC-MD5 compatibility checksum; this
+is defensive verification only and does not add RC4. S4U2Self tickets are
+forwardable only when `Server.DelegationPolicy` approves the requesting
+service. S4U2Proxy requires a single forwardable evidence ticket encrypted
+to that service and an allowed target from the same hook. A nil hook permits
+non-forwardable S4U2Self but denies S4U2Proxy. Forwarded TGT requests require
+a forwardable header TGT and set the FORWARDED ticket flag while honoring
+requested addresses.
 
 ## Testing layers
 
