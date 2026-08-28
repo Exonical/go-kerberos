@@ -52,6 +52,10 @@ const (
 	getPrivs         = 12
 	getPrincs        = 14
 	getPolicies      = 15
+	setkeyPrincipal4 = 25
+	extractKeys      = 26
+	getStrings       = 23
+	setString        = 24
 )
 
 var xidCounter uint32 = uint32(time.Now().UnixNano())
@@ -129,6 +133,21 @@ type PrincipalEntry struct {
 type Key struct {
 	Enctype int32
 	Key     []byte
+}
+
+// StringAttribute is a per-principal string attribute.
+type StringAttribute struct {
+	Key   string
+	Value string
+}
+
+// KeyData is a principal key and its associated salt metadata.
+type KeyData struct {
+	KVNO     uint32
+	Enctype  int32
+	Key      []byte
+	SaltType int16
+	Salt     []byte
 }
 
 // Policy is the safe common subset of an MIT kadm5 policy entry.
@@ -857,6 +876,13 @@ func (w *xdrWriter) nullString(v string) {
 	}
 	w.opaque(append([]byte(v), 0))
 }
+func (w *xdrWriter) nullableString(v *string) {
+	if v == nil {
+		w.u32(0)
+		return
+	}
+	w.opaque(append([]byte(*v), 0))
+}
 func (w *xdrWriter) principal(p principal.Principal)    { s, _ := p.Format(); w.nullString(s) }
 func (w *xdrWriter) opaqueAuth(flavor uint32, v []byte) { w.u32(flavor); w.opaque(v) }
 func (w *xdrWriter) bytes() []byte                      { return w.b.Bytes() }
@@ -922,17 +948,28 @@ func (r *xdrReader) opaque() ([]byte, error) {
 	return v, nil
 }
 func (r *xdrReader) nullString() (string, error) {
-	v, e := r.opaque()
+	v, e := r.nullableString()
 	if e != nil {
 		return "", e
 	}
-	if len(v) == 0 {
+	if v == nil {
 		return "", nil
 	}
-	if v[len(v)-1] != 0 || bytes.IndexByte(v[:len(v)-1], 0) >= 0 {
-		return "", errors.New("kadm5: invalid null string")
+	return *v, nil
+}
+func (r *xdrReader) nullableString() (*string, error) {
+	v, e := r.opaque()
+	if e != nil {
+		return nil, e
 	}
-	return string(v[:len(v)-1]), nil
+	if len(v) == 0 {
+		return nil, nil
+	}
+	if v[len(v)-1] != 0 || bytes.IndexByte(v[:len(v)-1], 0) >= 0 {
+		return nil, errors.New("kadm5: invalid null string")
+	}
+	s := string(v[:len(v)-1])
+	return &s, nil
 }
 func (r *xdrReader) principal() (principal.Principal, error) {
 	s, e := r.nullString()

@@ -219,6 +219,107 @@ func (c *Client) GetPrivs(ctx context.Context) (int32, error) {
 	return privs, nil
 }
 
+// GetStrings returns per-principal string attributes.
+func (c *Client) GetStrings(ctx context.Context, p principal.Principal) ([]StringAttribute, error) {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	reply, err := c.call(ctx, getStrings, body.bytes())
+	if err != nil {
+		return nil, err
+	}
+	r, api, code, err := statusReader(reply)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkReplyAPI(api, c.API); err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, operationError("GET_STRINGS", code)
+	}
+	attrs, err := readStringAttributes(&r)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return attrs, nil
+}
+
+// SetString sets a per-principal string attribute. A nil value deletes it.
+func (c *Client) SetString(ctx context.Context, p principal.Principal, key string, value *string) error {
+	if key == "" {
+		return errors.New("kadm5: empty string attribute key")
+	}
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.nullableString(&key)
+	body.nullableString(value)
+	return c.genericCall(ctx, setString, body.bytes())
+}
+
+// GetPrincipalKeys returns key data for a principal. A kvno of zero requests
+// all available key versions.
+func (c *Client) GetPrincipalKeys(ctx context.Context, p principal.Principal, kvno uint32) ([]KeyData, error) {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.u32(kvno)
+	reply, err := c.call(ctx, extractKeys, body.bytes())
+	if err != nil {
+		return nil, err
+	}
+	r, api, code, err := statusReader(reply)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkReplyAPI(api, c.API); err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, operationError("GET_PRINCIPAL_KEYS", code)
+	}
+	keys, err := readKeyData(&r)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.done(); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// SetKeyPrincipal replaces a principal's keys using the API v4 key-data
+// operation. If keepOld is true, existing keys are retained.
+func (c *Client) SetKeyPrincipal(ctx context.Context, p principal.Principal, keys []KeyData, keepOld bool) error {
+	if c.API != APIv4 {
+		return errors.New("kadm5: SETKEY_PRINCIPAL4 requires API v4")
+	}
+	if len(keys) == 0 {
+		return errors.New("kadm5: SETKEY_PRINCIPAL4 requires keys")
+	}
+	if len(keys) > 1<<16 {
+		return errors.New("kadm5: oversized key-data array")
+	}
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.boolean(keepOld)
+	body.u32(uint32(len(keys)))
+	for _, key := range keys {
+		writeKeyData(&body, key)
+	}
+	return c.genericCall(ctx, setkeyPrincipal4, body.bytes())
+}
+
+// SetKey is an alias for SetKeyPrincipal.
+func (c *Client) SetKey(ctx context.Context, p principal.Principal, keys []KeyData, keepOld bool) error {
+	return c.SetKeyPrincipal(ctx, p, keys, keepOld)
+}
+
 func statusReader(data []byte) (xdrReader, uint32, uint32, error) {
 	r := xdrReader{b: data}
 	api, err := r.u32()
@@ -265,6 +366,82 @@ func readStringList(r *xdrReader, kind string) ([]string, error) {
 	return out, nil
 }
 
+func readStringAttributes(r *xdrReader) ([]StringAttribute, error) {
+	n, err := r.i32()
+	if err != nil {
+		return nil, err
+	}
+	if n < 0 || n > 1<<20 {
+		return nil, errors.New("kadm5: invalid string attribute count")
+	}
+	arrayCount, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	if arrayCount != uint32(n) {
+		return nil, errors.New("kadm5: mismatched string attribute counts")
+	}
+	out := make([]StringAttribute, 0, n)
+	for i := int32(0); i < n; i++ {
+		key, err := r.nullableString()
+		if err != nil {
+			return nil, err
+		}
+		value, err := r.nullableString()
+		if err != nil {
+			return nil, err
+		}
+		if key == nil || value == nil {
+			return nil, errors.New("kadm5: nil string attribute")
+		}
+		out = append(out, StringAttribute{Key: *key, Value: *value})
+	}
+	return out, nil
+}
+
+func writeStringAttribute(w *xdrWriter, attr StringAttribute) {
+	key, value := attr.Key, attr.Value
+	w.nullableString(&key)
+	w.nullableString(&value)
+}
+
+func readKeyData(r *xdrReader) ([]KeyData, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	if n > 1<<16 {
+		return nil, errors.New("kadm5: oversized key-data array")
+	}
+	out := make([]KeyData, 0, n)
+	for i := uint32(0); i < n; i++ {
+		kvno, err := r.u32()
+		if err != nil {
+			return nil, err
+		}
+		enctype, err := r.i32()
+		if err != nil {
+			return nil, err
+		}
+		key, err := r.opaque()
+		if err != nil {
+			return nil, err
+		}
+		saltType, err := r.i16()
+		if err != nil {
+			return nil, err
+		}
+		salt, err := r.opaque()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, KeyData{
+			KVNO: kvno, Enctype: enctype, Key: key, SaltType: saltType, Salt: salt,
+		})
+	}
+	return out, nil
+}
+
 func writePolicy(w *xdrWriter, policy Policy, api uint32) {
 	w.nullString(policy.Name)
 	w.i32(policy.MinLife)
@@ -286,6 +463,14 @@ func writePolicy(w *xdrWriter, policy Policy, api uint32) {
 		w.i16(0)
 		w.boolean(true)
 	}
+}
+
+func writeKeyData(w *xdrWriter, key KeyData) {
+	w.u32(key.KVNO)
+	w.i32(key.Enctype)
+	w.opaque(key.Key)
+	w.i16(key.SaltType)
+	w.opaque(key.Salt)
 }
 
 func readPolicy(r *xdrReader, api uint32) (Policy, error) {

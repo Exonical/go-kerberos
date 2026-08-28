@@ -102,8 +102,10 @@ notes, and the full test matrix.
 S4U (constrained delegation), including KDC-side protocol transition and
 forwarded TGTs, PKINIT, KDC replay cache and renewals,
 kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
-MIT kadm5 administrative RPC subset are implemented. General kadmin RPC
-coverage beyond the documented principal operations remains out of scope.
+MIT kadm5 administrative RPC subset are implemented. The kadm5 client also
+supports per-principal string attributes, principal-key extraction, and
+API-v4 explicit key setting. General kadmin RPC coverage beyond the documented
+operations remains out of scope.
 
 PA-FOR-USER verification accepts the keyed checksum types supported by the
 TGT session enctype, plus the RFC 4757 HMAC-MD5 checksum used by legacy

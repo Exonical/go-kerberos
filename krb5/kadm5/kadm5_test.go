@@ -183,6 +183,197 @@ func TestReadKeysSynthetic(t *testing.T) {
 	}
 }
 
+func TestStringAttributesXDRRoundTripAndMalformed(t *testing.T) {
+	w := xdrWriter{}
+	attrs := []StringAttribute{
+		{Key: "comment", Value: "hello"},
+		{Key: "empty", Value: ""},
+	}
+	w.i32(int32(len(attrs)))
+	w.u32(uint32(len(attrs)))
+	for _, attr := range attrs {
+		writeStringAttribute(&w, attr)
+	}
+	r := xdrReader{b: w.bytes()}
+	got, err := readStringAttributes(&r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.done(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(attrs) || got[0] != attrs[0] || got[1] != attrs[1] {
+		t.Fatalf("attributes = %#v, want %#v", got, attrs)
+	}
+
+	for n := 0; n < len(w.bytes()); n++ {
+		if _, err := readStringAttributes(&xdrReader{b: w.bytes()[:n]}); err == nil {
+			t.Fatalf("accepted truncated string attributes at %d/%d", n, len(w.bytes()))
+		}
+	}
+	w = xdrWriter{}
+	w.i32(1)
+	w.u32(0)
+	if _, err := readStringAttributes(&xdrReader{b: w.bytes()}); err == nil {
+		t.Fatal("accepted mismatched string attribute counts")
+	}
+	w = xdrWriter{}
+	w.i32(1)
+	w.u32(1)
+	w.u32(0)
+	w.u32(0)
+	if _, err := readStringAttributes(&xdrReader{b: w.bytes()}); err == nil {
+		t.Fatal("accepted nil string attribute")
+	}
+}
+
+func TestSetStringXDRSupportsDeletionAndEmptyValues(t *testing.T) {
+	p, err := principal.Parse("alice@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := ""
+	w := xdrWriter{}
+	w.u32(APIv4)
+	w.principal(*p)
+	key := "comment"
+	w.nullableString(&key)
+	w.nullableString(&value)
+	r := xdrReader{b: w.bytes()}
+	if api, err := r.u32(); err != nil || api != APIv4 {
+		t.Fatalf("api = %#x, err=%v", api, err)
+	}
+	if got, err := r.principal(); err != nil || got.String() != p.String() {
+		t.Fatalf("principal = %v, %v", got, err)
+	}
+	if got, err := r.nullableString(); err != nil || got == nil || *got != key {
+		t.Fatalf("key = %#v, err=%v", got, err)
+	}
+	if got, err := r.nullableString(); err != nil || got == nil || *got != value {
+		t.Fatalf("empty value = %#v, err=%v", got, err)
+	}
+	if err := r.done(); err != nil {
+		t.Fatal(err)
+	}
+	w = xdrWriter{}
+	w.nullableString(nil)
+	r = xdrReader{b: w.bytes()}
+	if got, err := r.nullableString(); err != nil || got != nil {
+		t.Fatalf("deleted value = %#v, err=%v", got, err)
+	}
+}
+
+func TestKeyDataXDRRoundTripAndMalformed(t *testing.T) {
+	want := []KeyData{
+		{KVNO: 3, Enctype: 17, Key: []byte{1, 2, 3}, SaltType: 0, Salt: []byte("alice")},
+		{KVNO: 4, Enctype: 18, Key: []byte{4, 5}, SaltType: 1, Salt: nil},
+	}
+	w := xdrWriter{}
+	w.u32(uint32(len(want)))
+	for _, key := range want {
+		writeKeyData(&w, key)
+	}
+	r := xdrReader{b: w.bytes()}
+	got, err := readKeyData(&r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.done(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("key-data count = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].KVNO != want[i].KVNO || got[i].Enctype != want[i].Enctype ||
+			got[i].SaltType != want[i].SaltType || !bytes.Equal(got[i].Key, want[i].Key) ||
+			!bytes.Equal(got[i].Salt, want[i].Salt) {
+			t.Fatalf("key-data[%d] = %#v, want %#v", i, got[i], want[i])
+		}
+	}
+	for n := 0; n < len(w.bytes()); n++ {
+		if _, err := readKeyData(&xdrReader{b: w.bytes()[:n]}); err == nil {
+			t.Fatalf("accepted truncated key data at %d/%d", n, len(w.bytes()))
+		}
+	}
+	w = xdrWriter{}
+	w.u32(1<<16 + 1)
+	if _, err := readKeyData(&xdrReader{b: w.bytes()}); err == nil {
+		t.Fatal("accepted oversized key-data count")
+	}
+}
+
+func TestKeyOperationRequestXDR(t *testing.T) {
+	p, err := principal.Parse("alice@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := []KeyData{
+		{KVNO: 0, Enctype: 17, Key: []byte{1, 2, 3}, SaltType: 0, Salt: []byte("salt")},
+		{KVNO: 0, Enctype: 18, Key: []byte{4, 5}, SaltType: 1, Salt: nil},
+	}
+	w := xdrWriter{}
+	w.u32(APIv4)
+	w.principal(*p)
+	w.boolean(true)
+	w.u32(uint32(len(keys)))
+	for _, key := range keys {
+		writeKeyData(&w, key)
+	}
+	r := xdrReader{b: w.bytes()}
+	api, err := r.u32()
+	if err != nil || api != APIv4 {
+		t.Fatalf("api = %#x, err=%v", api, err)
+	}
+	gotPrincipal, err := r.principal()
+	if err != nil || gotPrincipal.String() != p.String() {
+		t.Fatalf("principal = %v, err=%v", gotPrincipal, err)
+	}
+	keepOld, err := r.boolean()
+	if err != nil || !keepOld {
+		t.Fatalf("keepold = %v, err=%v", keepOld, err)
+	}
+	gotKeys, err := readKeyData(&r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.done(); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotKeys) != len(keys) || gotKeys[0].Enctype != 17 ||
+		gotKeys[1].Enctype != 18 {
+		t.Fatalf("key request data = %#v", gotKeys)
+	}
+
+	w = xdrWriter{}
+	w.u32(APIv4)
+	w.principal(*p)
+	w.u32(7)
+	r = xdrReader{b: w.bytes()}
+	if api, err := r.u32(); err != nil || api != APIv4 {
+		t.Fatalf("get-keys api = %#x, err=%v", api, err)
+	}
+	if got, err := r.principal(); err != nil || got.String() != p.String() {
+		t.Fatalf("get-keys principal = %v, err=%v", got, err)
+	}
+	if kvno, err := r.u32(); err != nil || kvno != 7 {
+		t.Fatalf("get-keys kvno = %d, err=%v", kvno, err)
+	}
+	if err := r.done(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetKeyPrincipalRequiresAPIv4AndKeys(t *testing.T) {
+	p := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"alice"}}
+	if err := (&Client{API: APIv3}).SetKeyPrincipal(context.Background(), p, []KeyData{{Enctype: 17}}, false); err == nil {
+		t.Fatal("API v3 accepted SETKEY_PRINCIPAL4")
+	}
+	if err := (&Client{API: APIv4}).SetKeyPrincipal(context.Background(), p, nil, false); err == nil {
+		t.Fatal("SETKEY_PRINCIPAL4 accepted empty key data")
+	}
+}
+
 func TestRenamePrincipalGolden(t *testing.T) {
 	src, err := principal.Parse("alice@EXAMPLE.COM")
 	if err != nil {
