@@ -189,6 +189,14 @@ func TestParsePasswordChangeReplyErrors(t *testing.T) {
 		!strings.Contains(err.Error(), "KRB-ERROR") {
 		t.Fatalf("error = %v", err)
 	}
+	framed, err := buildPasswordPacket(kpasswdVersion, nil, errDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parsePasswordChangeReply(framed, testKpasswdState(now), now, time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "KRB-ERROR") {
+		t.Fatalf("framed error = %v", err)
+	}
 }
 
 func TestParsePasswordChangeReplyRejectsStaleResult(t *testing.T) {

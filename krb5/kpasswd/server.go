@@ -379,7 +379,11 @@ func (s *Server) errorReply(version, code uint16, message string) []byte {
 	if err != nil {
 		return nil
 	}
-	return reply
+	packet, err := buildPasswordPacket(kpasswdVersion, nil, reply)
+	if err != nil {
+		return nil
+	}
+	return packet
 }
 
 func resultCode(err error) uint16 {

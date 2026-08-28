@@ -35,10 +35,7 @@ func TestParsePasswordRequest(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := &Server{Realm: "TEST.REALM", DB: kdb.NewDatabase("TEST.REALM")}
 			response := server.HandleMessage(test.data)
-			var value protocol.KRBError
-			if err := asn1.Unmarshal(response, &value); err != nil {
-				t.Fatal(err)
-			}
+			value := parseFramedKRBError(t, response)
 			if len(value.EData) < 2 || binary.BigEndian.Uint16(value.EData[:2]) != test.code {
 				t.Fatalf("error data = %x, want result %d", value.EData, test.code)
 			}
@@ -61,10 +58,7 @@ func TestKpasswdServerRejectsMissingOrInvalidServiceKey(t *testing.T) {
 	missing := kdb.NewDatabase("TEST.REALM")
 	missing.AddPrincipal("alice", "password")
 	response := (&Server{Realm: "TEST.REALM", DB: missing, Now: func() time.Time { return now }}).HandleMessage(packet)
-	var errorValue protocol.KRBError
-	if err := asn1.Unmarshal(response, &errorValue); err != nil {
-		t.Fatal(err)
-	}
+	errorValue := parseFramedKRBError(t, response)
 	if len(errorValue.EData) < 2 || binary.BigEndian.Uint16(errorValue.EData[:2]) != ResultAuthError {
 		t.Fatalf("missing service key error data = %x", errorValue.EData)
 	}
@@ -87,9 +81,7 @@ func TestKpasswdServerRejectsMissingOrInvalidServiceKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	response = (&Server{Realm: "TEST.REALM", DB: invalid, Now: func() time.Time { return now }}).HandleMessage(packet)
-	if err := asn1.Unmarshal(response, &errorValue); err != nil {
-		t.Fatal(err)
-	}
+	errorValue = parseFramedKRBError(t, response)
 	if len(errorValue.EData) < 2 || binary.BigEndian.Uint16(errorValue.EData[:2]) != ResultAuthError {
 		t.Fatalf("invalid service key error data = %x", errorValue.EData)
 	}
@@ -282,6 +274,27 @@ func serverResult(t *testing.T, server *Server, state *ap.APReq, packet []byte, 
 		return parsePasswordReply(server.HandleMessage(packet), state, now, time.Minute, kpasswdVersion, setPasswordVersion)
 	}
 	return parsePasswordReply(server.HandleMessage(packet), state, now, time.Minute, version)
+}
+
+func parseFramedKRBError(t *testing.T, response []byte) protocol.KRBError {
+	t.Helper()
+	if len(response) < 6 {
+		t.Fatalf("framed error response length = %d, want at least 6", len(response))
+	}
+	if got := int(binary.BigEndian.Uint16(response[:2])); got != len(response) {
+		t.Fatalf("framed error length = %d, want %d", got, len(response))
+	}
+	if got := binary.BigEndian.Uint16(response[2:4]); got != kpasswdVersion {
+		t.Fatalf("framed error version = %d, want %d", got, kpasswdVersion)
+	}
+	if got := binary.BigEndian.Uint16(response[4:6]); got != 0 {
+		t.Fatalf("framed error AP-REP length = %d, want 0", got)
+	}
+	var value protocol.KRBError
+	if err := asn1.Unmarshal(response[6:], &value); err != nil {
+		t.Fatalf("decode framed KRB-ERROR: %v", err)
+	}
+	return value
 }
 
 func passwordRequestFixture(t *testing.T, db *kdb.Database, now time.Time, flags types.TicketFlags, clientName principal.Principal, password []byte) (*ap.APReq, []byte) {

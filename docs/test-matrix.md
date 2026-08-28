@@ -108,8 +108,9 @@ minimum password lifetime for self-service changes, password history, and
 maximum password lifetime. Administrator changes with modify privilege bypass
 minimum lifetime. Password history is retained as derived key sets in the
 in-memory KDB and is intentionally store-native rather than encoded in the
-MIT dump format. There is no RFC 3244 kpasswd server path in this repository;
-the existing kpasswd package is client-only.
+MIT dump format. The RFC 3244 `kpasswd.Server` serves password changes and
+set-password requests over UDP and TCP; the live integration suite covers
+the Go server with the MIT `kpasswd` client.
 
 The KDC applies named-policy lockout controls to PA-ENC-TIMESTAMP failures.
 Failure counters reset after `FailureCountInterval`, accounts are permanently
