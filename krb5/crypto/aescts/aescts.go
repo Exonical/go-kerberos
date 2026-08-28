@@ -10,17 +10,26 @@ import (
 // Kerberos confounders and integrity checks are intentionally outside this
 // package.
 func Encrypt(key, iv, plaintext []byte) ([]byte, error) {
+	out, _, err := EncryptWithState(key, iv, plaintext)
+	return out, err
+}
+
+// EncryptWithState applies AES CBC-CS3 and returns the chaining state for the
+// next message. The returned state is the last complete ciphertext block
+// before ciphertext stealing's final partial block, matching MIT's
+// auth-context i_vector behavior.
+func EncryptWithState(key, iv, plaintext []byte) ([]byte, []byte, error) {
 	block, err := newBlock(key, iv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(plaintext) < aes.BlockSize {
-		return nil, fmt.Errorf("AES CTS encrypt: plaintext shorter than one block")
+		return nil, nil, fmt.Errorf("AES CTS encrypt: plaintext shorter than one block")
 	}
 	if len(plaintext) == aes.BlockSize {
 		out := make([]byte, aes.BlockSize)
 		cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, plaintext)
-		return out, nil
+		return out, append([]byte(nil), out...), nil
 	}
 	if len(plaintext)%aes.BlockSize == 0 {
 		out := make([]byte, len(plaintext))
@@ -30,7 +39,7 @@ func Encrypt(key, iv, plaintext []byte) ([]byte, error) {
 		swapped := append([]byte(nil), out[previous:last]...)
 		copy(out[previous:last], out[last:])
 		copy(out[last:], swapped)
-		return out, nil
+		return out, append([]byte(nil), out[len(out)-2*aes.BlockSize:len(out)-aes.BlockSize]...), nil
 	}
 
 	fullBlocks := len(plaintext) / aes.BlockSize
@@ -63,22 +72,30 @@ func Encrypt(key, iv, plaintext []byte) ([]byte, error) {
 	} else {
 		out = append(out, x[:remainder]...)
 	}
-	return out, nil
+	nextOffset := len(out) - remainder - aes.BlockSize
+	return out, append([]byte(nil), out[nextOffset:nextOffset+aes.BlockSize]...), nil
 }
 
 // Decrypt reverses the raw AES CBC-CS3 ciphertext-stealing primitive.
 func Decrypt(key, iv, ciphertext []byte) ([]byte, error) {
+	out, _, err := DecryptWithState(key, iv, ciphertext)
+	return out, err
+}
+
+// DecryptWithState reverses AES CBC-CS3 and returns the chaining state encoded
+// in ciphertext for the next message.
+func DecryptWithState(key, iv, ciphertext []byte) ([]byte, []byte, error) {
 	block, err := newBlock(key, iv)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(ciphertext) < aes.BlockSize {
-		return nil, fmt.Errorf("AES CTS decrypt: ciphertext shorter than one block")
+		return nil, nil, fmt.Errorf("AES CTS decrypt: ciphertext shorter than one block")
 	}
 	if len(ciphertext) == aes.BlockSize {
 		out := make([]byte, aes.BlockSize)
 		cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, ciphertext)
-		return out, nil
+		return out, append([]byte(nil), ciphertext...), nil
 	}
 
 	fullBlocks := len(ciphertext) / aes.BlockSize
@@ -115,7 +132,7 @@ func Decrypt(key, iv, ciphertext []byte) ([]byte, error) {
 		xorBlock(plainPenultimate, dx, previous)
 		out = append(out, plainPenultimate...)
 		out = append(out, plainLast...)
-		return out, nil
+		return out, append([]byte(nil), ciphertext[len(ciphertext)-2*aes.BlockSize:len(ciphertext)-aes.BlockSize]...), nil
 	}
 
 	dy := make([]byte, aes.BlockSize)
@@ -134,7 +151,8 @@ func Decrypt(key, iv, ciphertext []byte) ([]byte, error) {
 	xorBlock(plainPenultimate, dx, previous)
 	out = append(out, plainPenultimate...)
 	out = append(out, plainLast...)
-	return out, nil
+	nextOffset := len(ciphertext) - remainder - aes.BlockSize
+	return out, append([]byte(nil), ciphertext[nextOffset:nextOffset+aes.BlockSize]...), nil
 }
 
 func newBlock(key, iv []byte) (cipher.Block, error) {

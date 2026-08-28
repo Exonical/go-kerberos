@@ -223,6 +223,24 @@ type KRBPriv struct {
 
 func (KRBPriv) ApplicationTag() int { return TagKRBPriv }
 
+type KRBSafe struct {
+	PVNO     int32    `krb5:"tag:0"`
+	MsgType  int32    `krb5:"tag:1"`
+	SafeBody SafeBody `krb5:"tag:2"`
+	Checksum Checksum `krb5:"tag:3"`
+}
+
+func (KRBSafe) ApplicationTag() int { return TagKRBSafe }
+
+type SafeBody struct {
+	UserData  []byte              `krb5:"tag:0"`
+	Timestamp *types.KerberosTime `krb5:"tag:1,optional"`
+	Usec      *int32              `krb5:"tag:2,optional"`
+	SeqNumber *uint32             `krb5:"tag:3,optional"`
+	SAddress  HostAddress         `krb5:"tag:4"`
+	RAddress  *HostAddress        `krb5:"tag:5,optional"`
+}
+
 type EncAPRepPart struct {
 	Ctime     types.KerberosTime `krb5:"tag:0"`
 	Cusec     int32              `krb5:"tag:1"`
@@ -391,6 +409,7 @@ const (
 	TagAPReq          = 14
 	TagAPRep          = 15
 	TagKRBPriv        = 21
+	TagKRBSafe        = 20
 	TagEncASRepPart   = 25
 	TagEncTGSRepPart  = 26
 	TagEncAPRepPart   = 27
