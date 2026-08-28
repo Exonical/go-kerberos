@@ -252,10 +252,11 @@ kdc_tcp_ports = 0
 	}
 	master.MasterEnctype = crypto.EnctypeAES256SHA1
 	master.MasterKey = masterKey
-	localHost, err := os.Hostname()
+	localHostBytes, err := exec.Command("hostname", "-f").Output()
 	if err != nil {
 		t.Fatalf("get local hostname: %v", err)
 	}
+	localHost := strings.TrimSpace(string(localHostBytes))
 	replicaName := "kiprop/" + localHost + "@" + testenv.RealmName
 	master.AllowedReplicas = map[string]bool{replicaName: true}
 	master.ErrorLog = func(err error) { t.Logf("Go iprop master: %v", err) }

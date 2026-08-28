@@ -158,13 +158,17 @@ func start(t *testing.T, masterEType string, iprop bool) *Realm {
 		run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
 	}
 	if iprop {
-		for _, command := range []string{
+		commands := []string{
 			"addprinc -pw kiprop-replica-password kiprop/replica",
 			"addprinc -randkey kiprop/127.0.0.1",
-			"addprinc -randkey kiprop/" + localHostname(t),
 			"ktadd -k " + r.Keytab + " kiprop/127.0.0.1",
-			"ktadd -k " + r.Keytab + " kiprop/" + localHostname(t),
-		} {
+		}
+		for _, hostname := range localHostnames(t) {
+			commands = append(commands,
+				"addprinc -randkey kiprop/"+hostname,
+				"ktadd -k "+r.Keytab+" kiprop/"+hostname)
+		}
+		for _, command := range commands {
 			run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
 		}
 	}
@@ -301,6 +305,18 @@ func localHostname(t *testing.T) string {
 		t.Fatalf("get local hostname: %v", err)
 	}
 	return name
+}
+
+func localHostnames(t *testing.T) []string {
+	t.Helper()
+	names := []string{localHostname(t)}
+	if output, err := exec.Command("hostname", "-f").Output(); err == nil {
+		name := strings.TrimSpace(string(output))
+		if name != "" && name != names[0] {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // CopyFile copies a generated artifact while preserving test-controlled errors.
