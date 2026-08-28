@@ -296,6 +296,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			if s.passwordExpired(clientRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
+			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+				return response
+			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, false, nil, nil)
 		}
