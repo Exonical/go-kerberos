@@ -34,12 +34,23 @@ disposable integration test environments.
   changes enforce minimum length, character classes, minimum lifetime,
   password history, and maximum lifetime. The KDC tracks preauthentication
   failures, failure intervals, temporary/permanent lockouts, and expired
-  passwords. `kdb.Store` remains backward compatible; lockout persistence is
-  used when a store implements `kdb.LockoutUpdater`.
+  passwords. `kdb.Store` remains backward compatible; atomic lockout
+  persistence is used when a store implements `kdb.LockoutRecorder`, with
+  `kdb.LockoutUpdater` retained as a compatibility fallback.
 - **RFC 3244 kpasswd server**: `kpasswd.Server` serves password changes and
   set-password requests over UDP and TCP, verifies `kadmin/changepw`
   AP-REQs, and applies the same policy and ACL controls as kadm5. Real MIT
   `kpasswd` interoperability is covered by the integration suite.
+- **MIT incremental propagation**: `iprop.Server` serves authenticated
+  `kiprop/<host>` RPCSEC_GSS update polling, and `iprop.Replica` applies
+  committed principal snapshots to a Go KDB. The in-memory update log has
+  configurable retention and MIT cursor/full-resync status semantics. The
+  integration suite exercises a Go replica pulling `GET_UPDATES` from a real
+  MIT `kadmind`, bootstrapping its cursor from an MIT ipropx dump header. The
+  reverse `kpropd` gate runs against a real MIT 1.19 `kpropd -S` when the
+  CI/runtime package is installed. The separate MIT kprop dump push used
+  after full resync is not implemented, so the gate bootstraps the replica
+  from a compatible ipropx dump before polling.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
