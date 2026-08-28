@@ -90,6 +90,14 @@ func (l *UpdateLog) Entries(serial uint32, stamp time.Time) (int32, []UpdateLogE
 	if !l.reset && serial == l.last && stamp.Equal(l.lastTime) {
 		return 4, nil
 	}
+	if len(l.entries) > 0 && serial == 0 && stamp.IsZero() &&
+		l.entries[0].Serial == 1 {
+		out := make([]UpdateLogEntry, len(l.entries))
+		for i, entry := range l.entries {
+			out[i] = copyUpdateLogEntry(entry)
+		}
+		return 0, out
+	}
 	if len(l.entries) == 0 || serial > l.last {
 		return 2, nil
 	}

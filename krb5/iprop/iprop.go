@@ -4,8 +4,10 @@ package iprop
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -187,6 +189,25 @@ func UnmarshalFullResyncResult(data []byte) (FullResyncResult, error) {
 }
 
 func EntryFromRecord(record kdb.PrincipalRecord) Entry {
+	return entryFromRecord(record, nil, nil)
+}
+
+// EntryFromRecordWithMasterKey encodes key data in the encrypted representation
+// stored by MIT's KDB and transmitted in its update log.
+func EntryFromRecordWithMasterKey(record kdb.PrincipalRecord, masterEnctype int32,
+	masterKey []byte) (Entry, error) {
+	etype, err := crypto.NewRegistry().Get(masterEnctype)
+	if err != nil {
+		return nil, fmt.Errorf("iprop master enctype: %w", err)
+	}
+	if len(masterKey) != etype.KeySize() {
+		return nil, fmt.Errorf("iprop master key has invalid length")
+	}
+	return entryFromRecord(record, etype, masterKey), nil
+}
+
+func entryFromRecord(record kdb.PrincipalRecord, masterEType crypto.EType,
+	masterKey []byte) Entry {
 	entry := Entry{
 		{Type: ATAttrFlags, Uint32: record.Flags},
 		{Type: ATMaxLife, Uint32: seconds(record.MaxLife)},
@@ -197,9 +218,9 @@ func EntryFromRecord(record kdb.PrincipalRecord) Entry {
 		{Type: ATLastFailed, Uint32: unix(record.LastFailed)},
 		{Type: ATFailAuthCount, Uint32: record.FailAuthCount},
 		{Type: ATPrinc, Principal: principalValue(record.Name)},
-		{Type: ATKeyData, Keys: keyValues(record.Keys)},
+		{Type: ATKeyData, Keys: keyValues(record.Name, record.Keys, masterEType, masterKey)},
 		{Type: ATTlData, TLData: tlValues(record.TLData)},
-		{Type: ATLen, Int16: int16(len(record.Keys))},
+		{Type: ATLen, Int16: 38},
 		{Type: ATPWLastChange, Uint32: unix(record.LastPasswordChange)},
 	}
 	if record.Policy != "" {
@@ -209,6 +230,25 @@ func EntryFromRecord(record kdb.PrincipalRecord) Entry {
 }
 
 func RecordFromEntry(name principal.Principal, entry Entry) (kdb.PrincipalRecord, error) {
+	return recordFromEntry(name, entry, nil, nil)
+}
+
+// RecordFromEntryWithMasterKey decodes key data encrypted with the MIT KDB
+// master key, as received from a real MIT iprop update log.
+func RecordFromEntryWithMasterKey(name principal.Principal, entry Entry,
+	masterEnctype int32, masterKey []byte) (kdb.PrincipalRecord, error) {
+	etype, err := crypto.NewRegistry().Get(masterEnctype)
+	if err != nil {
+		return kdb.PrincipalRecord{}, fmt.Errorf("iprop master enctype: %w", err)
+	}
+	if len(masterKey) != etype.KeySize() {
+		return kdb.PrincipalRecord{}, fmt.Errorf("iprop master key has invalid length")
+	}
+	return recordFromEntry(name, entry, etype, masterKey)
+}
+
+func recordFromEntry(name principal.Principal, entry Entry,
+	masterEType crypto.EType, masterKey []byte) (kdb.PrincipalRecord, error) {
 	record := kdb.PrincipalRecord{Name: name, Strings: make(map[string]string)}
 	for _, value := range entry {
 		switch value.Type {
@@ -235,10 +275,20 @@ func RecordFromEntry(name principal.Principal, entry Entry) (kdb.PrincipalRecord
 			}
 			record.Name = converted
 		case ATKeyData:
-			record.Keys = keyMap(value.Keys)
+			var err error
+			record.Keys, err = keyMapWithMaster(value.Keys, record.Name,
+				masterEType, masterKey)
+			if err != nil {
+				return kdb.PrincipalRecord{}, err
+			}
 		case ATPWHist:
 			for _, history := range value.PasswordHistory {
-				record.PasswordHistory = append(record.PasswordHistory, keyMap(history))
+				keys, err := keyMapWithMaster(history, record.Name,
+					masterEType, masterKey)
+				if err != nil {
+					return kdb.PrincipalRecord{}, err
+				}
+				record.PasswordHistory = append(record.PasswordHistory, keys)
 			}
 		case ATTlData:
 			record.TLData = tlMap(value.TLData)
@@ -275,23 +325,101 @@ func principalFromValue(value Principal) (principal.Principal, error) {
 	return out, nil
 }
 
-func keyValues(values map[int32]kdb.Key) []Key {
+func keyValues(name principal.Principal, values map[int32]kdb.Key,
+	masterEType crypto.EType, masterKey []byte) []Key {
 	keys := make([]Key, 0, len(values))
 	for _, value := range values {
-		keys = append(keys, Key{Version: 1, KVNO: int32(value.KVNO), Enctypes: []int32{value.Enctype}, Contents: [][]byte{append([]byte(nil), value.Key...)}})
+		content := append([]byte(nil), value.Key...)
+		if masterEType != nil {
+			ciphertext, err := masterEType.Encrypt(masterKey, 0, value.Key)
+			if err != nil {
+				continue
+			}
+			content = make([]byte, 2+len(ciphertext))
+			binary.LittleEndian.PutUint16(content, uint16(len(value.Key)))
+			copy(content[2:], ciphertext)
+		}
+		key := Key{Version: 1, KVNO: int32(value.KVNO),
+			Enctypes: []int32{value.Enctype},
+			Contents: [][]byte{content}}
+		normalSalt := name.Realm + strings.Join(name.Components, "")
+		if value.Salt != "" && value.Salt != normalSalt {
+			key.Version = 2
+			saltType, salt := saltData(name, value.Salt)
+			key.Enctypes = append(key.Enctypes, saltType)
+			key.Contents = append(key.Contents, salt)
+		}
+		keys = append(keys, key)
 	}
 	return keys
 }
-func keyMap(values []Key) map[int32]kdb.Key {
+
+func saltData(name principal.Principal, salt string) (int32, []byte) {
+	normal := name.Realm + strings.Join(name.Components, "")
+	switch salt {
+	case normal:
+		return 0, nil
+	case strings.Join(name.Components, ""):
+		return 2, nil
+	case name.Realm:
+		return 3, nil
+	default:
+		return 4, []byte(salt)
+	}
+}
+
+func keyMap(values []Key, name principal.Principal) map[int32]kdb.Key {
+	out, _ := keyMapWithMaster(values, name, nil, nil)
+	return out
+}
+
+func keyMapWithMaster(values []Key, name principal.Principal,
+	masterEType crypto.EType, masterKey []byte) (map[int32]kdb.Key, error) {
 	out := make(map[int32]kdb.Key)
 	for _, value := range values {
-		for i, enctype := range value.Enctypes {
-			if i < len(value.Contents) {
-				out[enctype] = kdb.Key{Enctype: enctype, KVNO: uint32(value.KVNO), Key: append([]byte(nil), value.Contents[i]...)}
+		if len(value.Enctypes) == 0 || len(value.Contents) == 0 {
+			continue
+		}
+		content := append([]byte(nil), value.Contents[0]...)
+		if masterEType != nil {
+			if len(content) < 2 {
+				return nil, fmt.Errorf("iprop key data is truncated")
+			}
+			keyLength := int(binary.LittleEndian.Uint16(content))
+			etype, err := crypto.NewRegistry().Get(value.Enctypes[0])
+			if err != nil {
+				return nil, err
+			}
+			if keyLength != etype.KeySize() {
+				return nil, fmt.Errorf("iprop key data has invalid key length")
+			}
+			plain, err := masterEType.Decrypt(masterKey, 0, content[2:])
+			if err != nil {
+				return nil, fmt.Errorf("iprop key data integrity check failed")
+			}
+			if len(plain) < keyLength {
+				return nil, fmt.Errorf("iprop key data is truncated")
+			}
+			content = plain[:keyLength]
+		}
+		key := kdb.Key{Enctype: value.Enctypes[0], KVNO: uint32(value.KVNO),
+			Key: content}
+		if value.Version >= 2 && len(value.Enctypes) > 1 &&
+			len(value.Contents) > 1 {
+			switch value.Enctypes[1] {
+			case 0:
+				key.Salt = name.Realm + strings.Join(name.Components, "")
+			case 2:
+				key.Salt = strings.Join(name.Components, "")
+			case 3:
+				key.Salt = name.Realm
+			default:
+				key.Salt = string(value.Contents[1])
 			}
 		}
+		out[key.Enctype] = key
 	}
-	return out
+	return out, nil
 }
 func tlValues(values []kdb.TLData) []TL {
 	out := make([]TL, 0, len(values))

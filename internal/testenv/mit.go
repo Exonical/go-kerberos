@@ -161,7 +161,9 @@ func start(t *testing.T, masterEType string, iprop bool) *Realm {
 		for _, command := range []string{
 			"addprinc -pw kiprop-replica-password kiprop/replica",
 			"addprinc -randkey kiprop/127.0.0.1",
+			"addprinc -randkey kiprop/" + localHostname(t),
 			"ktadd -k " + r.Keytab + " kiprop/127.0.0.1",
+			"ktadd -k " + r.Keytab + " kiprop/" + localHostname(t),
 		} {
 			run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
 		}
@@ -290,6 +292,15 @@ func freePort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func localHostname(t *testing.T) string {
+	t.Helper()
+	name, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("get local hostname: %v", err)
+	}
+	return name
 }
 
 // CopyFile copies a generated artifact while preserving test-controlled errors.

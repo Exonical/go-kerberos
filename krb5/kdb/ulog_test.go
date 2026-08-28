@@ -43,3 +43,17 @@ func TestUpdateLogCursorAndRetention(t *testing.T) {
 		t.Fatalf("reset cursor status = %d, want full resync", status)
 	}
 }
+
+func TestUpdateLogAcceptsZeroCursorBeforeFirstUpdate(t *testing.T) {
+	log := NewUpdateLog(2)
+	name, err := principal.Parse("host/master@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.append(UpdateLogEntry{Name: *name, Time: time.Unix(100, 0), Commit: true})
+
+	status, updates := log.Entries(0, time.Time{})
+	if status != 0 || len(updates) != 1 || updates[0].Serial != 1 {
+		t.Fatalf("zero cursor = %d/%#v, want update", status, updates)
+	}
+}

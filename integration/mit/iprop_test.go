@@ -3,6 +3,7 @@
 package mit_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -17,9 +18,11 @@ import (
 	"github.com/Exonical/go-kerberos/internal/testenv"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/iprop"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -151,15 +154,246 @@ func TestGoIPROPReplicaAgainstMITMaster(t *testing.T) {
 }
 
 func TestMITKpropdAgainstGoIPROPMaster(t *testing.T) {
-	const kpropd = "/usr/sbin/kpropd"
+	const (
+		kpropd  = "/usr/sbin/kpropd"
+		kdbutil = "/usr/sbin/kdb5_util"
+	)
 	if _, err := os.Stat(kpropd); err != nil {
-		cmd := exec.Command(kpropd, "-S")
-		output, runErr := cmd.CombinedOutput()
-		t.Logf("kpropd attempt: error=%v output=%q", runErr, output)
-		t.Skipf("MIT kpropd unavailable at %s; missing binary prevents live gate: %v",
-			kpropd, err)
+		t.Skipf("MIT kpropd unavailable at %s: %v", kpropd, err)
 	}
-	t.Skip("MIT kpropd gate requires the separate kprop dump-push protocol")
+	realm := testenv.StartWithIPROP(t)
+	masterDump := filepath.Join(realm.Dir, "go-master.dump")
+	replicaDB := filepath.Join(realm.Dir, "replica")
+	replicaDump := filepath.Join(realm.Dir, "replica.ipropx")
+	dump, err := mitdump.DumpWithMasterPassword(
+		seedGoIPROPDatabase(t, realm), testenv.MasterKey)
+	if err != nil {
+		t.Fatalf("write Go master dump: %v", err)
+	}
+	dump = append([]byte("ipropx 1 0 0 0\n"),
+		dump[bytes.IndexByte(dump, '\n')+1:]...)
+	if err := os.WriteFile(masterDump, dump, 0o600); err != nil {
+		t.Fatalf("write Go iprop dump: %v", err)
+	}
+	if err := os.WriteFile(replicaDump, dump, 0o600); err != nil {
+		t.Fatalf("write replica iprop dump: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen Go iprop master: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	replicaProfile := filepath.Join(realm.Dir, "replica-kdc.conf")
+	replicaLog := filepath.Join(realm.Dir, "replica.ulog")
+	replicaAdminDB := filepath.Join(realm.Dir, "replica.kadm5")
+	writeTestFile(t, replicaProfile, fmt.Sprintf(`[kdcdefaults]
+kdc_ports = 0
+kdc_tcp_ports = 0
+
+	[realms]
+	%s = {
+	  admin_server = 127.0.0.1
+	  kadmind_port = %d
+	  database_name = %s
+	  key_stash_file = %s/.k5.%s
+	  admin_database_name = %s
+  admin_database_lockfile = %s.lock
+  iprop_enable = true
+  iprop_ulog_size = 1000
+	  iprop_logfile = %s
+	  iprop_port = %d
+	  iprop_slave_poll = 1
+	 }
+	`, testenv.RealmName, realm.AdminPort, replicaDB, realm.Dir,
+		testenv.RealmName, replicaAdminDB,
+		replicaAdminDB, replicaLog, listener.Addr().(*net.TCPAddr).Port))
+	replicaEnv := testEnvironment(realm.Config, replicaProfile)
+	runTestCommand(t, replicaEnv, "", kdbutil, "load", "-i", replicaDump)
+
+	keytabData, err := os.ReadFile(realm.Keytab)
+	if err != nil {
+		t.Fatalf("read Go iprop keytab: %v", err)
+	}
+	serviceKeytab, err := keytab.Read(bytes.NewReader(keytabData))
+	if err != nil {
+		t.Fatalf("parse Go iprop keytab: %v", err)
+	}
+	masterDB := seedGoIPROPDatabase(t, realm)
+	if err := masterDB.AddPrincipal("iprop-live", "iprop-live-password"); err != nil {
+		t.Fatalf("mutate Go iprop master: %v", err)
+	}
+	liveName, err := principal.Parse("iprop-live@" + testenv.RealmName)
+	if err != nil {
+		t.Fatalf("parse live principal: %v", err)
+	}
+	liveRecord, ok, err := masterDB.Lookup(*liveName)
+	if err != nil || !ok {
+		t.Fatalf("lookup live principal: %v found=%t", err, ok)
+	}
+	// MIT 1.19's default enctype set is AES-SHA1. Keep this gate focused on
+	// the iprop wire/update path rather than asking that runtime to decode
+	// newer AES-SHA2 key types.
+	delete(liveRecord.Keys, crypto.EnctypeAES128SHA256)
+	delete(liveRecord.Keys, crypto.EnctypeAES256SHA384)
+	masterDB.ConfigureUpdateLog(1024)
+	if err := masterDB.UpdatePrincipal(liveRecord); err != nil {
+		t.Fatalf("record filtered live update: %v", err)
+	}
+	master := iprop.NewServer(masterDB, serviceKeytab)
+	masterEType, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatalf("get MIT master enctype: %v", err)
+	}
+	masterKey, err := masterEType.StringToKey([]byte(testenv.MasterKey),
+		[]byte(testenv.RealmName+"KM"), nil)
+	if err != nil {
+		t.Fatalf("derive MIT master key: %v", err)
+	}
+	master.MasterEnctype = crypto.EnctypeAES256SHA1
+	master.MasterKey = masterKey
+	localHost, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("get local hostname: %v", err)
+	}
+	replicaName := "kiprop/" + localHost + "@" + testenv.RealmName
+	master.AllowedReplicas = map[string]bool{replicaName: true}
+	master.ErrorLog = func(err error) { t.Logf("Go iprop master: %v", err) }
+	go func() { _ = master.Serve(listener) }()
+
+	kpropPort := freeIPROPTestPort(t)
+	cmd := exec.Command(kpropd,
+		"-S", "-d", "-D", "-r", testenv.RealmName,
+		"-s", realm.Keytab, "-f", filepath.Join(realm.Dir, "replica.dat"),
+		"-F", replicaDB, "-P", strconv.Itoa(kpropPort))
+	cmd.Env = replicaEnv
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start MIT kpropd: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	}()
+	time.Sleep(2 * time.Second)
+	if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		t.Fatalf("MIT kpropd exited before update: %v\n%s",
+			cmd.ProcessState, output.String())
+	}
+
+	if err := masterDB.ChangePassword(*liveName, "iprop-live-updated"); err != nil {
+		t.Fatalf("drive Go iprop password change: %v", err)
+	}
+	time.Sleep(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
+	var lastResult string
+	for time.Now().Before(deadline) {
+		check := exec.Command(kadminLocal, "-r", testenv.RealmName,
+			"-d", replicaDB, "-q", "getprinc iprop-live")
+		result := runTestCommandOutput(check, replicaEnv)
+		lastResult = result
+		if strings.Contains(result, "Principal: iprop-live@"+testenv.RealmName) {
+			t.Logf("MIT kpropd output:\n%s", output.String())
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	dumpResult := runTestCommandOutput(exec.Command(kdbutil, "dump", "-verbose",
+		"-d", replicaDB), replicaEnv)
+	t.Fatalf("MIT kpropd did not apply Go update; last kadmin output:\n%s\n"+
+		"replica dump:\n%s\nkpropd:\n%s", lastResult, dumpResult,
+		output.String())
+}
+
+const kadminLocal = "/usr/sbin/kadmin.local"
+
+func seedGoIPROPDatabase(t *testing.T, realm *testenv.Realm) *kdb.Database {
+	t.Helper()
+	dump := filepath.Join(realm.Dir, "mit-seed.dump")
+	realm.Run(t, "", kdbutilPath, "dump", "-r18", dump)
+	store, err := mitdump.LoadWithMasterPassword(dump, testenv.MasterKey)
+	if err != nil {
+		t.Fatalf("load MIT seed dump: %v", err)
+	}
+	db := kdb.NewDatabase(testenv.RealmName)
+	for _, name := range []string{"alice", "bob"} {
+		parsed, err := principal.Parse(name + "@" + testenv.RealmName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, ok, err := store.Lookup(*parsed)
+		if err != nil || !ok {
+			t.Fatalf("lookup %s in MIT seed dump: %v found=%t", name, err, ok)
+		}
+		if err := db.ApplyPrincipal(record, false); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	return db
+}
+
+const kdbutilPath = "/usr/sbin/kdb5_util"
+
+func testEnvironment(configPath, profilePath string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, value := range os.Environ() {
+		if strings.HasPrefix(value, "KRB5_CONFIG=") ||
+			strings.HasPrefix(value, "KRB5_KDC_PROFILE=") {
+			continue
+		}
+		env = append(env, value)
+	}
+	return append(env, "KRB5_CONFIG="+configPath,
+		"KRB5_KDC_PROFILE="+profilePath)
+}
+
+func writeTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func runTestCommand(t *testing.T, env []string, input, name string,
+	args ...string) string {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s: %v\n%s", cmd.String(), err, output.String())
+	}
+	return output.String()
+}
+
+func runTestCommandOutput(cmd *exec.Cmd, env []string) string {
+	cmd.Env = env
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		return fmt.Sprintf("command failed: %v\n%s", err, output.String())
+	}
+	return output.String()
+}
+
+func freeIPROPTestPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate test port: %v", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
 }
 
 func readIPROPMarker(path string) (iprop.Last, error) {

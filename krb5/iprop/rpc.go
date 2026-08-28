@@ -403,8 +403,12 @@ func (c *Client) readRecord(ctx context.Context) ([]byte, error) {
 // implemented, but the separate kprop dump push is intentionally not started
 // by this package; callers must seed a replica before incremental polling.
 type Server struct {
-	Database        *kdb.Database
-	Keytab          *keytab.Keytab
+	Database *kdb.Database
+	Keytab   *keytab.Keytab
+	// MasterEnctype and MasterKey are used to encode MIT-compatible encrypted
+	// key_data in incremental updates. They are optional for Go-only peers.
+	MasterEnctype   int32
+	MasterKey       []byte
 	AllowedReplicas map[string]bool
 	Authorize       func(principal.Principal) bool
 	ErrorLog        func(error)
@@ -427,7 +431,12 @@ func (s *Server) Serve(listener net.Listener) error {
 			return err
 		}
 		s.wg.Add(1)
-		go func() { defer s.wg.Done(); _ = s.serveConn(conn) }()
+		go func() {
+			defer s.wg.Done()
+			if err := s.serveConn(conn); err != nil && s.ErrorLog != nil {
+				s.ErrorLog(err)
+			}
+		}()
 	}
 }
 
@@ -541,6 +550,9 @@ func (s *Server) handleGSS(call rpcCall, session *serverSession) ([]byte, *serve
 		acceptor := gssapi.NewAcceptor(s.Keytab)
 		ctx, clientName, response, err := acceptor.AcceptWithPrincipal(protected, now(s.Now))
 		if err != nil {
+			if s.ErrorLog != nil {
+				s.ErrorLog(err)
+			}
 			return rpcError(call.xid, 1), nil, nil
 		}
 		if session == nil {
@@ -660,7 +672,16 @@ func (s *Server) dispatch(clientName principal.Principal, proc uint32, body []by
 	status, entries := s.Database.UpdateLog.Entries(last.LastSno, last.LastTime.Time())
 	result := IncrementalResult{LastEntry: current, Ret: UpdateStatus(status)}
 	for _, entry := range entries {
-		result.Updates = append(result.Updates, Update{PrincipalName: entry.Name.String(), EntrySno: entry.Serial, Time: timeValue(entry.Time), Entry: EntryFromRecord(entry.Record), Deleted: entry.Deleted, Commit: entry.Commit})
+		var converted Entry
+		if len(s.MasterKey) != 0 {
+			converted, err = EntryFromRecordWithMasterKey(entry.Record, s.MasterEnctype, s.MasterKey)
+		} else {
+			converted = EntryFromRecord(entry.Record)
+		}
+		if err != nil {
+			return IncrementalResult{LastEntry: current, Ret: UpdateError}.MarshalXDR()
+		}
+		result.Updates = append(result.Updates, Update{PrincipalName: entry.Name.String(), EntrySno: entry.Serial, Time: timeValue(entry.Time), Entry: converted, Deleted: entry.Deleted, Commit: entry.Commit})
 	}
 	return result.MarshalXDR()
 }
@@ -695,6 +716,7 @@ func rpcReply(xid, flavor uint32, verifier, body []byte) []byte {
 	w.u32(msgReply)
 	w.u32(0)
 	w.auth(flavor, verifier)
+	w.u32(0)
 	w.raw(body)
 	return w.bytes()
 }
@@ -736,9 +758,11 @@ func writeRecord(conn net.Conn, data []byte) error {
 // Replica applies incremental updates to a local Database and persists its
 // cursor in memory. Seed the database and cursor from a dump before polling.
 type Replica struct {
-	Client   *Client
-	Database *kdb.Database
-	Cursor   Last
+	Client        *Client
+	Database      *kdb.Database
+	Cursor        Last
+	MasterEnctype int32
+	MasterKey     []byte
 }
 
 func (r *Replica) Poll(ctx context.Context) (UpdateStatus, error) {
@@ -774,7 +798,13 @@ func (r *Replica) apply(updates []Update) error {
 			}
 			continue
 		}
-		record, err := RecordFromEntry(*name, update.Entry)
+		var record kdb.PrincipalRecord
+		if len(r.MasterKey) != 0 {
+			record, err = RecordFromEntryWithMasterKey(*name, update.Entry,
+				r.MasterEnctype, r.MasterKey)
+		} else {
+			record, err = RecordFromEntry(*name, update.Entry)
+		}
 		if err != nil {
 			return err
 		}

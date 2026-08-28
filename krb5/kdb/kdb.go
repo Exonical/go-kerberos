@@ -3,6 +3,7 @@ package kdb
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -155,10 +156,27 @@ func (db *Database) recordUpdateLocked(record PrincipalRecord, deleted bool) {
 	if db.UpdateLog == nil {
 		return
 	}
+	now := time.Now().UTC()
+	if !deleted && !hasTLData(record.TLData, 2) {
+		modifier := make([]byte, 4, len(record.Name.String())+5)
+		binary.LittleEndian.PutUint32(modifier, uint32(now.Unix()))
+		modifier = append(modifier, record.Name.String()...)
+		modifier = append(modifier, 0)
+		record.TLData = append(record.TLData, TLData{Type: 2, Data: modifier})
+	}
 	db.UpdateLog.append(UpdateLogEntry{
 		Name: record.Name, Record: record, Deleted: deleted, Commit: true,
-		Time: time.Now().UTC(),
+		Time: now,
 	})
+}
+
+func hasTLData(values []TLData, typ int16) bool {
+	for _, value := range values {
+		if value.Type == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // AddPrincipal derives all supported AES keys for name and stores them.

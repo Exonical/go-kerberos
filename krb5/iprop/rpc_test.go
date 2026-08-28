@@ -38,8 +38,8 @@ func TestDispatchAuthorizationAndUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Ret != UpdateFullResyncNeeded {
-		t.Fatalf("initial cursor status = %v, want full resync", result.Ret)
+	if result.Ret != UpdateOK || len(result.Updates) != 1 {
+		t.Fatalf("initial cursor result = %#v, want initial update", result)
 	}
 	last, stamp := db.UpdateLog.Last()
 	value := "value"
