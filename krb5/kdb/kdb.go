@@ -126,6 +126,8 @@ type Database struct {
 	principals map[string]PrincipalRecord
 	aliases    map[string]principal.Principal
 	policies   map[string]PolicyRecord
+	// UpdateLog retains principal mutations for incremental propagation.
+	UpdateLog *UpdateLog
 }
 
 // NewDatabase creates an empty database for realm.
@@ -135,7 +137,28 @@ func NewDatabase(realm string) *Database {
 		principals: make(map[string]PrincipalRecord),
 		aliases:    make(map[string]principal.Principal),
 		policies:   make(map[string]PolicyRecord),
+		UpdateLog:  NewUpdateLog(1024),
 	}
+}
+
+// ConfigureUpdateLog replaces the database's incremental propagation log.
+func (db *Database) ConfigureUpdateLog(capacity int) {
+	if db == nil {
+		return
+	}
+	db.mu.Lock()
+	db.UpdateLog = NewUpdateLog(capacity)
+	db.mu.Unlock()
+}
+
+func (db *Database) recordUpdateLocked(record PrincipalRecord, deleted bool) {
+	if db.UpdateLog == nil {
+		return
+	}
+	db.UpdateLog.append(UpdateLogEntry{
+		Name: record.Name, Record: record, Deleted: deleted, Commit: true,
+		Time: time.Now().UTC(),
+	})
 }
 
 // AddPrincipal derives all supported AES keys for name and stores them.
@@ -186,6 +209,7 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 		KVNO: latest, LastPasswordChange: time.Now().UTC()}
 	db.mu.Lock()
 	db.principals[canonical(*parsedName)] = record
+	db.recordUpdateLocked(record, false)
 	db.mu.Unlock()
 	return nil
 }
@@ -210,6 +234,7 @@ func (db *Database) CreatePrincipal(name, password string) error {
 		return ErrPrincipalExists
 	}
 	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -267,7 +292,9 @@ func (db *Database) DeletePrincipal(name principal.Principal) error {
 	if _, ok := db.principals[key]; !ok {
 		return ErrPrincipalNotFound
 	}
+	record := db.principals[key]
 	delete(db.principals, key)
+	db.recordUpdateLocked(record, true)
 	return nil
 }
 
@@ -296,6 +323,7 @@ func (db *Database) UpdatePrincipal(record PrincipalRecord) error {
 		record.LastPasswordChange = current.LastPasswordChange
 	}
 	db.principals[key] = copyRecord(record)
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -316,6 +344,7 @@ func (db *Database) UpdateLockout(name principal.Principal, failCount uint32,
 	record.LastFailed = lastFailed
 	record.LastSuccess = lastSuccess
 	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -341,6 +370,7 @@ func (db *Database) RecordAuthFailure(name principal.Principal, now time.Time,
 	record.FailAuthCount++
 	record.LastFailed = now
 	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
 	return record.FailAuthCount, nil
 }
 
@@ -363,6 +393,7 @@ func (db *Database) ResetAuthFailures(name principal.Principal,
 	}
 	record.FailAuthCount = 0
 	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -382,6 +413,7 @@ func (db *Database) RecordAuthSuccess(name principal.Principal, now time.Time) e
 	record.FailAuthCount = 0
 	record.LastSuccess = now.UTC()
 	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -492,6 +524,7 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 	current.KVNO = next.KVNO
 	current.LastPasswordChange = now.UTC()
 	db.principals[key] = current
+	db.recordUpdateLocked(current, false)
 	return nil
 }
 
@@ -591,6 +624,7 @@ func (db *Database) RandomizeKeys(name principal.Principal) ([]Key, error) {
 	current.Keys = keys
 	current.KVNO = nextKVNO
 	db.principals[key] = current
+	db.recordUpdateLocked(current, false)
 	return keyList(keys), nil
 }
 
@@ -626,6 +660,7 @@ func (db *Database) SetKeys(name principal.Principal, keys []Key, keepOld bool) 
 	}
 	current.Keys, current.KVNO = next, kvno
 	db.principals[key] = current
+	db.recordUpdateLocked(current, false)
 	return nil
 }
 
@@ -652,9 +687,12 @@ func (db *Database) RenamePrincipal(src, dest principal.Principal) error {
 	if _, exists := db.principals[destKey]; exists {
 		return ErrPrincipalExists
 	}
+	oldRecord := record
 	record.Name = dest
 	db.principals[destKey] = record
 	delete(db.principals, sourceKey)
+	db.recordUpdateLocked(oldRecord, true)
+	db.recordUpdateLocked(record, false)
 	return nil
 }
 
@@ -696,6 +734,27 @@ func (db *Database) SetString(name principal.Principal, key string, value *strin
 		record.Strings[key] = *value
 	}
 	db.principals[canonical(name)] = record
+	db.recordUpdateLocked(record, false)
+	return nil
+}
+
+// ApplyPrincipal installs or removes a principal without recording a local
+// update. Replicas use this method when replaying updates from a master.
+func (db *Database) ApplyPrincipal(record PrincipalRecord, deleted bool) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(record.Name)
+	if deleted {
+		delete(db.principals, key)
+		return nil
+	}
+	if record.Strings == nil {
+		record.Strings = make(map[string]string)
+	}
+	db.principals[key] = copyRecord(record)
 	return nil
 }
 
@@ -882,6 +941,7 @@ func copyKeys(keys map[int32]Key) map[int32]Key {
 }
 
 func copyRecord(record PrincipalRecord) PrincipalRecord {
+	record.Name.Components = append([]string(nil), record.Name.Components...)
 	record.Keys = copyKeys(record.Keys)
 	history := make([]map[int32]Key, len(record.PasswordHistory))
 	for i, keys := range record.PasswordHistory {
