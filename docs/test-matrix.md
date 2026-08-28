@@ -100,8 +100,14 @@ RFC 5531 record-marked TCP with RPCSEC_GSS privacy and strict hand-written XDR.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
 covers principal create/get/modify/rename/delete/password-change,
 `CHRAND_PRINCIPAL`, policy create/get/modify/delete, `GET_PRINCS`,
-`GET_POLS`, and `GET_PRIVS`. Key-data management beyond random-key, aliases,
-and other procedures remain out of scope. MIT's legacy
+`GET_POLS`, and `GET_PRIVS`. It also covers `GET_STRINGS` (procedure 23),
+`SET_STRING` (procedure 24), `SETKEY_PRINCIPAL4` (procedure 25), and
+`EXTRACT_KEYS`/`GET_PRINCIPAL_KEYS` (procedure 26). These procedure numbers
+are from MIT krb5 1.22.2's `kadm_rpc.h`; they supersede older or provisional
+numbering. Explicit key setting uses API version 4, while string attributes
+and key extraction use the negotiated API version. Key-data management beyond
+random-key and explicit API-v4 keys, aliases, and other procedures remain out
+of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 

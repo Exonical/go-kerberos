@@ -3,16 +3,19 @@
 package mit_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/internal/testenv"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kadm5"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -119,6 +122,67 @@ func TestGoKadm5CommonOperationsAgainstMIT(t *testing.T) {
 	}
 	if entry.Attributes&1 == 0 || entry.MaxLife != 3600 {
 		t.Fatalf("modified entry = %+v", entry)
+	}
+	value := "integration-string"
+	if err := a.SetString(ctx, target, "go-kerberos-test", &value); err != nil {
+		t.Fatalf("set string attribute: %v", err)
+	}
+	attrs, err := a.GetStrings(ctx, target)
+	if err != nil {
+		t.Fatalf("get string attributes: %v", err)
+	}
+	foundAttr := false
+	for _, attr := range attrs {
+		if attr.Key == "go-kerberos-test" && attr.Value == value {
+			foundAttr = true
+		}
+	}
+	if !foundAttr {
+		t.Fatalf("string attributes = %#v", attrs)
+	}
+	if err := a.SetString(ctx, target, "go-kerberos-test", nil); err != nil {
+		t.Fatalf("delete string attribute: %v", err)
+	}
+	attrs, err = a.GetStrings(ctx, target)
+	if err != nil {
+		t.Fatalf("get deleted string attributes: %v", err)
+	}
+	for _, attr := range attrs {
+		if attr.Key == "go-kerberos-test" {
+			t.Fatalf("deleted string attribute remains: %#v", attrs)
+		}
+	}
+	keyData, err := a.GetPrincipalKeys(ctx, target, 0)
+	if err != nil {
+		t.Fatalf("get principal keys: %v", err)
+	}
+	if len(keyData) == 0 {
+		t.Fatal("get principal keys returned no keys")
+	}
+	registry := crypto.NewRegistry()
+	matchedPassword := false
+	for _, key := range keyData {
+		etype, err := registry.Get(key.Enctype)
+		if err != nil {
+			continue
+		}
+		salt := key.Salt
+		if key.SaltType == 0 && len(salt) == 0 {
+			salt = []byte(target.Realm + strings.Join(target.Components, ""))
+		}
+		derived, err := etype.StringToKey([]byte("temporary-password"), salt, nil)
+		if err == nil && bytes.Equal(derived, key.Key) {
+			matchedPassword = true
+			break
+		}
+	}
+	if !matchedPassword {
+		t.Fatal("get principal keys did not return a temporary-password key")
+	}
+	explicitKey := keyData[0]
+	explicitKey.KVNO = 0
+	if err := a.SetKeyPrincipal(ctx, target, []kadm5.KeyData{explicitKey}, true); err != nil {
+		t.Fatalf("set explicit principal key: %v", err)
 	}
 	if err := a.RenamePrincipal(ctx, target, targetRenamed); err != nil {
 		t.Fatalf("rename principal: %v", err)

@@ -112,7 +112,7 @@ func start(t *testing.T, masterEType string) *Realm {
   key_stash_file = %s/.k5.%s
  }
 `, port, port, RealmName, dir, dir, dir, dir, dir, dir, RealmName))
-	writeFile(t, filepath.Join(dir, "kadm5.acl"), "*/admin@"+RealmName+" *\n")
+	writeFile(t, filepath.Join(dir, "kadm5.acl"), "admin/admin@"+RealmName+" sxe\n")
 	createArgs := []string{"create", "-s"}
 	if masterEType != "" {
 		createArgs = append(createArgs, "-k", masterEType)
