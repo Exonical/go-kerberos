@@ -25,6 +25,7 @@ when absent.
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
+| MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 
@@ -95,6 +96,22 @@ The live integration gates cover both changing Alice's password directly and
 an authorized admin setting Alice's password, followed by Go AS exchanges with
 the resulting passwords. Password policy and authorization errors are returned
 without exposing password material.
+
+Kadmind enforces MIT-style minimum length and byte-oriented character classes,
+minimum password lifetime for self-service changes, password history, and
+maximum password lifetime. Administrator changes with modify privilege bypass
+minimum lifetime. Password history is retained as derived key sets in the
+in-memory KDB and is intentionally store-native rather than encoded in the
+MIT dump format. There is no RFC 3244 kpasswd server path in this repository;
+the existing kpasswd package is client-only.
+
+The KDC applies named-policy lockout controls to PA-ENC-TIMESTAMP failures.
+Failure counters reset after `FailureCountInterval`, accounts are permanently
+or temporarily rejected with `KDC_ERR_CLIENT_REVOKED`, successful
+preauthentication resets the counter and records `LastSuccess`, and expired
+passwords return `KDC_ERR_KEY_EXP`. Lockout state is persisted only when the
+configured store implements the optional `kdb.LockoutUpdater`; lookup-only
+stores continue to operate without durable counters.
 
 The Go client and `kadm5.Server` implement a focused MIT `kadm5`
 administrative RPC subset over RFC 5531 record-marked TCP with RPCSEC_GSS

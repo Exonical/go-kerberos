@@ -26,11 +26,16 @@ const goKDCRealm = "GOKDC.TEST"
 type goKDC struct {
 	config string
 	cache  string
+	db     *kdb.Database
 	cancel context.CancelFunc
 	done   chan error
 }
 
 func startGoKDC(t *testing.T) *goKDC {
+	return startGoKDCWithPolicy(t, nil)
+}
+
+func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
 	t.Helper()
 	db := kdb.NewDatabase(goKDCRealm)
 	for _, item := range []struct{ name, password string }{
@@ -48,6 +53,23 @@ func startGoKDC(t *testing.T) *goKDC {
 	}
 	if err := db.AddAlias("host/alias.test", "host/service.test"); err != nil {
 		t.Fatal(err)
+	}
+	if policy != nil {
+		if err := db.CreatePolicy(*policy); err != nil {
+			t.Fatal(err)
+		}
+		user, err := principal.Parse("alice@" + goKDCRealm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, ok, err := db.Lookup(*user)
+		if err != nil || !ok {
+			t.Fatalf("lookup policy principal: %v, %v", err, ok)
+		}
+		record.Policy = policy.Name
+		if err := db.UpdatePrincipal(record); err != nil {
+			t.Fatal(err)
+		}
 	}
 	server := &kdc.Server{
 		Realm:            goKDCRealm,
@@ -101,6 +123,7 @@ func startGoKDC(t *testing.T) *goKDC {
 	k := &goKDC{
 		config: configPath,
 		cache:  filepath.Join(dir, "ccache"),
+		db:     db,
 		cancel: cancel,
 		done:   done,
 	}
@@ -128,6 +151,14 @@ func startGoKDC(t *testing.T) *goKDC {
 
 func (k *goKDC) run(t *testing.T, input, command string, args ...string) string {
 	t.Helper()
+	output, err := k.runResult(input, command, args...)
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", command, args, err, output)
+	}
+	return output
+}
+
+func (k *goKDC) runResult(input, command string, args ...string) (string, error) {
 	cmd := exec.Command(command, args...)
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, value := range os.Environ() {
@@ -141,10 +172,7 @@ func (k *goKDC) run(t *testing.T, input, command string, args ...string) string 
 		cmd.Stdin = strings.NewReader(input)
 	}
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %v failed: %v\n%s", command, args, err, output)
-	}
-	return string(output)
+	return string(output), err
 }
 
 func TestMITClientAgainstGoKDC(t *testing.T) {
@@ -187,6 +215,27 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	t.Logf("MIT klist -e output:\n%s", full)
 	if !strings.Contains(full, "host/service.test@"+goKDCRealm) {
 		t.Fatalf("klist -e does not show service ticket:\n%s", full)
+	}
+}
+
+func TestMITClientAccountLockoutAgainstGoKDC(t *testing.T) {
+	k := startGoKDCWithPolicy(t, &kdb.PolicyRecord{
+		Name: "lockout", MaxFailure: 2, FailureCountInterval: 300,
+	})
+	for attempt := 0; attempt < 2; attempt++ {
+		output, err := k.runResult("wrong-password\n", "/usr/bin/kinit", "alice")
+		if err == nil {
+			t.Fatalf("wrong-password kinit attempt %d unexpectedly succeeded", attempt+1)
+		}
+		t.Logf("wrong-password kinit attempt %d:\n%s", attempt+1, output)
+	}
+	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")
+	if err == nil {
+		t.Fatalf("locked correct-password kinit unexpectedly succeeded")
+	}
+	t.Logf("locked correct-password kinit:\n%s", output)
+	if !strings.Contains(strings.ToLower(output), "revoked") {
+		t.Fatalf("locked kinit output lacks revoked error:\n%s", output)
 	}
 }
 

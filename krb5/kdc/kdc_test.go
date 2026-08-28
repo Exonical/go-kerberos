@@ -44,6 +44,115 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestASAccountLockout(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.CreatePolicy(kdb.PolicyRecord{
+		Name: "locked", MaxFailure: 2, FailureCountInterval: 60,
+		LockoutDuration: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*user)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	record.Policy = "locked"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(*user, service, 1)
+	addPreauthPassword(t, &request, "wrong-password", now)
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	if kerberosError.ErrorCode != kdcErrPreauthFailed {
+		t.Fatalf("first failure code = %d", kerberosError.ErrorCode)
+	}
+	record, _, _ = db.Lookup(*user)
+	if record.FailAuthCount != 1 || !record.LastFailed.Equal(now) {
+		t.Fatalf("first failure state = %#v", record)
+	}
+	request.ReqBody.Nonce++
+	addPreauthPassword(t, &request, "wrong-password", now)
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	record, _, _ = db.Lookup(*user)
+	if record.FailAuthCount != 2 {
+		t.Fatalf("second failure count = %d", record.FailAuthCount)
+	}
+	request.ReqBody.Nonce++
+	addPreauthPassword(t, &request, "alice-password", now)
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	if kerberosError.ErrorCode != kdcErrClientRevoked {
+		t.Fatalf("locked account code = %d, want %d", kerberosError.ErrorCode, kdcErrClientRevoked)
+	}
+	server.Now = func() time.Time { return now.Add(61 * time.Second) }
+	request.ReqBody.Nonce++
+	addPreauthPassword(t, &request, "alice-password", now.Add(61*time.Second))
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
+		t.Fatalf("post-interval AS reply: %v", err)
+	}
+	record, _, _ = db.Lookup(*user)
+	if record.FailAuthCount != 0 || !record.LastSuccess.Equal(now.Add(61*time.Second)) {
+		t.Fatalf("successful authentication state = %#v", record)
+	}
+}
+
+func TestASAccountLockoutDurationAndPasswordExpiration(t *testing.T) {
+	now := time.Unix(2000000200, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "temporary", MaxFailure: 1, LockoutDuration: 30}); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := principal.Parse("alice@TEST.REALM")
+	record, _, _ := db.Lookup(*user)
+	record.Policy = "temporary"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(*user, service, 1)
+	addPreauthPassword(t, &request, "wrong-password", now)
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	server.Now = func() time.Time { return now.Add(31 * time.Second) }
+	request.ReqBody.Nonce++
+	addPreauthPassword(t, &request, "alice-password", now.Add(31*time.Second))
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
+		t.Fatalf("post-duration AS reply: %v", err)
+	}
+	record.PasswordExpiration = now.Add(30 * time.Second)
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	request.ReqBody.Nonce++
+	addPreauthPassword(t, &request, "alice-password", now.Add(31*time.Second))
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	if kerberosError.ErrorCode != kdcErrKeyExpired {
+		t.Fatalf("expired password code = %d, want %d", kerberosError.ErrorCode, kdcErrKeyExpired)
+	}
+}
+
 func TestServerPrincipalAliases(t *testing.T) {
 	now := time.Unix(2000000050, 0).UTC()
 	server, kclient := testServer(t, now)
@@ -2271,6 +2380,24 @@ func addPreauth(t *testing.T, request *protocol.ASReq, now time.Time) {
 		t.Fatal(err)
 	}
 	key, err := etype.StringToKey([]byte("alice-password"), []byte("TEST.REALMalice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := mustMarshal(t, preauth.EncTimestamp{PATimestamp: kerberosTime(now)})
+	cipher, err := etype.Encrypt(key, 1, timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{{PADataType: paEncTimestamp, PADataValue: cipher}}
+}
+
+func addPreauthPassword(t *testing.T, request *protocol.ASReq, password string, now time.Time) {
+	t.Helper()
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := etype.StringToKey([]byte(password), []byte("TEST.REALMalice"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
