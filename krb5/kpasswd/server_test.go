@@ -268,6 +268,91 @@ func TestKpasswdServerTCPFraming(t *testing.T) {
 	}
 }
 
+func TestKpasswdServerUDPLookasideReplaysResponse(t *testing.T) {
+	now := time.Unix(1900000400, 0).UTC()
+	db := kdb.NewDatabase("TEST.REALM")
+	for _, value := range []string{"alice", "kadmin/changepw"} {
+		if err := db.AddPrincipal(value, "password"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "history", HistoryNum: 3}); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := principal.Parse("alice@TEST.REALM")
+	record, ok, err := db.Lookup(*alice)
+	if err != nil || !ok {
+		t.Fatalf("lookup alice: %v, %t", err, ok)
+	}
+	record.Policy = "history"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Realm: "TEST.REALM", DB: db, Now: func() time.Time { return now }}
+	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- server.ListenAndServe(ctx, udpConn, nil)
+	}()
+	clientConn, err := net.DialUDP("udp", nil, udpConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close()
+	state, request := passwordRequestFixture(t, db, now, types.TicketInitial, *alice, []byte("new-password"))
+	readResponse := func() []byte {
+		t.Helper()
+		if _, err := clientConn.Write(request); err != nil {
+			t.Fatal(err)
+		}
+		if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		response := make([]byte, kpasswdMaxPacket)
+		n, _, err := clientConn.ReadFromUDP(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append([]byte(nil), response[:n]...)
+	}
+	first := readResponse()
+	second := readResponse()
+	if !bytes.Equal(first, second) {
+		t.Fatalf("duplicate response differs:\nfirst:  %x\nsecond: %x", first, second)
+	}
+	result, err := parsePasswordReply(first, state, now, time.Minute, kpasswdVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != ResultSuccess {
+		t.Fatalf("first result = %#v", result)
+	}
+	record, ok, err = db.Lookup(*alice)
+	if err != nil || !ok {
+		t.Fatalf("lookup changed alice: %v, %t", err, ok)
+	}
+	if record.KVNO != 2 {
+		t.Fatalf("alice KVNO = %d, want exactly one change to KVNO 2", record.KVNO)
+	}
+	if len(record.PasswordHistory) != 1 {
+		t.Fatalf("password history length = %d, want exactly one entry", len(record.PasswordHistory))
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("kpasswd server did not stop")
+	}
+}
+
 func serverResult(t *testing.T, server *Server, state *ap.APReq, packet []byte, now time.Time, version uint16) (passwordChangeResult, error) {
 	t.Helper()
 	if version == setPasswordVersion {

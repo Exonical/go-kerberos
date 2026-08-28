@@ -117,7 +117,10 @@ Go-to-MIT history round trips. Without a history principal, the KDB retains
 native history enforcement but cannot emit encrypted MIT history entries.
 The RFC 3244 `kpasswd.Server` serves password changes and set-password requests
 over UDP and TCP; the live integration suite covers the Go server with the MIT
-`kpasswd` client.
+`kpasswd` client. UDP requests are keyed by their complete packet bytes in a
+bounded, two-minute lookaside cache, so retransmissions receive the original
+response without repeating the password change; requests still in progress are
+dropped silently.
 
 The KDC applies named-policy lockout controls to PA-ENC-TIMESTAMP failures.
 Failure counters reset after `FailureCountInterval`, accounts are permanently

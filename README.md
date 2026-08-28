@@ -39,6 +39,10 @@ disposable integration test environments.
   `kdb.LockoutUpdater` retained as a compatibility fallback.
 - **RFC 3244 kpasswd server**: `kpasswd.Server` serves password changes and
   set-password requests over UDP and TCP, verifies `kadmin/changepw`
+  AP-REQs, and applies the same policy and ACL controls as kadm5. Its UDP
+  response lookaside cache replays identical retransmissions without applying
+  a password change twice. Real MIT `kpasswd` interoperability is covered by
+  the integration suite.
   AP-REQs, and applies the same policy and ACL controls as kadm5. Real MIT
   `kpasswd` interoperability is covered by the integration suite.
 - **MIT incremental propagation**: `iprop.Server` serves authenticated

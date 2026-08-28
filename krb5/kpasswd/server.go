@@ -41,6 +41,8 @@ type Server struct {
 	Now       func() time.Time
 	ErrorLog  func(error)
 	MaxPacket int
+
+	lookaside *lookasideCache
 }
 
 // ListenAndServe serves password-change requests until ctx is cancelled or
@@ -83,6 +85,9 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 }
 
 func (s *Server) serveUDP(ctx context.Context, conn net.PacketConn, errCh chan<- error) {
+	if s.lookaside == nil {
+		s.lookaside = newLookasideCache()
+	}
 	max := s.maxPacket()
 	buffer := make([]byte, max)
 	for {
@@ -94,13 +99,25 @@ func (s *Server) serveUDP(ctx context.Context, conn net.PacketConn, errCh chan<-
 			errCh <- fmt.Errorf("kpasswd UDP read: %w", err)
 			return
 		}
-		response := s.HandleMessage(buffer[:n])
-		if len(response) == 0 {
-			continue
-		}
-		if _, err := conn.WriteTo(response, addr); err != nil && ctx.Err() == nil {
-			errCh <- fmt.Errorf("kpasswd UDP write: %w", err)
-			return
+		request := append([]byte(nil), buffer[:n]...)
+		go s.handleUDP(ctx, conn, addr, request, errCh)
+	}
+}
+
+func (s *Server) handleUDP(ctx context.Context, conn net.PacketConn, addr net.Addr,
+	request []byte, errCh chan<- error) {
+	response, cached := s.lookaside.begin(request, s.now())
+	if !cached {
+		response = s.HandleMessage(request)
+		s.lookaside.complete(request, response, s.now())
+	}
+	if len(response) == 0 {
+		return
+	}
+	if _, err := conn.WriteTo(response, addr); err != nil && ctx.Err() == nil {
+		select {
+		case errCh <- fmt.Errorf("kpasswd UDP write: %w", err):
+		default:
 		}
 	}
 }
