@@ -17,6 +17,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -25,7 +26,15 @@ const (
 	headerVersion7       = "kdb5_util load_dump version 7"
 	maxLineSize          = 16 << 20
 	defaultMasterEnctype = crypto.EnctypeAES256SHA1
+	maxLegacyStashKeyLen = 1024
 )
+
+// StashKey is a database master key read from an MIT stash file.
+type StashKey struct {
+	Enctype int32
+	KVNO    uint32
+	Key     []byte
+}
 
 // FileStore is a read-only principal store loaded from an MIT dump. Use Dump
 // or Write to export an in-memory KDB in the same format.
@@ -453,6 +462,107 @@ func LoadWithMasterPassword(path, password string) (*FileStore, error) {
 	return ParseWithMasterPassword(data, password)
 }
 
+// LoadWithStash reads an MIT dump and decrypts its key data with the K/M key
+// stored in stashPath. Both modern FILE keytab stashes and MIT's legacy
+// binary stash format are supported.
+func LoadWithStash(path, stashPath string) (*FileStore, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read MIT dump: %w", err)
+	}
+	return ParseWithStash(data, stashPath)
+}
+
+// ParseWithStash parses an MIT dump and decrypts its key data with the K/M
+// key stored in stashPath.
+func ParseWithStash(data []byte, stashPath string) (*FileStore, error) {
+	store, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	stash, err := ReadStash(stashPath, store.Realm)
+	if err != nil {
+		return nil, err
+	}
+	return parseWithMasterKey(store, stash.Enctype, stash.Key)
+}
+
+// LoadWithMasterKey reads an MIT dump and decrypts its key data with an
+// explicitly supplied database master key.
+func LoadWithMasterKey(path string, masterEnctype int32, masterKey []byte) (*FileStore, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read MIT dump: %w", err)
+	}
+	return ParseWithMasterKey(data, masterEnctype, masterKey)
+}
+
+// ReadStash reads an MIT stash file. A keytab-format stash is selected by
+// K/M principal and highest key version. The legacy format has no principal
+// or key version and therefore reports KVNO 1, matching MIT.
+func ReadStash(path, realm string, kvno ...uint32) (StashKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return StashKey{}, fmt.Errorf("read MIT stash: %w", err)
+	}
+	return ParseStash(data, realm, kvno...)
+}
+
+// ParseStash parses an MIT keytab-format or legacy binary stash.
+// A supplied nonzero kvno selects that keytab version; zero has MIT's
+// IGNORE_VNO meaning. Legacy stashes report the supplied nonzero kvno or 1.
+func ParseStash(data []byte, realm string, kvno ...uint32) (StashKey, error) {
+	var requested uint32
+	if len(kvno) > 0 {
+		requested = kvno[0]
+	}
+	if len(data) >= 2 && binary.BigEndian.Uint16(data[:2]) == keytab.Version {
+		kt, err := keytab.Read(bytes.NewReader(data))
+		if err != nil {
+			return StashKey{}, fmt.Errorf("read MIT keytab stash: %w", err)
+		}
+		return selectKeytabStash(kt, realm, requested)
+	}
+	return parseLegacyStash(data, requested)
+}
+
+// WriteStash writes a modern FILE keytab-format MIT stash containing a K/M
+// entry. The output is restricted to the supported AES master enctypes.
+func WriteStash(w io.Writer, realm string, enctype int32, kvno uint32, masterKey []byte) error {
+	if w == nil {
+		return fmt.Errorf("write MIT stash: nil writer")
+	}
+	if realm == "" {
+		return fmt.Errorf("write MIT stash: empty realm")
+	}
+	if kvno == 0 {
+		return fmt.Errorf("write MIT stash: KVNO must be nonzero")
+	}
+	if err := validateMasterKey(enctype, masterKey); err != nil {
+		return err
+	}
+	name := principal.Principal{
+		Realm: realm, NameType: principal.NTPrincipal,
+		Components: []string{"K", "M"},
+	}
+	return keytab.Write(w, &keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: name, KVNO: kvno, Enctype: enctype,
+		Key: append([]byte(nil), masterKey...),
+	}}})
+}
+
+// WriteStashFile writes a modern FILE keytab-format MIT stash to path.
+func WriteStashFile(path, realm string, enctype int32, kvno uint32, masterKey []byte) error {
+	var data bytes.Buffer
+	if err := WriteStash(&data, realm, enctype, kvno, masterKey); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("write MIT stash: %w", err)
+	}
+	return nil
+}
+
 // Parse reads an MIT kdb5_util version 6 or version 7 dump.
 func Parse(data []byte) (*FileStore, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -550,11 +660,9 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 			lastErr = fmt.Errorf("MIT dump master key: %w", err)
 			continue
 		}
-		records, err := decryptRecords(store.records, masterEType, masterKey)
+		parsed, err := parseWithMasterKey(store, candidate, masterKey)
 		if err == nil {
-			decodeKADMRecords(records, store.Realm)
-			store.records = records
-			return store, nil
+			return parsed, nil
 		}
 		lastErr = err
 	}
@@ -562,6 +670,119 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 		return nil, fmt.Errorf("MIT dump master enctype %d: %w", masterEnctype, lastErr)
 	}
 	return nil, fmt.Errorf("MIT dump master key: no supported enctype decrypted key data: %w", lastErr)
+}
+
+// ParseWithMasterKey parses an MIT dump and decrypts its key data with an
+// explicitly supplied database master key.
+func ParseWithMasterKey(data []byte, masterEnctype int32, masterKey []byte) (*FileStore, error) {
+	store, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	return parseWithMasterKey(store, masterEnctype, masterKey)
+}
+
+func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte) (*FileStore, error) {
+	if store == nil {
+		return nil, fmt.Errorf("MIT dump store is nil")
+	}
+	if err := validateMasterKey(masterEnctype, masterKey); err != nil {
+		return nil, err
+	}
+	if identified, ok, err := dumpMasterEnctype(store); err != nil {
+		return nil, err
+	} else if ok && identified != masterEnctype {
+		return nil, fmt.Errorf("MIT dump master enctype %d does not match supplied enctype %d",
+			identified, masterEnctype)
+	}
+	masterEType, err := crypto.NewRegistry().Get(masterEnctype)
+	if err != nil {
+		return nil, fmt.Errorf("MIT dump master enctype: %w", err)
+	}
+	records, err := decryptRecords(store.records, masterEType, masterKey)
+	if err != nil {
+		return nil, err
+	}
+	decodeKADMRecords(records, store.Realm)
+	store.records = records
+	return store, nil
+}
+
+func validateMasterKey(enctype int32, masterKey []byte) error {
+	etype, err := crypto.NewRegistry().Get(enctype)
+	if err != nil {
+		return fmt.Errorf("MIT stash master enctype: %w", err)
+	}
+	if len(masterKey) != etype.KeySize() {
+		return fmt.Errorf("MIT stash master key has invalid length")
+	}
+	return nil
+}
+
+func selectKeytabStash(kt *keytab.Keytab, realm string, requestedKVNO uint32) (StashKey, error) {
+	if kt == nil {
+		return StashKey{}, fmt.Errorf("MIT keytab stash is nil")
+	}
+	selected := -1
+	inferredRealm := realm
+	for i, entry := range kt.Entries {
+		if len(entry.Principal.Components) != 2 ||
+			entry.Principal.Components[0] != "K" ||
+			entry.Principal.Components[1] != "M" {
+			continue
+		}
+		if inferredRealm == "" {
+			inferredRealm = entry.Principal.Realm
+		}
+		if entry.Principal.Realm != inferredRealm {
+			continue
+		}
+		if requestedKVNO != 0 && entry.KVNO != requestedKVNO {
+			continue
+		}
+		if selected < 0 || entry.KVNO > kt.Entries[selected].KVNO {
+			selected = i
+		}
+	}
+	if selected < 0 {
+		return StashKey{}, fmt.Errorf("MIT keytab stash has no K/M entry")
+	}
+	entry := kt.Entries[selected]
+	if err := validateMasterKey(entry.Enctype, entry.Key); err != nil {
+		return StashKey{}, err
+	}
+	return StashKey{
+		Enctype: entry.Enctype, KVNO: entry.KVNO,
+		Key: append([]byte(nil), entry.Key...),
+	}, nil
+}
+
+func parseLegacyStash(data []byte, requestedKVNO uint32) (StashKey, error) {
+	if len(data) < 6 {
+		return StashKey{}, fmt.Errorf("MIT legacy stash is truncated")
+	}
+	for _, order := range []binary.ByteOrder{binary.BigEndian, binary.LittleEndian} {
+		enctype := int32(order.Uint16(data[:2]))
+		keyLength := order.Uint32(data[2:6])
+		if keyLength == 0 || keyLength > maxLegacyStashKeyLen ||
+			uint64(6)+uint64(keyLength) > uint64(len(data)) {
+			continue
+		}
+		if uint64(6)+uint64(keyLength) != uint64(len(data)) {
+			continue
+		}
+		if err := validateMasterKey(enctype, data[6:6+int(keyLength)]); err != nil {
+			continue
+		}
+		if requestedKVNO == 0 {
+			requestedKVNO = 1
+		}
+		return StashKey{
+			Enctype: enctype, KVNO: requestedKVNO,
+			Key: append([]byte(nil), data[6:6+int(keyLength)]...),
+		}, nil
+	}
+	return StashKey{}, fmt.Errorf("MIT legacy stash has invalid enctype or key length")
 }
 
 func decodeKADMRecords(records map[string]kdb.PrincipalRecord, realm string) {

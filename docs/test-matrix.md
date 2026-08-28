@@ -20,7 +20,7 @@ when absent.
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
-| KDB persistence (MIT dump) | unit + golden | MIT pass (master enctypes 17/18/19/20) | Go dump -> MIT `kdb5_util load` + `kinit` |
+| KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
@@ -63,8 +63,14 @@ MIT dump persistence decrypts database key data with AES master-key enctypes
 17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). Go version-7/r1.11 exports include
 an encrypted `K/M@REALM` record and use the K/M salt from MIT's
 `krb5_principal2salt` rule (`REALMKM`). Dump/parse round trips cover keys,
-KVNOs, salts, flags, expirations, and lifetimes; the integration gate loads a
-Go-generated dump with real MIT `kdb5_util` and authenticates with `kinit`.
+KVNOs, salts, flags, expirations, and lifetimes; `LoadWithStash` reads MIT's
+modern keytab-format stash and its legacy binary fallback (legacy entries are
+treated as KVNO 1). The integration gate loads a Go-generated dump with real
+MIT `kdb5_util` and authenticates with `kinit`, and separately loads a real MIT
+dump using the stash created by `kdb5_util create -s`. Go can write a
+keytab-format K/M stash for the supported AES master enctypes; interoperability
+with MIT's stash writer is covered at the keytab byte-semantics level, while
+the live gate covers MIT stash consumption by Go.
 
 `DefaultRenewableLife` is an opt-in Go server default for renewable requests
 without an explicit `rtime` (including the epoch maximum sentinel), followed
