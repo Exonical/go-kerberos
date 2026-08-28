@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +109,71 @@ func TestASAccountLockout(t *testing.T) {
 	record, _, _ = db.Lookup(*user)
 	if record.FailAuthCount != 0 || !record.LastSuccess.Equal(now.Add(61*time.Second)) {
 		t.Fatalf("successful authentication state = %#v", record)
+	}
+}
+
+func TestASAccountLockoutConcurrentFailuresAreAtomic(t *testing.T) {
+	const attempts = 16
+	now := time.Unix(2000000150, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.CreatePolicy(kdb.PolicyRecord{
+		Name: "concurrent", MaxFailure: attempts, LockoutDuration: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*user)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	record.Policy = "concurrent"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	requests := make([][]byte, attempts)
+	for i := range requests {
+		request := asRequest(*user, service, uint32(i+1))
+		addPreauthPassword(t, &request, "wrong-password", now)
+		requests[i] = mustMarshal(t, request)
+	}
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(attempts)
+	for _, request := range requests {
+		request := request
+		go func() {
+			defer wait.Done()
+			<-start
+			server.HandleMessage(request)
+		}()
+	}
+	close(start)
+	wait.Wait()
+
+	record, _, err = db.Lookup(*user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.FailAuthCount != attempts {
+		t.Fatalf("concurrent failure count = %d, want %d", record.FailAuthCount, attempts)
+	}
+
+	request := asRequest(*user, service, attempts+1)
+	addPreauthPassword(t, &request, "alice-password", now)
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatal(err)
+	}
+	if kerberosError.ErrorCode != kdcErrClientRevoked {
+		t.Fatalf("post-threshold error = %d, want %d", kerberosError.ErrorCode, kdcErrClientRevoked)
 	}
 }
 

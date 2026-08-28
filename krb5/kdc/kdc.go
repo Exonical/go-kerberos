@@ -1386,7 +1386,11 @@ func (s *Server) lockedOut(name principal.Principal, record *kdb.PrincipalRecord
 	if policy.FailureCountInterval > 0 && !record.LastFailed.IsZero() &&
 		!now.Before(record.LastFailed.Add(time.Duration(policy.FailureCountInterval)*time.Second)) {
 		record.FailAuthCount = 0
-		s.persistLockout(name, *record)
+		if recorder, ok := s.DB.(kdb.LockoutRecorder); ok {
+			_ = recorder.ResetAuthFailures(name, record.LastFailed)
+		} else {
+			s.persistLockout(name, *record)
+		}
 	}
 	if policy.MaxFailure == 0 || record.FailAuthCount < policy.MaxFailure {
 		return false
@@ -1399,18 +1403,39 @@ func (s *Server) lockedOut(name principal.Principal, record *kdb.PrincipalRecord
 
 func (s *Server) recordPreauthFailure(name principal.Principal, record *kdb.PrincipalRecord) {
 	policy, ok := s.passwordPolicy(*record)
-	if ok && policy.FailureCountInterval > 0 && !record.LastFailed.IsZero() &&
-		!s.now().Before(record.LastFailed.Add(time.Duration(policy.FailureCountInterval)*time.Second)) {
+	now := s.now()
+	interval := time.Duration(0)
+	if ok && policy.FailureCountInterval > 0 {
+		interval = time.Duration(policy.FailureCountInterval) * time.Second
+	}
+	if recorder, recorderOK := s.DB.(kdb.LockoutRecorder); recorderOK {
+		count, err := recorder.RecordAuthFailure(name, now, interval)
+		if err == nil {
+			record.FailAuthCount = count
+			record.LastFailed = now
+			return
+		}
+	}
+	if interval > 0 && !record.LastFailed.IsZero() &&
+		!now.Before(record.LastFailed.Add(interval)) {
 		record.FailAuthCount = 0
 	}
 	record.FailAuthCount++
-	record.LastFailed = s.now()
+	record.LastFailed = now
 	s.persistLockout(name, *record)
 }
 
 func (s *Server) recordPreauthSuccess(name principal.Principal, record *kdb.PrincipalRecord) {
+	now := s.now()
+	if recorder, ok := s.DB.(kdb.LockoutRecorder); ok {
+		if err := recorder.RecordAuthSuccess(name, now); err == nil {
+			record.FailAuthCount = 0
+			record.LastSuccess = now
+			return
+		}
+	}
 	record.FailAuthCount = 0
-	record.LastSuccess = s.now()
+	record.LastSuccess = now
 	s.persistLockout(name, *record)
 }
 

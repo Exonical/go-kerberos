@@ -99,6 +99,15 @@ type LockoutUpdater interface {
 	UpdateLockout(principal.Principal, uint32, time.Time, time.Time) error
 }
 
+// LockoutRecorder optionally performs authentication status transitions
+// atomically with respect to the store. Stores which do not implement it
+// remain compatible with the KDC's read-modify-write fallback.
+type LockoutRecorder interface {
+	RecordAuthFailure(principal.Principal, time.Time, time.Duration) (uint32, error)
+	ResetAuthFailures(principal.Principal, time.Time) error
+	RecordAuthSuccess(principal.Principal, time.Time) error
+}
+
 // PolicyResolver optionally resolves named password policies for the KDC.
 type PolicyResolver interface {
 	GetPolicy(string) (PolicyRecord, error)
@@ -279,6 +288,72 @@ func (db *Database) UpdateLockout(name principal.Principal, failCount uint32,
 	record.FailAuthCount = failCount
 	record.LastFailed = lastFailed
 	record.LastSuccess = lastSuccess
+	db.principals[key] = record
+	return nil
+}
+
+// RecordAuthFailure atomically resets an expired failure window, increments
+// the failure count, and records the failure time.
+func (db *Database) RecordAuthFailure(name principal.Principal, now time.Time,
+	failureCountInterval time.Duration) (uint32, error) {
+	if db == nil {
+		return 0, ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	record, ok := db.principals[key]
+	if !ok {
+		return 0, ErrPrincipalNotFound
+	}
+	now = now.UTC()
+	if failureCountInterval > 0 && !record.LastFailed.IsZero() &&
+		!now.Before(record.LastFailed.Add(failureCountInterval)) {
+		record.FailAuthCount = 0
+	}
+	record.FailAuthCount++
+	record.LastFailed = now
+	db.principals[key] = record
+	return record.FailAuthCount, nil
+}
+
+// ResetAuthFailures atomically clears the authentication failure count if the
+// recorded failure time still matches expectedLastFailed.
+func (db *Database) ResetAuthFailures(name principal.Principal,
+	expectedLastFailed time.Time) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	record, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	if !record.LastFailed.Equal(expectedLastFailed) {
+		return nil
+	}
+	record.FailAuthCount = 0
+	db.principals[key] = record
+	return nil
+}
+
+// RecordAuthSuccess atomically clears failures and records successful
+// preauthentication.
+func (db *Database) RecordAuthSuccess(name principal.Principal, now time.Time) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	record, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	record.FailAuthCount = 0
+	record.LastSuccess = now.UTC()
 	db.principals[key] = record
 	return nil
 }
