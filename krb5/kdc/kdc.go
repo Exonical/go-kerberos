@@ -32,6 +32,9 @@ import (
 
 const (
 	maxReplayEntries       = 10000
+	defaultMaxDatagramSize = 65536
+	defaultTCPIdleTimeout  = time.Minute
+	defaultTCPConnections  = 45
 	paTGSReq               = 1
 	paEncTimestamp         = 2
 	kdcErrCPrincipal       = 6
@@ -88,8 +91,20 @@ type Server struct {
 	// errors default to KDC_ERR_POLICY or KRB_ERR_GENERIC as appropriate.
 	Authorize func(client, service principal.Principal, asExchange bool) error
 
-	replayMu sync.Mutex
-	replays  map[string]time.Time
+	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
+	// MAX_DGRAM_SIZE value of 65536 bytes.
+	MaxDatagramReplySize int
+	// TCPIdleTimeout bounds each TCP read and write operation. Zero uses
+	// MIT's one-minute KDC TCP idle timeout.
+	TCPIdleTimeout time.Duration
+	// MaxTCPConnections bounds concurrent TCP connections. Zero uses MIT's
+	// default max_stream_data_connections value of 45.
+	MaxTCPConnections int
+
+	replayMu    sync.Mutex
+	replays     map[string]time.Time
+	lookasideMu sync.Mutex
+	lookaside   *lookasideCache
 }
 
 // HandleMessage handles one DER-encoded AS-REQ or TGS-REQ.
@@ -147,25 +162,50 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 
 func (s *Server) serveUDP(conn net.PacketConn) error {
 	buffer := make([]byte, transport.DefaultMaxFrameSize)
+	errCh := make(chan error, 1)
 	for {
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
 		n, address, err := conn.ReadFrom(buffer)
 		if err != nil {
+			select {
+			case workerErr := <-errCh:
+				return workerErr
+			default:
+			}
 			if isClosedNetworkError(err) {
 				return nil
 			}
 			return fmt.Errorf("KDC UDP read: %w", err)
 		}
-		response := s.HandleMessage(buffer[:n])
-		if _, err := conn.WriteTo(response, address); err != nil {
-			if isClosedNetworkError(err) {
-				return nil
-			}
-			return fmt.Errorf("KDC UDP write: %w", err)
+		request := append([]byte(nil), buffer[:n]...)
+		go s.handleUDP(conn, address, request, errCh)
+	}
+}
+
+func (s *Server) handleUDP(conn net.PacketConn, address net.Addr, request []byte, errCh chan<- error) {
+	response := s.dispatch(request, false)
+	if len(response) == 0 {
+		return
+	}
+	if _, err := conn.WriteTo(response, address); err != nil && !isClosedNetworkError(err) {
+		select {
+		case errCh <- fmt.Errorf("KDC UDP write: %w", err):
+		default:
 		}
+		_ = conn.Close()
 	}
 }
 
 func (s *Server) serveTCP(listener net.Listener) error {
+	limit := s.MaxTCPConnections
+	if limit <= 0 {
+		limit = defaultTCPConnections
+	}
+	slots := make(chan struct{}, limit)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -174,17 +214,75 @@ func (s *Server) serveTCP(listener net.Listener) error {
 			}
 			return fmt.Errorf("KDC TCP accept: %w", err)
 		}
-		go s.handleTCPConn(conn)
+		select {
+		case slots <- struct{}{}:
+			go func() {
+				defer func() { <-slots }()
+				s.handleTCPConn(conn)
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (s *Server) handleTCPConn(conn net.Conn) {
 	defer conn.Close()
+	timeout := s.TCPIdleTimeout
+	if timeout <= 0 {
+		timeout = defaultTCPIdleTimeout
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
 	request, err := transport.ReadTCPFrame(conn, transport.DefaultMaxFrameSize)
 	if err != nil {
 		return
 	}
-	_ = transport.WriteTCPFrame(conn, s.HandleMessage(request))
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	_ = transport.WriteTCPFrame(conn, s.dispatch(request, true))
+}
+
+func (s *Server) dispatch(request []byte, isTCP bool) []byte {
+	cache := s.getLookaside()
+	if cached, hit := cache.begin(request, s.now()); hit {
+		if len(cached) == 0 {
+			return nil
+		}
+		return s.limitDatagramReply(cached, isTCP)
+	}
+	response := s.HandleMessage(request)
+	if isSuccessfulReply(response) {
+		cache.complete(request, response, s.now())
+	} else {
+		cache.complete(request, nil, s.now())
+	}
+	return s.limitDatagramReply(response, isTCP)
+}
+
+func (s *Server) getLookaside() *lookasideCache {
+	s.lookasideMu.Lock()
+	defer s.lookasideMu.Unlock()
+	if s.lookaside == nil {
+		s.lookaside = newLookasideCache()
+	}
+	return s.lookaside
+}
+
+func isSuccessfulReply(response []byte) bool {
+	return len(response) > 0 && (response[0] == 0x6b || response[0] == 0x6d)
+}
+
+func (s *Server) limitDatagramReply(response []byte, isTCP bool) []byte {
+	if isTCP || len(response) <= s.maxDatagramReplySize() {
+		return response
+	}
+	return s.errorResponse(transport.ResponseTooBigCode, nil)
+}
+
+func (s *Server) maxDatagramReplySize() int {
+	if s.MaxDatagramReplySize > 0 {
+		return s.MaxDatagramReplySize
+	}
+	return defaultMaxDatagramSize
 }
 
 type fastContext struct {
