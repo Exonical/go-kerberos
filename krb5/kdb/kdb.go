@@ -22,6 +22,12 @@ type Key struct {
 	Salt    string
 }
 
+// TLData is an opaque MIT KDB tagged-data element.
+type TLData struct {
+	Type int16
+	Data []byte
+}
+
 // PrincipalRecord contains a principal and its KDC policy.
 type PrincipalRecord struct {
 	Name               principal.Principal
@@ -34,6 +40,10 @@ type PrincipalRecord struct {
 	MaxRenew           time.Duration
 	Expiration         time.Time
 	PasswordExpiration time.Time
+	LastSuccess        time.Time
+	LastFailed         time.Time
+	FailAuthCount      uint32
+	TLData             []TLData
 }
 
 // PolicyRecord contains the mutable policy fields used by kadmind.
@@ -572,5 +582,10 @@ func copyRecord(record PrincipalRecord) PrincipalRecord {
 		stringsCopy[key] = value
 	}
 	record.Strings = stringsCopy
+	tlData := record.TLData
+	record.TLData = make([]TLData, len(tlData))
+	for i, data := range tlData {
+		record.TLData[i] = TLData{Type: data.Type, Data: append([]byte(nil), data.Data...)}
+	}
 	return record
 }
