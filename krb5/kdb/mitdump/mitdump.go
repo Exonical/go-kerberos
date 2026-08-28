@@ -180,8 +180,37 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 	var out bytes.Buffer
 	out.WriteString(headerVersion7)
 	out.WriteByte('\n')
+	var historyKey *kdb.Key
+	historyName, err := principal.Parse("kadmin/history@" + db.Realm)
+	if err == nil {
+		if record, ok, lookupErr := db.Lookup(*historyName); lookupErr == nil && ok {
+			if key, exists := record.Keys[crypto.EnctypeAES256SHA1]; exists {
+				if etype, etypeErr := crypto.NewRegistry().Get(key.Enctype); etypeErr == nil &&
+					len(key.Key) == etype.KeySize() {
+					historyKey = &key
+				}
+			}
+			if historyKey == nil {
+				enctypes := make([]int32, 0, len(record.Keys))
+				for enctype := range record.Keys {
+					enctypes = append(enctypes, enctype)
+				}
+				sort.Slice(enctypes, func(i, j int) bool { return enctypes[i] < enctypes[j] })
+				for _, enctype := range enctypes {
+					key := record.Keys[enctype]
+					etype, etypeErr := crypto.NewRegistry().Get(key.Enctype)
+					if etypeErr != nil || len(key.Key) != etype.KeySize() {
+						continue
+					}
+					value := key
+					historyKey = &value
+					break
+				}
+			}
+		}
+	}
 	for _, record := range records {
-		if err := writePrincipalRecord(&out, record, masterEType, masterKey); err != nil {
+		if err := writePrincipalRecord(&out, record, masterEType, masterKey, historyKey); err != nil {
 			return nil, err
 		}
 	}
@@ -189,7 +218,7 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 }
 
 func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
-	masterEType crypto.EType, masterKey []byte) error {
+	masterEType crypto.EType, masterKey []byte, historyKey *kdb.Key) error {
 	name, err := record.Name.Format()
 	if err != nil {
 		return fmt.Errorf("MIT dump principal: %w", err)
@@ -204,12 +233,25 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 		return fmt.Errorf("MIT dump principal %q has too many keys", name)
 	}
 	tlData := append([]kdb.TLData(nil), record.TLData...)
-	if record.Policy != "" && !hasKADMData(tlData) {
+	if historyKey != nil && (len(record.PasswordHistory) > 0 ||
+		record.Policy != "" || record.KADMAuxAttributes != 0) {
+		data, err := kdb.EncodeKADMData(kdb.KADMData{
+			Policy: record.Policy, AuxAttributes: record.KADMAuxAttributes,
+			OldKeyNext:       record.AdminHistoryNext,
+			AdminHistoryKVNO: record.AdminHistoryKVNO,
+			NormalSalt:       record.Name.Realm + strings.Join(record.Name.Components, ""),
+			OldKeys:          record.PasswordHistory,
+		}, historyKey)
+		if err != nil {
+			return fmt.Errorf("MIT dump principal %q KADM data: %w", name, err)
+		}
+		tlData = replaceKADMData(tlData, data)
+	} else if record.Policy != "" && !hasKADMData(tlData) {
 		data, err := encodeKADMData(record.Policy)
 		if err != nil {
 			return fmt.Errorf("MIT dump principal %q policy: %w", name, err)
 		}
-		tlData = append(tlData, kdb.TLData{Type: 3, Data: data})
+		tlData = append(tlData, kdb.TLData{Type: kdb.KADMDataType, Data: data})
 	}
 	if len(tlData) > int(^uint16(0)) {
 		return fmt.Errorf("MIT dump principal %q has too much tagged data", name)
@@ -285,6 +327,16 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 	return nil
 }
 
+func replaceKADMData(data []kdb.TLData, encoded []byte) []kdb.TLData {
+	out := make([]kdb.TLData, 0, len(data)+1)
+	for _, item := range data {
+		if item.Type != kdb.KADMDataType {
+			out = append(out, item)
+		}
+	}
+	return append(out, kdb.TLData{Type: kdb.KADMDataType, Data: encoded})
+}
+
 func dumpOctets(data []byte) string {
 	if len(data) == 0 {
 		return "-1"
@@ -302,32 +354,7 @@ func hasKADMData(data []kdb.TLData) bool {
 }
 
 func encodeKADMData(policy string) ([]byte, error) {
-	if len(policy) == 0 {
-		return nil, fmt.Errorf("policy name is empty")
-	}
-	if len(policy) > int(^uint32(0)-1) {
-		return nil, fmt.Errorf("policy name is too long")
-	}
-	var out bytes.Buffer
-	var word [4]byte
-	binary.BigEndian.PutUint32(word[:], 0x12345c01)
-	out.Write(word[:])
-	binary.BigEndian.PutUint32(word[:], uint32(len(policy)+1))
-	out.Write(word[:])
-	out.WriteString(policy)
-	out.WriteByte(0)
-	for out.Len()%4 != 0 {
-		out.WriteByte(0)
-	}
-	binary.BigEndian.PutUint32(word[:], 0x00000800) // KADM5_POLICY
-	out.Write(word[:])
-	binary.BigEndian.PutUint32(word[:], 0) // old_key_next
-	out.Write(word[:])
-	binary.BigEndian.PutUint32(word[:], 2) // INITIAL_HIST_KVNO
-	out.Write(word[:])
-	binary.BigEndian.PutUint32(word[:], 0) // old_keys array length
-	out.Write(word[:])
-	return out.Bytes(), nil
+	return kdb.EncodeKADMData(kdb.KADMData{Policy: policy, AdminHistoryKVNO: 2}, nil)
 }
 
 func encodeKeyData(name principal.Principal, key kdb.Key,
@@ -448,6 +475,11 @@ func Parse(data []byte) (*FileStore, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		// Version 6/7 dumps may include standalone password-policy records.
+		// Policy references are carried by each principal's KADM_DATA.
+		if strings.HasPrefix(line, "policy\t") {
+			continue
+		}
 		record, err := parseRecord(line)
 		if err != nil {
 			return nil, fmt.Errorf("MIT dump line %d: %w", lineNo, err)
@@ -520,6 +552,7 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 		}
 		records, err := decryptRecords(store.records, masterEType, masterKey)
 		if err == nil {
+			decodeKADMRecords(records, store.Realm)
 			store.records = records
 			return store, nil
 		}
@@ -529,6 +562,38 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 		return nil, fmt.Errorf("MIT dump master enctype %d: %w", masterEnctype, lastErr)
 	}
 	return nil, fmt.Errorf("MIT dump master key: no supported enctype decrypted key data: %w", lastErr)
+}
+
+func decodeKADMRecords(records map[string]kdb.PrincipalRecord, realm string) {
+	historyKeys := make([]kdb.Key, 0)
+	for _, record := range records {
+		if record.Name.Realm != realm || len(record.Name.Components) != 2 ||
+			record.Name.Components[0] != "kadmin" || record.Name.Components[1] != "history" {
+			continue
+		}
+		for _, key := range record.Keys {
+			historyKeys = append(historyKeys, key)
+		}
+	}
+	for name, record := range records {
+		for _, item := range record.TLData {
+			if item.Type != kdb.KADMDataType {
+				continue
+			}
+			normalSalt := record.Name.Realm + strings.Join(record.Name.Components, "")
+			decoded, err := kdb.DecodeKADMData(item.Data, historyKeys, normalSalt)
+			if err != nil {
+				continue
+			}
+			record.Policy = decoded.Policy
+			record.KADMAuxAttributes = decoded.AuxAttributes
+			record.AdminHistoryNext = decoded.OldKeyNext
+			record.AdminHistoryKVNO = decoded.AdminHistoryKVNO
+			record.PasswordHistory = decoded.OldKeys
+			break
+		}
+		records[name] = record
+	}
 }
 
 func dumpMasterEnctype(store *FileStore) (int32, bool, error) {
@@ -678,6 +743,7 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 	cursor += 8
 	tlData := make([]kdb.TLData, 0, header[2])
 	var policy string
+	var kadmAuxAttributes, adminHistoryNext, adminHistoryKVNO uint32
 	for i := uint64(0); i < header[2]; i++ {
 		if cursor+2 >= len(fields) {
 			return kdb.PrincipalRecord{}, fmt.Errorf("truncated tagged data")
@@ -704,6 +770,12 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 		if tagType == 3 {
 			if parsedPolicy, ok := decodeKADMPolicy(data); ok {
 				policy = parsedPolicy
+			}
+			if metadata, metadataErr := kdb.ParseKADMDataMetadata(data); metadataErr == nil {
+				policy = metadata.Policy
+				kadmAuxAttributes = metadata.AuxAttributes
+				adminHistoryNext = metadata.OldKeyNext
+				adminHistoryKVNO = metadata.AdminHistoryKVNO
 			}
 		}
 		cursor += 3
@@ -800,6 +872,8 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 		Expiration: expiration, PasswordExpiration: passwordExpiration,
 		LastSuccess: lastSuccess, LastFailed: lastFailed,
 		FailAuthCount: uint32(failAuthCount), TLData: tlData, Policy: policy,
+		KADMAuxAttributes: kadmAuxAttributes, AdminHistoryNext: adminHistoryNext,
+		AdminHistoryKVNO: adminHistoryKVNO,
 	}, nil
 }
 

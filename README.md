@@ -155,8 +155,11 @@ matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
 transited-policy checking are intentionally out of scope.
 
 Password history is retained as derived key sets in the in-memory
-`PrincipalRecord`; it is never stored as cleartext. This store-native history
-is not represented in MIT version-7 dump files. The RFC 3244 server accepts
+`PrincipalRecord` and is never stored as cleartext. When `kadmin/history` is
+present, MIT version-7 dumps encode that history in `KRB5_TL_KADM_DATA` with
+historical keys encrypted under the history principal's key. Without that
+principal, native history enforcement remains available but history cannot be
+exported to MIT dumps. The RFC 3244 server accepts
 MIT's request KRB-PRIV form even when its encrypted replay fields are absent;
 AP-REQ replay and clock-skew checks remain enforced, while timestamp-bearing
 KRB-PRIV requests are freshness-checked.

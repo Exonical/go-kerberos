@@ -32,9 +32,14 @@ type TLData struct {
 type PrincipalRecord struct {
 	Name principal.Principal
 	Keys map[int32]Key
-	// PasswordHistory contains prior derived key sets, newest first. It is
-	// store-native metadata and is not included in MIT dump records.
-	PasswordHistory    []map[int32]Key
+	// PasswordHistory contains prior derived key sets, newest first. When a
+	// kadmin/history key is available, it is serialized in MIT KADM_DATA.
+	PasswordHistory []map[int32]Key
+	// KADMAuxAttributes and AdminHistoryKVNO are fields from MIT's
+	// osa_princ_ent_rec KADM_DATA record.
+	KADMAuxAttributes  uint32
+	AdminHistoryNext   uint32
+	AdminHistoryKVNO   uint32
 	LastPasswordChange time.Time
 	Strings            map[string]string
 	KVNO               uint32
@@ -229,6 +234,28 @@ func deriveRecord(name principal.Principal, password string, kvno uint32) (Princ
 		KVNO: kvno, LastPasswordChange: time.Now().UTC()}, nil
 }
 
+func deriveKeys(name principal.Principal, password string, current map[int32]Key,
+	kvno uint32) (map[int32]Key, error) {
+	keys := make(map[int32]Key, len(current))
+	normalSalt := name.Realm + strings.Join(name.Components, "")
+	for enctype, old := range current {
+		etype, err := crypto.NewRegistry().Get(enctype)
+		if err != nil {
+			return nil, err
+		}
+		salt := old.Salt
+		if salt == "" {
+			salt = normalSalt
+		}
+		derived, err := etype.StringToKey([]byte(password), []byte(salt), nil)
+		if err != nil {
+			return nil, err
+		}
+		keys[enctype] = Key{Enctype: enctype, KVNO: kvno, Key: derived, Salt: old.Salt}
+	}
+	return keys, nil
+}
+
 // DeletePrincipal removes a principal.
 func (db *Database) DeletePrincipal(name principal.Principal) error {
 	if db == nil {
@@ -381,6 +408,12 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 	if err != nil {
 		return err
 	}
+	if len(current.Keys) > 0 && len(current.Keys) != len(next.Keys) {
+		next.Keys, err = deriveKeys(current.Name, password, current.Keys, current.KVNO+1)
+		if err != nil {
+			return err
+		}
+	}
 	if policy != nil {
 		if policy.MinLength > 0 && int32(len(password)) < policy.MinLength {
 			return ErrPasswordTooShort
@@ -392,7 +425,13 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 			now.Before(current.LastPasswordChange.Add(time.Duration(policy.MinLife)*time.Second)) {
 			return ErrPasswordTooSoon
 		}
+		var historyKey *Key
 		if policy.HistoryNum > 0 {
+			historyKey = db.historyKeyLocked()
+			if historyKey != nil && current.AdminHistoryKVNO != 0 &&
+				current.AdminHistoryKVNO != historyKey.KVNO {
+				current.PasswordHistory = nil
+			}
 			historyLimit := int(policy.HistoryNum) - 1
 			limit := historyLimit
 			if passwordMatchesKeys(next.Keys, current.Keys) {
@@ -413,6 +452,35 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 				history = history[:historyLimit]
 			}
 			current.PasswordHistory = history
+			current.AdminHistoryNext = 0
+			if historyLimit > len(history) {
+				current.AdminHistoryNext = uint32(len(history))
+			}
+			if historyKey != nil {
+				current.AdminHistoryKVNO = historyKey.KVNO
+				policyName := current.Policy
+				if policyName == "" {
+					policyName = policy.Name
+				}
+				data, encodeErr := EncodeKADMData(KADMData{
+					Policy: policyName, AuxAttributes: current.KADMAuxAttributes,
+					OldKeyNext:       current.AdminHistoryNext,
+					AdminHistoryKVNO: current.AdminHistoryKVNO,
+					NormalSalt:       current.Name.Realm + strings.Join(current.Name.Components, ""),
+					OldKeys:          current.PasswordHistory,
+				}, historyKey)
+				if encodeErr != nil {
+					return encodeErr
+				}
+				tlData := make([]TLData, 0, len(current.TLData)+1)
+				for _, item := range current.TLData {
+					if item.Type != KADMDataType {
+						tlData = append(tlData, item)
+					}
+				}
+				tlData = append(tlData, TLData{Type: KADMDataType, Data: data})
+				current.TLData = tlData
+			}
 		}
 		if policy.MaxLife > 0 {
 			current.PasswordExpiration = now.Add(time.Duration(policy.MaxLife) * time.Second)
@@ -424,6 +492,35 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 	current.KVNO = next.KVNO
 	current.LastPasswordChange = now.UTC()
 	db.principals[key] = current
+	return nil
+}
+
+func (db *Database) historyKeyLocked() *Key {
+	record, ok := db.principals[db.Realm+"\x00kadmin\x00history"]
+	if !ok || len(record.Keys) == 0 {
+		return nil
+	}
+	if key, ok := record.Keys[crypto.EnctypeAES256SHA1]; ok {
+		if etype, err := crypto.NewRegistry().Get(key.Enctype); err == nil &&
+			len(key.Key) == etype.KeySize() {
+			key.Key = append([]byte(nil), key.Key...)
+			return &key
+		}
+	}
+	enctypes := make([]int32, 0, len(record.Keys))
+	for enctype := range record.Keys {
+		enctypes = append(enctypes, enctype)
+	}
+	sort.Slice(enctypes, func(i, j int) bool { return enctypes[i] < enctypes[j] })
+	for _, enctype := range enctypes {
+		key := record.Keys[enctype]
+		etype, err := crypto.NewRegistry().Get(key.Enctype)
+		if err != nil || len(key.Key) != etype.KeySize() {
+			continue
+		}
+		key.Key = append([]byte(nil), key.Key...)
+		return &key
+	}
 	return nil
 }
 

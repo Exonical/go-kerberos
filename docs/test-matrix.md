@@ -109,11 +109,14 @@ without exposing password material.
 Kadmind and the RFC 3244 server enforce MIT-style minimum length and byte-oriented character classes,
 minimum password lifetime for self-service changes, password history, and
 maximum password lifetime. Administrator changes with modify privilege bypass
-minimum lifetime. Password history is retained as derived key sets in the
-in-memory KDB and is intentionally store-native rather than encoded in the
-MIT dump format. The RFC 3244 `kpasswd.Server` serves password changes and
-set-password requests over UDP and TCP; the live integration suite covers
-the Go server with the MIT `kpasswd` client.
+minimum lifetime. Password history is encoded in MIT `KRB5_TL_KADM_DATA` when
+the database contains `kadmin/history`, with historical key data encrypted
+using that principal's key. The live persistence suite covers MIT-to-Go and
+Go-to-MIT history round trips. Without a history principal, the KDB retains
+native history enforcement but cannot emit encrypted MIT history entries.
+The RFC 3244 `kpasswd.Server` serves password changes and set-password requests
+over UDP and TCP; the live integration suite covers the Go server with the MIT
+`kpasswd` client.
 
 The KDC applies named-policy lockout controls to PA-ENC-TIMESTAMP failures.
 Failure counters reset after `FailureCountInterval`, accounts are permanently
