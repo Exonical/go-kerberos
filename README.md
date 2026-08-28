@@ -38,8 +38,10 @@ disposable integration test environments.
   used when a store implements `kdb.LockoutUpdater`.
 - **RFC 3244 kpasswd server**: `kpasswd.Server` serves password changes and
   set-password requests over UDP and TCP, verifies `kadmin/changepw`
-  AP-REQs, and applies the same policy and ACL controls as kadm5. Real MIT
-  `kpasswd` interoperability is covered by the integration suite.
+  AP-REQs, and applies the same policy and ACL controls as kadm5. Its UDP
+  response lookaside cache replays identical retransmissions without applying
+  a password change twice. Real MIT `kpasswd` interoperability is covered by
+  the integration suite.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
