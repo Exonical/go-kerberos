@@ -41,6 +41,9 @@ type APReqState = APReq
 // APReqOptions controls optional authenticator fields when building AP-REQs.
 type APReqOptions struct {
 	Checksum *protocol.Checksum
+	// NoSubKey omits the authenticator subkey. Some protocols, including MIT
+	// kprop, use the ticket session key for the authenticated context.
+	NoSubKey bool
 }
 
 // VerifiedAPReq is the acceptor state associated with a verified AP-REQ.
@@ -94,16 +97,19 @@ func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now 
 	}
 	now = now.UTC()
 	cusec := int32(now.Nanosecond() / 1000)
-	subkeyValue := make([]byte, etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
-		return nil, nil, fmt.Errorf("build AP-REQ subkey: %w", err)
+	var subkey *protocol.EncryptionKey
+	if !options.NoSubKey {
+		subkeyValue := make([]byte, etype.KeySize())
+		if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+			return nil, nil, fmt.Errorf("build AP-REQ subkey: %w", err)
+		}
+		subkey = &protocol.EncryptionKey{KeyType: creds.Key.KeyType, KeyValue: subkeyValue}
 	}
 	var sequenceBytes [4]byte
 	if _, err := io.ReadFull(crypto.RandomSource, sequenceBytes[:]); err != nil {
 		return nil, nil, fmt.Errorf("build AP-REQ sequence number: %w", err)
 	}
 	sequence := binary.BigEndian.Uint32(sequenceBytes[:]) & 0x7fffffff
-	subkey := &protocol.EncryptionKey{KeyType: creds.Key.KeyType, KeyValue: subkeyValue}
 	authenticator := protocol.Authenticator{
 		AuthenticatorVNO: 5,
 		CRealm:           creds.Client.Realm,
@@ -242,18 +248,33 @@ func BuildAPRep(request *VerifiedAPReq) ([]byte, error) {
 	if request == nil {
 		return nil, fmt.Errorf("build AP-REP: nil request")
 	}
-	return buildAPRepWithTime(request, request.AuthenticatorTime)
+	return buildAPRepWithTimeAndSequence(request, request.AuthenticatorTime, nil)
 }
 
 func buildAPRepWithTime(request *VerifiedAPReq, ctime time.Time) ([]byte, error) {
+	return buildAPRepWithTimeAndSequence(request, ctime, nil)
+}
+
+// BuildAPRepWithSequence constructs an AP-REP with an explicit acceptor
+// sequence number. It is used by protocols such as kprop which enable
+// sequence-only authenticated message contexts.
+func BuildAPRepWithSequence(request *VerifiedAPReq, sequence uint32) ([]byte, error) {
+	if request == nil {
+		return nil, fmt.Errorf("build AP-REP: nil request")
+	}
+	return buildAPRepWithTimeAndSequence(request, request.AuthenticatorTime, &sequence)
+}
+
+func buildAPRepWithTimeAndSequence(request *VerifiedAPReq, ctime time.Time, sequence *uint32) ([]byte, error) {
 	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
 	if err != nil {
 		return nil, err
 	}
 	cusec := request.Cusec
 	part := protocol.EncAPRepPart{
-		Ctime: types.KerberosTime{Time: ctime.UTC(), Microseconds: cusec, Present: true},
-		Cusec: cusec,
+		Ctime:     types.KerberosTime{Time: ctime.UTC(), Microseconds: cusec, Present: true},
+		Cusec:     cusec,
+		SeqNumber: sequence,
 	}
 	plain, err := asn1.Marshal(part)
 	if err != nil {

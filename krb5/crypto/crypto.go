@@ -40,6 +40,14 @@ type EType interface {
 	VerifyChecksum(key []byte, usage uint32, data, checksum []byte) error
 }
 
+// StatefulEType is implemented by block enctypes which support the MIT
+// auth-context cipher state used by KRB-PRIV streams.
+type StatefulEType interface {
+	EType
+	EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) (ciphertext, nextIV []byte, err error)
+	DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte) (plaintext, nextIV []byte, err error)
+}
+
 // RandomSource supplies confounders for encryption. Tests may replace it with
 // a deterministic reader; production code leaves it as rand.Reader.
 var RandomSource types.RandomSource = cryptorand.Reader
@@ -89,21 +97,29 @@ func (e aesEType) StringToKey(password, salt, params []byte) ([]byte, error) {
 }
 
 func (e aesEType) Encrypt(key []byte, usage uint32, plaintext []byte) ([]byte, error) {
+	out, _, err := e.EncryptWithIV(key, usage, plaintext, make([]byte, 16))
+	return out, err
+}
+
+func (e aesEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
-		return nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
+	}
+	if len(iv) != 16 {
+		return nil, nil, fmt.Errorf("etype %d encrypt: invalid IV length %d", e.id, len(iv))
 	}
 	confounder := make([]byte, 16)
 	if _, err := io.ReadFull(RandomSource, confounder); err != nil {
-		return nil, fmt.Errorf("etype %d encrypt confounder: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d encrypt confounder: %w", e.id, err)
 	}
 	plain := append(append([]byte(nil), confounder...), plaintext...)
 	ke, ki, err := e.deriveEncryptionKeys(key, usage)
 	if err != nil {
-		return nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
 	}
-	encrypted, err := aescts.Encrypt(ke, make([]byte, 16), plain)
+	encrypted, nextIV, err := aescts.EncryptWithState(ke, iv, plain)
 	if err != nil {
-		return nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
 	}
 	var macInput []byte
 	if e.sha2 {
@@ -113,45 +129,74 @@ func (e aesEType) Encrypt(key []byte, usage uint32, plaintext []byte) ([]byte, e
 		macInput = plain
 	}
 	mac := hmacDigest(e.hash, ki, macInput)[:e.checksumSize]
-	return append(encrypted, mac...), nil
+	return append(encrypted, mac...), nextIV, nil
 }
 
 func (e aesEType) Decrypt(key []byte, usage uint32, ciphertext []byte) ([]byte, error) {
+	out, _, err := e.DecryptWithIV(key, usage, ciphertext, make([]byte, 16))
+	return out, err
+}
+
+func (e aesEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
-		return nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
+	}
+	if len(iv) != 16 {
+		return nil, nil, fmt.Errorf("etype %d decrypt: invalid IV length %d", e.id, len(iv))
 	}
 	if len(ciphertext) < 16+e.checksumSize {
-		return nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 	}
 	encrypted := ciphertext[:len(ciphertext)-e.checksumSize]
 	suppliedMAC := ciphertext[len(ciphertext)-e.checksumSize:]
 	ke, ki, err := e.deriveEncryptionKeys(key, usage)
 	if err != nil {
-		return nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
 	}
 	var macInput []byte
 	var plain []byte
+	var nextIV []byte
 	if e.sha2 {
 		macInput = append(make([]byte, 0, 16+len(encrypted)), make([]byte, 16)...)
 		macInput = append(macInput, encrypted...)
 	} else {
-		plain, err = aescts.Decrypt(ke, make([]byte, 16), encrypted)
+		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)
 		if err != nil {
-			return nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+			return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 		}
 		macInput = plain
 	}
 	expectedMAC := hmacDigest(e.hash, ki, macInput)[:e.checksumSize]
 	if !hmac.Equal(expectedMAC, suppliedMAC) {
-		return nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 	}
 	if plain == nil {
-		plain, err = aescts.Decrypt(ke, make([]byte, 16), encrypted)
+		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)
 	}
 	if err != nil || len(plain) < 16 {
-		return nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 	}
-	return plain[16:], nil
+	return plain[16:], nextIV, nil
+}
+
+// EncryptWithIV performs authenticated encryption with an explicit CBC-CTS
+// IV and returns the next MIT auth-context state.
+func EncryptWithIV(etype EType, key []byte, usage uint32, plaintext, iv []byte) ([]byte, []byte, error) {
+	stateful, ok := etype.(StatefulEType)
+	if !ok {
+		return nil, nil, fmt.Errorf("etype %d does not support cipher state", etype.ID())
+	}
+	return stateful.EncryptWithIV(key, usage, plaintext, iv)
+}
+
+// DecryptWithIV performs authenticated decryption with an explicit CBC-CTS IV
+// and returns the next MIT auth-context state.
+func DecryptWithIV(etype EType, key []byte, usage uint32, ciphertext, iv []byte) ([]byte, []byte, error) {
+	stateful, ok := etype.(StatefulEType)
+	if !ok {
+		return nil, nil, fmt.Errorf("etype %d does not support cipher state", etype.ID())
+	}
+	return stateful.DecryptWithIV(key, usage, ciphertext, iv)
 }
 
 func (e aesEType) Checksum(key []byte, usage uint32, data []byte) ([]byte, error) {

@@ -1,6 +1,7 @@
 package iprop
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -15,7 +16,9 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/kprop"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -399,9 +402,9 @@ func (c *Client) readRecord(ctx context.Context) ([]byte, error) {
 	return data, err
 }
 
-// Server implements the MIT iprop RPC master. Full-resync replies are
-// implemented, but the separate kprop dump push is intentionally not started
-// by this package; callers must seed a replica before incremental polling.
+// Server implements the MIT iprop RPC master. DumpWithMasterPassword provides
+// the separate kprop full-resync payload; callers may push it to a replica's
+// kprop.Server.
 type Server struct {
 	Database *kdb.Database
 	Keytab   *keytab.Keytab
@@ -414,6 +417,26 @@ type Server struct {
 	ErrorLog        func(error)
 	Now             func() time.Time
 	wg              sync.WaitGroup
+}
+
+// DumpWithMasterPassword serializes the current database for a kprop
+// full-resync transfer.
+func (s *Server) DumpWithMasterPassword(password string) ([]byte, error) {
+	if s == nil || s.Database == nil {
+		return nil, errors.New("iprop: nil database")
+	}
+	return mitdump.DumpWithMasterPassword(s.Database, password)
+}
+
+// PushFullResync serializes the current database and transfers it to a
+// connected replica kprop server.
+func (s *Server) PushFullResync(ctx context.Context, conn net.Conn,
+	credentials *client.Credentials, password string) error {
+	dump, err := s.DumpWithMasterPassword(password)
+	if err != nil {
+		return err
+	}
+	return kprop.Send(ctx, conn, credentials, bytes.NewReader(dump), uint64(len(dump)))
 }
 
 func NewServer(database *kdb.Database, serviceKeytab *keytab.Keytab) *Server {
@@ -763,6 +786,20 @@ type Replica struct {
 	Cursor        Last
 	MasterEnctype int32
 	MasterKey     []byte
+	// LoadDump, when set, applies a received kprop full-resync dump and updates
+	// the local store. It is invoked by the kprop server integration.
+	LoadDump func(io.Reader, uint64) error
+}
+
+// KpropServer returns a kprop receiver which delegates loaded dumps to
+// Replica.LoadDump. A caller can run it on the replica's kprop listener.
+func (r *Replica) KpropServer(serviceKeytab *keytab.Keytab, authorize func(principal.Principal) error) (*kprop.Server, error) {
+	if r == nil || serviceKeytab == nil || r.LoadDump == nil {
+		return nil, errors.New("iprop: incomplete kprop replica")
+	}
+	return &kprop.Server{
+		Keytab: serviceKeytab, Authorize: authorize, Load: r.LoadDump,
+	}, nil
 }
 
 func (r *Replica) Poll(ctx context.Context) (UpdateStatus, error) {

@@ -52,9 +52,9 @@ disposable integration test environments.
   integration suite exercises a Go replica pulling `GET_UPDATES` from a real
   MIT `kadmind`, bootstrapping its cursor from an MIT ipropx dump header. The
   reverse `kpropd` gate runs against a real MIT 1.19 `kpropd -S` when the
-  CI/runtime package is installed. The separate MIT kprop dump push used
-  after full resync is not implemented, so the gate bootstraps the replica
-  from a compatible ipropx dump before polling.
+  CI/runtime package is installed. The MIT kprop full-resync dump protocol is
+  implemented in `krb5/kprop`, including chained AES KRB-PRIV transfer and
+  load-before-ack handling.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
