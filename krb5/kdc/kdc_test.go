@@ -1176,6 +1176,32 @@ func TestASDisablePreauth(t *testing.T) {
 	}
 }
 
+func TestASDisablePreauthAuthorizationHook(t *testing.T) {
+	now := time.Unix(2000000160, 0).UTC()
+	server, _ := testServer(t, now)
+	server.DisablePreauth = true
+	server.Authorize = func(principal.Principal, principal.Principal, bool) error {
+		return errors.New("preauth-disabled authorization denied")
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	request := asRequest(user, service, 160)
+	request.PAData = nil
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatalf("preauth-disabled authorization response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrPolicy {
+		t.Fatalf("preauth-disabled authorization code = %d, want %d", kerberosError.ErrorCode, kdcErrPolicy)
+	}
+	if kerberosError.EText == nil || *kerberosError.EText != "preauth-disabled authorization denied" {
+		t.Fatalf("preauth-disabled authorization text = %v", kerberosError.EText)
+	}
+}
+
 func TestASAndTGSApplyDefaultTicketLife(t *testing.T) {
 	now := time.Unix(2000000175, 0).UTC()
 	server, kclient := testServer(t, now)
