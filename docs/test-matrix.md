@@ -23,7 +23,7 @@ when absent.
 | KDB persistence (MIT dump) | unit + golden | MIT pass (master enctypes 17/18/19/20) | Go dump -> MIT `kdb5_util load` + `kinit` |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
-| RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
+| RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
@@ -82,13 +82,19 @@ available. The implementation currently uses the RFC 3526 MODP group 14
 profile and does not implement group 2 negotiation or newer algorithm-agility
 KDF profiles.
 
-The client implements RFC 3244 password changes and set-password requests
+The client and server implement RFC 3244 password changes and set-password requests
 against MIT `kadmind` on the kpasswd service port (464 by default; the isolated
 integration harness uses a high, configured port because it runs without root
 privileges). It sends an AP-REQ and KRB-PRIV request, verifies the AP-REP, and
 decrypts the result code. Set-password requests encode RFC 3244
 `ChangePasswdData` with the target principal and accept either version 1 or
 0xff80 in the reply.
+`kpasswd.Server` accepts both request versions over UDP and TCP, authenticates
+the `kadmin/changepw` service, decrypts KRB-PRIV with the authenticator
+subkey, enforces named password policies, and uses the same ACL callback as
+the kadm5 server for administrative target changes. Real MIT `kpasswd`
+integration covers successful self-service changes and visible policy
+rejections; the Go client covers version-0xff80 set-password requests.
 Because MIT `kadmind` enables sequence protection but does not request timestamp
 protection on its reply KRB-PRIV, a reply must contain either a fresh timestamp
 or a sequence number; replies containing neither are rejected.
@@ -97,7 +103,7 @@ an authorized admin setting Alice's password, followed by Go AS exchanges with
 the resulting passwords. Password policy and authorization errors are returned
 without exposing password material.
 
-Kadmind enforces MIT-style minimum length and byte-oriented character classes,
+Kadmind and the RFC 3244 server enforce MIT-style minimum length and byte-oriented character classes,
 minimum password lifetime for self-service changes, password history, and
 maximum password lifetime. Administrator changes with modify privilege bypass
 minimum lifetime. Password history is retained as derived key sets in the

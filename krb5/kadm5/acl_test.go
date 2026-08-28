@@ -128,6 +128,7 @@ func TestACLSelfPasswordChange(t *testing.T) {
 	}
 	self := aclPrincipal(t, "user@EXAMPLE.COM")
 	if !acl.Check(self, "change-password", self) ||
+		!acl.Check(self, "set-password", self) ||
 		!acl.Check(self, "randkey", self) {
 		t.Fatal("ACL self key change was denied")
 	}

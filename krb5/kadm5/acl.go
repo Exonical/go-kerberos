@@ -98,7 +98,7 @@ func (a *ACL) Check(client principal.Principal, operation string,
 	if a == nil {
 		return false
 	}
-	if (operation == "change-password" || operation == "randkey") &&
+	if (operation == "change-password" || operation == "set-password" || operation == "randkey") &&
 		principalEqual(client, target) {
 		return true
 	}
@@ -148,7 +148,7 @@ func aclOperation(operation string) (uint32, bool) {
 		return aclDelete, true
 	case "modify", "modify-policy":
 		return aclModify, true
-	case "change-password":
+	case "change-password", "set-password":
 		return aclChangePassword, true
 	case "get", "get-policy":
 		return aclInquire, true
