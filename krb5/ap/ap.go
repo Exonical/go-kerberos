@@ -48,6 +48,7 @@ type VerifiedAPReq struct {
 	Client            principal.Principal
 	Server            principal.Principal
 	SessionKey        protocol.EncryptionKey
+	Flags             types.TicketFlags
 	AuthenticatorTime time.Time
 	Cusec             int32
 	SubKey            *protocol.EncryptionKey
@@ -226,6 +227,7 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 			Components: append([]string(nil), request.Ticket.SName.NameString...),
 		},
 		SessionKey:        copyEncryptionKey(ticketPart.Key),
+		Flags:             ticketPart.Flags,
 		AuthenticatorTime: authenticator.Ctime.Time,
 		Cusec:             authenticator.Cusec,
 		SubKey:            copyEncryptionKeyPointer(authenticator.SubKey),

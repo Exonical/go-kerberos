@@ -36,6 +36,10 @@ disposable integration test environments.
   failures, failure intervals, temporary/permanent lockouts, and expired
   passwords. `kdb.Store` remains backward compatible; lockout persistence is
   used when a store implements `kdb.LockoutUpdater`.
+- **RFC 3244 kpasswd server**: `kpasswd.Server` serves password changes and
+  set-password requests over UDP and TCP, verifies `kadmin/changepw`
+  AP-REQs, and applies the same policy and ACL controls as kadm5. Real MIT
+  `kpasswd` interoperability is covered by the integration suite.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
@@ -123,7 +127,7 @@ Principal aliases with MIT-compatible AS/TGS canonicalization, and S4U
 (constrained delegation), including KDC-side protocol transition and
 forwarded TGTs, PKINIT, KDC replay cache and renewals,
 kdb persistence (including encrypted MIT version-7 dump export), server-side
-FAST, RFC 3244 password changes, and a focused
+FAST, RFC 3244 password changes and server-side kpasswd, and a focused
 MIT kadm5 administrative RPC client and server subset are implemented. The
 kadm5 client also
 supports per-principal string attributes, principal-key extraction, and
@@ -148,9 +152,10 @@ transited-policy checking are intentionally out of scope.
 
 Password history is retained as derived key sets in the in-memory
 `PrincipalRecord`; it is never stored as cleartext. This store-native history
-is not represented in MIT version-7 dump files. RFC 3244 kpasswd server
-handling is not included because this repository currently provides only the
-kpasswd client; kadm5 cleartext changes are policy-enforced.
+is not represented in MIT version-7 dump files. The RFC 3244 server accepts
+MIT's request KRB-PRIV form even when its encrypted replay fields are absent;
+AP-REQ replay and clock-skew checks remain enforced, while timestamp-bearing
+KRB-PRIV requests are freshness-checked.
 
 ## License
 
