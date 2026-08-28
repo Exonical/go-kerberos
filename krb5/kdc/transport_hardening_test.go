@@ -135,7 +135,7 @@ func TestKDCUDPEmptyResponseSkipsWrite(t *testing.T) {
 	cache := server.getLookaside()
 	cache.begin(request, now)
 	conn := &countingPacketConn{}
-	server.handleUDP(conn, &net.UDPAddr{}, request, make(chan error, 1))
+	server.handleUDP(conn, &net.UDPAddr{}, request)
 	if conn.writes != 0 {
 		t.Fatalf("empty response writes = %d, want 0", conn.writes)
 	}
@@ -155,6 +155,30 @@ func TestKDCStalledTCPConnectionCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("stalled TCP connection did not close")
+	}
+}
+
+func TestKDCTCPEmptyResponseSkipsWrite(t *testing.T) {
+	server := &Server{}
+	request := []byte("duplicate")
+	server.getLookaside().begin(request, time.Now())
+	left, right := net.Pipe()
+	defer right.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = transport.WriteTCPFrame(right, request)
+		close(done)
+	}()
+	server.handleTCPConn(left)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("TCP request writer did not finish")
+	}
+	_ = right.SetReadDeadline(time.Now().Add(time.Second))
+	var response [1]byte
+	if _, err := right.Read(response[:]); err == nil {
+		t.Fatal("empty TCP response wrote a frame")
 	}
 }
 

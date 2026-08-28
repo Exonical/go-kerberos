@@ -48,8 +48,9 @@ two-minute lookaside cache. Successful AS-REP and TGS-REP responses are
 replayed verbatim, as are encoded protocol-error responses; an in-progress
 duplicate is discarded. UDP replies above the configured
 `MaxDatagramReplySize` are replaced with `KRB_ERR_RESPONSE_TOO_BIG`, allowing
-the client transport to retry over TCP. TCP connections use a one-minute
-idle deadline and a default 45-connection cap. The pinned MIT sources verify
+the client transport to retry over TCP. UDP request handlers are bounded by
+`MaxUDPWorkers` (default 1024) to provide backpressure. TCP connections use a
+one-minute idle deadline and a default 45-connection cap. The pinned MIT sources verify
 `MAX_DGRAM_SIZE` as 65536 bytes and `max_stream_data_connections` as 45;
 the inspected `net-server.c` does not expose an explicit idle-timeout
 constant, so the one-minute Go default follows the approved hardening design.

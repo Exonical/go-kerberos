@@ -35,6 +35,7 @@ const (
 	defaultMaxDatagramSize = 65536
 	defaultTCPIdleTimeout  = time.Minute
 	defaultTCPConnections  = 45
+	defaultUDPWorkers      = 1024
 	paTGSReq               = 1
 	paEncTimestamp         = 2
 	kdcErrCPrincipal       = 6
@@ -100,6 +101,9 @@ type Server struct {
 	// MaxTCPConnections bounds concurrent TCP connections. Zero uses MIT's
 	// default max_stream_data_connections value of 45.
 	MaxTCPConnections int
+	// MaxUDPWorkers bounds concurrent UDP request handlers. Zero uses a
+	// Go-side default of 1024; MIT processes datagrams serially.
+	MaxUDPWorkers int
 
 	replayMu    sync.Mutex
 	replays     map[string]time.Time
@@ -162,42 +166,34 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 
 func (s *Server) serveUDP(conn net.PacketConn) error {
 	buffer := make([]byte, transport.DefaultMaxFrameSize)
-	errCh := make(chan error, 1)
+	limit := s.MaxUDPWorkers
+	if limit <= 0 {
+		limit = defaultUDPWorkers
+	}
+	workers := make(chan struct{}, limit)
 	for {
-		select {
-		case err := <-errCh:
-			return err
-		default:
-		}
 		n, address, err := conn.ReadFrom(buffer)
 		if err != nil {
-			select {
-			case workerErr := <-errCh:
-				return workerErr
-			default:
-			}
 			if isClosedNetworkError(err) {
 				return nil
 			}
 			return fmt.Errorf("KDC UDP read: %w", err)
 		}
 		request := append([]byte(nil), buffer[:n]...)
-		go s.handleUDP(conn, address, request, errCh)
+		workers <- struct{}{}
+		go func() {
+			defer func() { <-workers }()
+			s.handleUDP(conn, address, request)
+		}()
 	}
 }
 
-func (s *Server) handleUDP(conn net.PacketConn, address net.Addr, request []byte, errCh chan<- error) {
+func (s *Server) handleUDP(conn net.PacketConn, address net.Addr, request []byte) {
 	response := s.dispatch(request, false)
 	if len(response) == 0 {
 		return
 	}
-	if _, err := conn.WriteTo(response, address); err != nil && !isClosedNetworkError(err) {
-		select {
-		case errCh <- fmt.Errorf("KDC UDP write: %w", err):
-		default:
-		}
-		_ = conn.Close()
-	}
+	_, _ = conn.WriteTo(response, address)
 }
 
 func (s *Server) serveTCP(listener net.Listener) error {
@@ -238,7 +234,11 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
-	_ = transport.WriteTCPFrame(conn, s.dispatch(request, true))
+	response := s.dispatch(request, true)
+	if len(response) == 0 {
+		return
+	}
+	_ = transport.WriteTCPFrame(conn, response)
 }
 
 func (s *Server) dispatch(request []byte, isTCP bool) []byte {
