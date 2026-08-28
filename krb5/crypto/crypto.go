@@ -123,7 +123,7 @@ func (e aesEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) 
 	}
 	var macInput []byte
 	if e.sha2 {
-		macInput = append(make([]byte, 0, 16+len(encrypted)), make([]byte, 16)...)
+		macInput = append(make([]byte, 0, 16+len(encrypted)), iv...)
 		macInput = append(macInput, encrypted...)
 	} else {
 		macInput = plain
@@ -157,7 +157,7 @@ func (e aesEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte)
 	var plain []byte
 	var nextIV []byte
 	if e.sha2 {
-		macInput = append(make([]byte, 0, 16+len(encrypted)), make([]byte, 16)...)
+		macInput = append(make([]byte, 0, 16+len(encrypted)), iv...)
 		macInput = append(macInput, encrypted...)
 	} else {
 		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)

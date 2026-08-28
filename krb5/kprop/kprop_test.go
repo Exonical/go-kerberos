@@ -97,6 +97,14 @@ func TestChainedAESState(t *testing.T) {
 		if err != nil || string(plain) != "second message" || !bytes.Equal(gotNext, next2) {
 			t.Fatalf("etype %d second decrypt: %q %x (%v)", id, plain, gotNext, err)
 		}
+		if id == crypto.EnctypeAES128SHA256 || id == crypto.EnctypeAES256SHA384 {
+			if bytes.Equal(next, make([]byte, 16)) {
+				t.Fatalf("etype %d chaining state unexpectedly remained zero", id)
+			}
+			if _, _, err := crypto.DecryptWithIV(etype, key, PrivUsage, second, make([]byte, 16)); err == nil {
+				t.Fatalf("etype %d accepted second message with wrong IV", id)
+			}
+		}
 	}
 }
 
