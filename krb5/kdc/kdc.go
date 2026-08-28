@@ -72,9 +72,11 @@ type Server struct {
 	Policy *Policy
 	// Capaths optionally configures permitted server-side transited paths.
 	Capaths map[string]map[string][]string
-	// DelegationPolicy controls protocol transition and constrained delegation.
-	// A nil policy permits S4U2Self without forwardability, but denies S4U2Proxy.
-	DelegationPolicy func(service principal.Principal) (okToAuthAsDelegate bool, allowedTargets []principal.Principal)
+	// CheckAllowedToDelegate mirrors MIT's KDB check_allowed_to_delegate
+	// method. impersonated is nil for the S4U2Self ok-to-auth-as-delegate
+	// query, and target is nil for that query too. A nil hook permits
+	// non-forwardable S4U2Self but denies S4U2Proxy.
+	CheckAllowedToDelegate func(impersonated *principal.Principal, service principal.Principal, target *principal.Principal) error
 	// PKINITCertificate and PKINITSigner identify the KDC for PKINIT replies.
 	PKINITCertificate *x509.Certificate
 	PKINITSigner      stdcrypto.Signer
@@ -969,15 +971,15 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			return s.tgsErrorResponse(armor, kdcErrCPrincipal, request.ReqBody.SName)
 		}
 		issuedClient = &user
-		if s.DelegationPolicy == nil {
+		if s.CheckAllowedToDelegate == nil {
 			ticketPart.Flags &^= types.TicketForwardable
-		} else if okToDelegate, _ := s.DelegationPolicy(requester); !okToDelegate {
+		} else if err := s.CheckAllowedToDelegate(nil, requester, nil); err != nil {
 			ticketPart.Flags &^= types.TicketForwardable
 		}
 	}
 	if options&types.KDCCNameInAddlTkt != 0 {
-		if s.DelegationPolicy == nil {
-			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+		if s.CheckAllowedToDelegate == nil {
+			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 		}
 		if len(request.ReqBody.AdditionalTickets) != 1 ||
 			options&(types.KDCRenew|types.KDCValidate|types.KDCForwarded|types.KDCProxy|types.KDCEncTktInSkey) != 0 {
@@ -1013,21 +1015,10 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		if code, valid := s.ticketValidity(evidencePart); !valid {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 		}
-		okToDelegate, allowed := s.DelegationPolicy(requester)
-		if !okToDelegate {
-			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
-		}
-		targetAllowed := false
-		for _, target := range allowed {
-			if target.String() == serviceName.String() {
-				targetAllowed = true
-				break
-			}
-		}
-		if !targetAllowed {
-			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
-		}
 		client := principalFromProtocol(evidencePart.CName, evidencePart.CRealm)
+		if err := s.CheckAllowedToDelegate(&client, requester, &serviceName); err != nil {
+			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+		}
 		issuedClient = &client
 		ticketPart.Flags = evidencePart.Flags
 	}

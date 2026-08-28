@@ -52,8 +52,9 @@ disposable integration test environments.
 - Optional principal aliases through `kdb.AliasResolver`. AS aliases require
   client canonicalization and return the canonical client name; TGS aliases
   echo the requested service name unless canonicalization is requested.
-- KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with a
-  `DelegationPolicy` hook for protocol transition and constrained delegation;
+- KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with an
+  MIT-shaped `CheckAllowedToDelegate` hook for protocol transition and
+  constrained delegation;
   MIT `kvno -U` and `kvno -P` interoperability is covered.
 - Optional `Authorize` hook mirroring MIT's `kdcpolicy` plugin semantics for
   authenticated AS exchanges and validated TGS requests, including TGT gating
