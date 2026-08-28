@@ -95,6 +95,25 @@ func TestDumpRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodeKADMDataMatchesMITLayout(t *testing.T) {
+	got, err := encodeKADMData("dump-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{
+		0x12, 0x34, 0x5c, 0x01,
+		0x00, 0x00, 0x00, 0x0c,
+		'd', 'u', 'm', 'p', '-', 'p', 'o', 'l', 'i', 'c', 'y', 0,
+		0x00, 0x00, 0x08, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x02,
+		0x00, 0x00, 0x00, 0x00,
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("KADM data = %x, want %x", got, want)
+	}
+}
+
 func TestDumpWithMasterKeySupportsAllAESMasterEnctypes(t *testing.T) {
 	db := kdb.NewDatabase("DUMP.TEST")
 	if err := db.AddPrincipal("alice", "alice-password"); err != nil {

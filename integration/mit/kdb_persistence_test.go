@@ -5,6 +5,7 @@ package mit_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -157,12 +158,34 @@ func TestMITDumpMasterKeyEnctypes(t *testing.T) {
 
 func TestGoDumpLoadsIntoMIT(t *testing.T) {
 	mitRealm := testenv.Start(t)
+	mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+		"addpol -minlength 1 dump-policy")
 	db := kdb.NewDatabase(testenv.RealmName)
 	if err := db.AddPrincipal("dumped-user", "dumped-password"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.AddPrincipal("host/dumped-service.test", "service-password"); err != nil {
 		t.Fatal(err)
+	}
+	dumpedName, err := principal.Parse("dumped-user@" + testenv.RealmName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dumped, ok, err := db.Lookup(*dumpedName)
+	if err != nil || !ok {
+		t.Fatalf("lookup dumped principal: %v, %v", err, ok)
+	}
+	dumped.Policy = "dump-policy"
+	// MIT administrative retrieval requires a valid modifier-principal TL.
+	modifier := []byte("ubuntu/admin@" + testenv.RealmName + "\x00")
+	modData := make([]byte, 4+len(modifier))
+	binary.BigEndian.PutUint32(modData, uint32(time.Now().Unix()))
+	copy(modData[4:], modifier)
+	dumped.TLData = []kdb.TLData{
+		{Type: 2, Data: modData},
+	}
+	if err := db.UpdatePrincipal(dumped); err != nil {
+		t.Fatalf("set dumped principal policy: %v", err)
 	}
 	data, err := mitdump.Dump(db, testenv.MasterKey)
 	if err != nil {
@@ -173,10 +196,14 @@ func TestGoDumpLoadsIntoMIT(t *testing.T) {
 		t.Fatal(err)
 	}
 	mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "load", "-update", dumpPath)
-
 	cachePath := filepath.Join(mitRealm.Dir, "dumped.ccache")
 	mitRealm.Run(t, "dumped-password\n", "/usr/bin/kinit", "-c", cachePath,
 		"dumped-user")
+	principalInfo := mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+		"getprinc dumped-user")
+	if !strings.Contains(principalInfo, "Policy: dump-policy") {
+		t.Fatalf("MIT did not retain dumped policy reference:\n%s", principalInfo)
+	}
 	listing := mitRealm.Run(t, "", "/usr/bin/klist", "-c", cachePath)
 	if !strings.Contains(listing, "dumped-user@"+testenv.RealmName) {
 		t.Fatalf("klist does not show dumped principal:\n%s", listing)

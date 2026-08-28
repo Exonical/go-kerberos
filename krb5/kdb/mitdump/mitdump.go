@@ -323,7 +323,7 @@ func encodeKADMData(policy string) ([]byte, error) {
 	out.Write(word[:])
 	binary.BigEndian.PutUint32(word[:], 0) // old_key_next
 	out.Write(word[:])
-	binary.BigEndian.PutUint32(word[:], 0) // admin_history_kvno
+	binary.BigEndian.PutUint32(word[:], 2) // INITIAL_HIST_KVNO
 	out.Write(word[:])
 	binary.BigEndian.PutUint32(word[:], 0) // old_keys array length
 	out.Write(word[:])
