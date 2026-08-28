@@ -109,6 +109,15 @@ type Server struct {
 	replays     map[string]time.Time
 	lookasideMu sync.Mutex
 	lookaside   *lookasideCache
+	tcpMu       sync.Mutex
+	tcpConns    map[*tcpConnection]struct{}
+	tcpOrder    uint64
+}
+
+type tcpConnection struct {
+	conn    net.Conn
+	started time.Time
+	order   uint64
 }
 
 // HandleMessage handles one DER-encoded AS-REQ or TGS-REQ.
@@ -201,7 +210,6 @@ func (s *Server) serveTCP(listener net.Listener) error {
 	if limit <= 0 {
 		limit = defaultTCPConnections
 	}
-	slots := make(chan struct{}, limit)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -210,16 +218,55 @@ func (s *Server) serveTCP(listener net.Listener) error {
 			}
 			return fmt.Errorf("KDC TCP accept: %w", err)
 		}
-		select {
-		case slots <- struct{}{}:
-			go func() {
-				defer func() { <-slots }()
-				s.handleTCPConn(conn)
-			}()
-		default:
-			_ = conn.Close()
+		tracked, evicted := s.trackTCPConnection(conn)
+		if evicted != nil {
+			_ = evicted.conn.Close()
 		}
+		go func() {
+			defer s.untrackTCPConnection(tracked)
+			s.handleTCPConn(tracked.conn)
+		}()
 	}
+}
+
+func (s *Server) trackTCPConnection(conn net.Conn) (*tcpConnection, *tcpConnection) {
+	s.tcpMu.Lock()
+	defer s.tcpMu.Unlock()
+	if s.tcpConns == nil {
+		s.tcpConns = make(map[*tcpConnection]struct{})
+	}
+	s.tcpOrder++
+	tracked := &tcpConnection{conn: conn, started: time.Now(), order: s.tcpOrder}
+	s.tcpConns[tracked] = struct{}{}
+	if len(s.tcpConns) <= s.maxTCPConnections() {
+		return tracked, nil
+	}
+	var oldest *tcpConnection
+	for candidate := range s.tcpConns {
+		if candidate == tracked ||
+			(oldest != nil && (candidate.started.After(oldest.started) ||
+				(candidate.started.Equal(oldest.started) && candidate.order > oldest.order))) {
+			continue
+		}
+		oldest = candidate
+	}
+	if oldest != nil {
+		delete(s.tcpConns, oldest)
+	}
+	return tracked, oldest
+}
+
+func (s *Server) untrackTCPConnection(conn *tcpConnection) {
+	s.tcpMu.Lock()
+	delete(s.tcpConns, conn)
+	s.tcpMu.Unlock()
+}
+
+func (s *Server) maxTCPConnections() int {
+	if s.MaxTCPConnections > 0 {
+		return s.MaxTCPConnections
+	}
+	return defaultTCPConnections
 }
 
 func (s *Server) handleTCPConn(conn net.Conn) {

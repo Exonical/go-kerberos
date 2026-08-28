@@ -79,7 +79,8 @@ disposable integration test environments.
   caching for non-empty AS/TGS replies, including encoded KRB-ERROR replies,
   over UDP and TCP, concurrent UDP processing, configurable UDP reply-size
   fallback to `KRB_ERR_RESPONSE_TOO_BIG`, bounded UDP workers, one-minute TCP
-  idle deadlines, and a default 45-connection TCP cap.
+  idle deadlines, and a default 45-connection TCP cap that evicts the oldest
+  existing connection when exceeded.
 - RFC-correct key-usage handling (authenticator subkey → usage 9 replies,
   mandatory checksum-type enforcement, raw request-body checksum
   verification).
