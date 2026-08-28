@@ -474,11 +474,33 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 		t.Fatal("S4U2Proxy without policy unexpectedly succeeded")
 	}
 	current = current.Add(time.Second)
-	server.DelegationPolicy = func(requester principal.Principal) (bool, []principal.Principal) {
+	server.CheckAllowedToDelegate = func(impersonated *principal.Principal, requester principal.Principal, target *principal.Principal) error {
+		if impersonated != nil || target != nil {
+			t.Fatalf("S4U2Self delegation arguments = %v, %v", impersonated, target)
+		}
+		return errors.New("S4U2Self delegation denied")
+	}
+	deniedSelf, err := kclient.S4U2Self(context.Background(), tgt, user)
+	if err != nil {
+		t.Fatalf("S4U2Self with denied delegation hook: %v", err)
+	}
+	if deniedSelf.Flags&types.TicketForwardable != 0 {
+		t.Fatalf("denied S4U2Self delegation is forwardable: %#x", deniedSelf.Flags)
+	}
+	current = current.Add(time.Second)
+	server.CheckAllowedToDelegate = func(impersonated *principal.Principal, requester principal.Principal, target *principal.Principal) error {
 		if !samePrincipal(requester, service) {
 			t.Fatalf("delegation requester = %v, want %v", requester, service)
 		}
-		return true, []principal.Principal{backend}
+		if impersonated != nil && target != nil {
+			if !samePrincipal(*impersonated, user) {
+				t.Fatalf("delegation impersonated = %v, want %v", *impersonated, user)
+			}
+			if !samePrincipal(*target, backend) {
+				return errors.New("S4U2Proxy target denied")
+			}
+		}
+		return nil
 	}
 	nonForwardable, err := kclient.TGSExchange(context.Background(), tgt, service)
 	if err != nil {
@@ -539,6 +561,8 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	}
 	if _, err := kclient.S4U2Proxy(context.Background(), tgt, self, disallowed); err == nil {
 		t.Fatal("S4U2Proxy to disallowed target unexpectedly succeeded")
+	} else if !hasKRBCode(err, kdcErrBadOption) {
+		t.Fatalf("disallowed S4U2Proxy error = %v, want KDC_ERR_BADOPTION", err)
 	}
 }
 

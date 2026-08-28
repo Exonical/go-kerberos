@@ -177,10 +177,12 @@ PA-S4U-X509-USER and legacy PA-FOR-USER protocol-transition requests.
 PA-FOR-USER validates keyed AES checksums matching the TGT session enctype
 and the RFC 4757 HMAC-MD5 compatibility checksum; this is defensive
 verification only and does not add RC4. S4U2Self tickets are forwardable
-only when `Server.DelegationPolicy` approves the requesting service.
-S4U2Proxy requires a single forwardable evidence ticket encrypted to that
-service and an allowed target from the same hook. A nil hook permits
-non-forwardable S4U2Self but denies S4U2Proxy. Forwarded TGT requests require
+only when `Server.CheckAllowedToDelegate` approves the requesting service.
+The hook receives the impersonated user and target for S4U2Proxy, and nil
+values for the S4U2Self general delegation query. S4U2Proxy requires a
+single forwardable evidence ticket encrypted to that service and an allowed
+target from the same hook. A nil hook permits non-forwardable S4U2Self but
+denies S4U2Proxy with `KDC_ERR_BADOPTION`. Forwarded TGT requests require
 a forwardable header TGT and set the FORWARDED ticket flag while honoring
 requested addresses.
 

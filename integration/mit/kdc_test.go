@@ -81,11 +81,16 @@ func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
 	}
 	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
-	server.DelegationPolicy = func(requester principal.Principal) (bool, []principal.Principal) {
+	server.CheckAllowedToDelegate = func(impersonated *principal.Principal, requester principal.Principal, target *principal.Principal) error {
 		if requester.String() != service.String() {
-			return false, nil
+			return fmt.Errorf("unexpected delegation service %s", requester)
 		}
-		return true, []principal.Principal{backend}
+		if impersonated != nil && target != nil {
+			if target.String() != backend.String() {
+				return fmt.Errorf("unexpected delegation target %s", target)
+			}
+		}
+		return nil
 	}
 	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
