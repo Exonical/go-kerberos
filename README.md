@@ -20,6 +20,12 @@ disposable integration test environments.
   with RPCSEC_GSS privacy, covering API negotiation and principal
   create/get/modify/rename/delete/password-change/random-key operations,
   policy management, principal and policy listing, and privilege queries.
+  The `kadm5.Server` counterpart accepts a `kadmin/admin` keytab, authenticates
+  callers with the Go GSS acceptor, and applies a configurable ACL. Without an
+  ACL, only the configured admin principal is authorized; an unset admin
+  principal denies all operations. The Go client ↔ Go server round-trip covers
+  the supported operation subset, and the live MIT gate covers `getprinc`,
+  `addprinc`, `cpw`, `listprincs`, and `delprinc`.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
@@ -107,7 +113,8 @@ Principal aliases with MIT-compatible AS/TGS canonicalization, and S4U
 (constrained delegation), including KDC-side protocol transition and
 forwarded TGTs, PKINIT, KDC replay cache and renewals,
 kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
-MIT kadm5 administrative RPC subset are implemented. The kadm5 client also
+MIT kadm5 administrative RPC client and server subset are implemented. The
+kadm5 client also
 supports per-principal string attributes, principal-key extraction, and
 API-v4 explicit key setting. General kadmin RPC coverage beyond the documented
 operations remains out of scope.
