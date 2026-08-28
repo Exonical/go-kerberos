@@ -3,6 +3,7 @@
 package mit_test
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,7 +14,6 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/kadm5"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
-	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 func TestMITKadminAgainstGoKadmind(t *testing.T) {
@@ -34,9 +34,23 @@ func TestMITKadminAgainstGoKadmind(t *testing.T) {
 	if err := db.AddPrincipal("nfs/host@"+testenv.RealmName, "nfs-password"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AddPrincipal("limited@"+testenv.RealmName, "limited-password"); err != nil {
+		t.Fatal(err)
+	}
+	realm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+		"addprinc -pw limited-password limited")
+	aclPath := filepath.Join(t.TempDir(), "kadm5.acl")
+	aclContents := "admin/admin@" + testenv.RealmName + " *\n" +
+		"limited@" + testenv.RealmName + " i\n"
+	if err := os.WriteFile(aclPath, []byte(aclContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	acl, err := kadm5.LoadACL(aclPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := kadm5.NewServer(db, serviceKeytab)
-	admin := principal.Principal{Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"admin", "admin"}}
-	server.AdminPrincipal = admin
+	server.ACL = acl.Func()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -62,4 +76,15 @@ func TestMITKadminAgainstGoKadmind(t *testing.T) {
 		t.Fatalf("listprincs service glob output = %s", output)
 	}
 	kadmin("delprinc -force scratch")
+
+	limitedGet := realm.Run(t, "", "/usr/bin/kadmin", "-p", "limited",
+		"-w", "limited-password", "-s", listener.Addr().String(), "-q",
+		"getprinc admin/admin")
+	if !strings.Contains(limitedGet, "Principal: admin/admin@"+testenv.RealmName) {
+		t.Fatalf("limited getprinc output = %s", limitedGet)
+	}
+	deniedScript := fmt.Sprintf(
+		`set +e; output=$(/usr/bin/kadmin -p limited -w limited-password -s %s -q 'addprinc -pw denied-password denied' 2>&1); rc=$?; printf '%%s\n' "$output"; test "$rc" -ne 0; printf '%%s\n' "$output" | grep -qi privilege`,
+		listener.Addr().String())
+	realm.Run(t, "", "/bin/sh", "-c", deniedScript)
 }

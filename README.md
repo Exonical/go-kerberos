@@ -25,7 +25,11 @@ disposable integration test environments.
   ACL, only the configured admin principal is authorized; an unset admin
   principal denies all operations. The Go client ↔ Go server round-trip covers
   the supported operation subset, and the live MIT gate covers `getprinc`,
-  `addprinc`, `cpw`, `listprincs`, and `delprinc`.
+  `addprinc`, `cpw`, `listprincs`, and `delprinc`. MIT `kadm5.acl` files can be
+  parsed with `kadm5.LoadACL` and installed with `server.ACL = acl.Func()`;
+  entries use MIT's ordered permissions, component wildcards, and target
+  back-references. Restriction clauses are rejected because the server cannot
+  apply field-level ACL restrictions.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,

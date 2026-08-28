@@ -24,7 +24,7 @@ when absent.
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
-| MIT kadm5 administrative RPC subset | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server |
+| MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 
@@ -100,9 +100,14 @@ The Go client and `kadm5.Server` implement a focused MIT `kadm5`
 administrative RPC subset over RFC 5531 record-marked TCP with RPCSEC_GSS
 privacy and strict hand-written XDR. The server uses a `kadmin/admin` keytab
 and the Go GSS acceptor for context establishment. Configure `Server.ACL` to
-authorize callers by authenticated principal, operation, and target; when it
-is nil, only `Server.AdminPrincipal` is allowed, and an unset admin principal
-denies all requests. Unknown procedures are rejected with RPC
+authorize callers by authenticated principal, operation, and target; MIT
+`kadm5.acl` files are supported by `kadm5.ParseACL` and `kadm5.LoadACL`, with
+first-match-wins evaluation, ordered lowercase grants and uppercase denies,
+per-component `*` wildcards, and `*1` through `*9` target back-references.
+Restriction clauses are rejected because this server does not expose
+field-level mutation restrictions. When `Server.ACL` is nil, only
+`Server.AdminPrincipal` is allowed, and an unset admin principal denies all
+requests. Unknown procedures are rejected with RPC
 `PROC_UNAVAIL`; malformed or truncated XDR is rejected.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
 covers principal create/get/modify/rename/delete/password-change,

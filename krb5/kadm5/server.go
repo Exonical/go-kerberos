@@ -361,6 +361,9 @@ func rpcErrorReply(xid, status uint32) []byte {
 }
 
 func (s *Server) authorize(client principal.Principal, op string, target principal.Principal) bool {
+	if op == "change-password" && principalEqual(client, target) {
+		return true
+	}
 	if s.ACL != nil {
 		return s.ACL(client, op, target)
 	}
@@ -370,6 +373,27 @@ func (s *Server) authorize(client principal.Principal, op string, target princip
 	a, _ := s.AdminPrincipal.Format()
 	b, _ := client.Format()
 	return strings.EqualFold(a, b)
+}
+
+func (s *Server) authorizeRename(client, source, destination principal.Principal) bool {
+	if s.ACL != nil {
+		return s.ACL(client, "delete", source) &&
+			s.ACL(client, "create", destination)
+	}
+	return s.authorize(client, "rename", source)
+}
+
+func principalEqual(a, b principal.Principal) bool {
+	if !strings.EqualFold(a.Realm, b.Realm) ||
+		len(a.Components) != len(b.Components) {
+		return false
+	}
+	for i := range a.Components {
+		if a.Components[i] != b.Components[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) []byte {
@@ -446,7 +470,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "rename", src) {
+		if !s.authorizeRename(client, src, dest) {
 			return status(authModify)
 		}
 		return status(kdbCode(s.Database.RenamePrincipal(src, dest)))
