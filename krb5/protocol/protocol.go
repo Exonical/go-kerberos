@@ -289,6 +289,14 @@ type PAS4UX509User struct {
 	Checksum Checksum  `krb5:"tag:1"`
 }
 
+// PAForUser is the legacy Microsoft protocol-transition request.
+type PAForUser struct {
+	UserName    PrincipalName `krb5:"tag:0"`
+	UserRealm   string        `krb5:"tag:1"`
+	Checksum    Checksum      `krb5:"tag:2"`
+	AuthPackage string        `krb5:"tag:3"`
+}
+
 // FastOptions contains RFC 6113 FAST option bits.
 type FastOptions = types.KDCOptions
 

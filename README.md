@@ -29,6 +29,8 @@ disposable integration test environments.
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
   against real MIT `kinit`, `klist`, and `kvno` clients.
+- KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with a
+  `DelegationPolicy` hook for protocol transition and constrained delegation.
 - RFC-correct key-usage handling (authenticator subkey → usage 9 replies,
   mandatory checksum-type enforcement, raw request-body checksum
   verification).
@@ -97,11 +99,16 @@ notes, and the full test matrix.
 
 ## Roadmap
 
-S4U (constrained delegation), PKINIT, KDC replay cache and renewals,
+S4U (constrained delegation), including KDC-side protocol transition and
+forwarded TGTs, PKINIT, KDC replay cache and renewals,
 kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
-MIT kadm5 administrative RPC subset are implemented. Key-data, aliases,
-principal attributes beyond the documented fields, and less-common kadm5
-procedures remain out of scope.
+MIT kadm5 administrative RPC subset are implemented. General kadmin RPC
+coverage beyond the documented principal operations remains out of scope.
+
+PA-FOR-USER verification accepts the keyed checksum types supported by the
+TGT session enctype, plus the RFC 4757 HMAC-MD5 checksum used by legacy
+Windows clients; RC4 remains intentionally unavailable as a production
+encryption type.
 
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and

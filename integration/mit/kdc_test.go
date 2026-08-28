@@ -13,8 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdc"
+	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 const goKDCRealm = "GOKDC.TEST"
@@ -33,6 +37,7 @@ func startGoKDC(t *testing.T) *goKDC {
 		{"alice", "alice-password"},
 		{"krbtgt/" + goKDCRealm, "krbtgt-password"},
 		{"host/service.test", "host-password"},
+		{"HTTP/backend.test", "backend-password"},
 	} {
 		if err := db.AddPrincipal(item.name, item.password, 1); err != nil {
 			t.Fatal(err)
@@ -45,6 +50,14 @@ func startGoKDC(t *testing.T) *goKDC {
 		ClockSkew:        5 * time.Minute,
 		MaxTicketLife:    10 * time.Hour,
 		MaxRenewableLife: 24 * time.Hour,
+	}
+	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
+	server.DelegationPolicy = func(requester principal.Principal) (bool, []principal.Principal) {
+		if requester.String() != service.String() {
+			return false, nil
+		}
+		return true, []principal.Principal{backend}
 	}
 	udpConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -84,6 +97,18 @@ func startGoKDC(t *testing.T) *goKDC {
 		cache:  filepath.Join(dir, "ccache"),
 		cancel: cancel,
 		done:   done,
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", tcpPort), 50*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Go KDC did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	t.Cleanup(func() {
 		cancel()
@@ -156,5 +181,42 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	t.Logf("MIT klist -e output:\n%s", full)
 	if !strings.Contains(full, "host/service.test@"+goKDCRealm) {
 		t.Fatalf("klist -e does not show service ticket:\n%s", full)
+	}
+}
+
+func TestGoClientS4UAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	data, err := os.ReadFile(k.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.UDPPreferenceLimit = 1400
+	cfg.Forwardable = true
+	goClient := &client.Client{Config: cfg}
+	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: goKDCRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
+	tgt, err := goClient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := goClient.S4U2Self(context.Background(), tgt, user)
+	if err != nil {
+		t.Fatalf("S4U2Self: %v", err)
+	}
+	if self.Client.String() != user.String() || self.Server.String() != service.String() ||
+		self.Flags&types.TicketForwardable == 0 {
+		t.Fatalf("unexpected S4U2Self credentials: %#v", self)
+	}
+	proxy, err := goClient.S4U2Proxy(context.Background(), tgt, self, backend)
+	if err != nil {
+		t.Fatalf("S4U2Proxy: %v", err)
+	}
+	if proxy.Client.String() != user.String() || proxy.Server.String() != backend.String() {
+		t.Fatalf("unexpected S4U2Proxy credentials: %#v", proxy)
 	}
 }

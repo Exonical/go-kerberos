@@ -1,12 +1,40 @@
 package protocol
 
 import (
+	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
+
+func TestChangePasswdDataGolden(t *testing.T) {
+	realm := "TEST.REALM"
+	encoded, err := asn1.Marshal(ChangePasswdData{
+		NewPassword: []byte("newpass"),
+		TargetName:  &PrincipalName{NameType: 1, NameString: []string{"alice"}},
+		TargetRealm: &realm,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := hex.DecodeString("302da00904076e657770617373a1123010a003020101a10930071b05616c696365a20c1b0a544553542e5245414c4d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != string(want) {
+		t.Fatalf("ChangePasswdData DER = %x, want %x", encoded, want)
+	}
+	var decoded ChangePasswdData
+	if err := asn1.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded.NewPassword) != "newpass" || decoded.TargetName == nil ||
+		decoded.TargetRealm == nil || *decoded.TargetRealm != realm {
+		t.Fatalf("decoded ChangePasswdData = %#v", decoded)
+	}
+}
 
 func TestFASTStructuresRoundTrip(t *testing.T) {
 	value := KrbFastReq{
