@@ -1,7 +1,9 @@
 package kdb
 
 import (
+	"bytes"
 	"testing"
+	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -9,6 +11,58 @@ import (
 
 var _ Store = (*Database)(nil)
 var _ AliasResolver = (*Database)(nil)
+
+func TestChangePasswordPreservesAdministrativeFields(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiration := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	passwordExpiration := expiration.Add(24 * time.Hour)
+	record, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %#v, %v, %v", record, ok, err)
+	}
+	record.Flags = 0x1234
+	record.Policy = "strong"
+	record.MaxLife = 6 * time.Hour
+	record.MaxRenew = 24 * time.Hour
+	record.Expiration = expiration
+	record.PasswordExpiration = passwordExpiration
+	oldKey := append([]byte(nil), record.Keys[crypto.EnctypeAES256SHA1].Key...)
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	attribute := "engineering"
+	if err := db.SetString(*name, "department", &attribute); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ChangePassword(*name, "new-password"); err != nil {
+		t.Fatal(err)
+	}
+	updated, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup after change = %#v, %v, %v", updated, ok, err)
+	}
+	if updated.Flags != record.Flags || updated.Policy != record.Policy ||
+		updated.MaxLife != record.MaxLife || updated.MaxRenew != record.MaxRenew ||
+		!updated.Expiration.Equal(expiration) ||
+		!updated.PasswordExpiration.Equal(passwordExpiration) ||
+		updated.Name.String() != record.Name.String() ||
+		updated.Strings["department"] != "engineering" {
+		t.Fatalf("administrative fields changed: before=%+v after=%+v", record, updated)
+	}
+	if updated.KVNO != record.KVNO+1 {
+		t.Fatalf("KVNO = %d, want %d", updated.KVNO, record.KVNO+1)
+	}
+	if bytes.Equal(updated.Keys[crypto.EnctypeAES256SHA1].Key, oldKey) {
+		t.Fatal("password change did not replace key material")
+	}
+}
 
 func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 	db := NewDatabase("TEST.REALM")

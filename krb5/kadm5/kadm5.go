@@ -806,13 +806,20 @@ func writeEmptyEntry(w *xdrWriter, p principal.Principal) {
 }
 
 func writeEntry(w *xdrWriter, entry PrincipalEntry, mask int32) {
+	writeEntryWithModifier(w, entry, mask, false)
+}
+
+func writeEntryWithModifier(w *xdrWriter, entry PrincipalEntry, mask int32, modifier bool) {
 	p := entry.Principal
 	w.principal(p)
 	w.i32(entry.PrincExpireTime)
 	w.i32(entry.LastPwdChange)
 	w.i32(entry.PWExpiration)
 	w.i32(entry.MaxLife)
-	w.boolean(true)
+	w.boolean(!modifier)
+	if modifier {
+		w.principal(p)
+	}
 	w.i32(0)
 	w.i32(entry.Attributes)
 	w.u32(entry.KVNO)

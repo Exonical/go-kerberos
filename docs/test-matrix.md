@@ -24,7 +24,7 @@ when absent.
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
-| MIT kadm5 administrative RPC subset | Go client + live MIT kadmind | MIT `kadmind` | Go client |
+| MIT kadm5 administrative RPC subset | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 
@@ -96,8 +96,14 @@ an authorized admin setting Alice's password, followed by Go AS exchanges with
 the resulting passwords. Password policy and authorization errors are returned
 without exposing password material.
 
-The Go client implements a focused MIT `kadm5` administrative RPC subset over
-RFC 5531 record-marked TCP with RPCSEC_GSS privacy and strict hand-written XDR.
+The Go client and `kadm5.Server` implement a focused MIT `kadm5`
+administrative RPC subset over RFC 5531 record-marked TCP with RPCSEC_GSS
+privacy and strict hand-written XDR. The server uses a `kadmin/admin` keytab
+and the Go GSS acceptor for context establishment. Configure `Server.ACL` to
+authorize callers by authenticated principal, operation, and target; when it
+is nil, only `Server.AdminPrincipal` is allowed, and an unset admin principal
+denies all requests. Unknown procedures are rejected with RPC
+`PROC_UNAVAIL`; malformed or truncated XDR is rejected.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
 covers principal create/get/modify/rename/delete/password-change,
 `CHRAND_PRINCIPAL`, policy create/get/modify/delete, `GET_PRINCS`,
@@ -106,9 +112,11 @@ covers principal create/get/modify/rename/delete/password-change,
 `EXTRACT_KEYS`/`GET_PRINCIPAL_KEYS` (procedure 26). These procedure numbers
 are from MIT krb5 1.22.2's `kadm_rpc.h`; they supersede older or provisional
 numbering. Explicit key setting uses API version 4, while string attributes
-and key extraction use the negotiated API version. Key-data management beyond
-random-key and explicit API-v4 keys, aliases, and other procedures remain out
-of scope. MIT's legacy
+and key extraction use the negotiated API version. The Go client ↔ Go server
+round-trip covers the supported server operations. The live MIT gate against
+the Go server covers `getprinc`, `addprinc`, `cpw`, `listprincs`, and
+`delprinc`. Key-data management beyond random-key and explicit API-v4 keys,
+aliases, and other procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 

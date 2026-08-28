@@ -12,6 +12,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -167,20 +168,31 @@ func (i *Initiator) VerifyToken(token []byte) error {
 
 // Accept verifies an initial context token and optionally returns an AP-REP.
 func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error) {
+	ctx, _, reply, err := a.accept(token, now)
+	return ctx, reply, err
+}
+
+// AcceptWithPrincipal accepts a context and returns the authenticated
+// initiator principal for applications that need authorization decisions.
+func (a *Acceptor) AcceptWithPrincipal(token []byte, now time.Time) (*Context, principal.Principal, []byte, error) {
+	return a.accept(token, now)
+}
+
+func (a *Acceptor) accept(token []byte, now time.Time) (*Context, principal.Principal, []byte, error) {
 	if a == nil || a.keytab == nil {
-		return nil, nil, fmt.Errorf("GSS acceptor: incomplete keytab")
+		return nil, principal.Principal{}, nil, fmt.Errorf("GSS acceptor: incomplete keytab")
 	}
 	inner, err := unframeToken(token, []byte{0x01, 0x00})
 	if err != nil {
-		return nil, nil, err
+		return nil, principal.Principal{}, nil, err
 	}
 	verified, err := ap.VerifyAPReq(a.keytab, inner, now, 5*time.Minute)
 	if err != nil {
-		return nil, nil, fmt.Errorf("GSS AP-REQ: %w", err)
+		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
 	}
 	flags, err := checksumFlags(verified.Checksum)
 	if err != nil {
-		return nil, nil, err
+		return nil, principal.Principal{}, nil, err
 	}
 	ctx := &Context{
 		key:     contextKey(verified.SessionKey, verified.SubKey),
@@ -190,11 +202,11 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 	if flags&GSSMutualFlag != 0 {
 		reply, err := ap.BuildAPRep(verified)
 		if err != nil {
-			return nil, nil, fmt.Errorf("GSS AP-REP: %w", err)
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REP: %w", err)
 		}
-		return ctx, frameToken([]byte{0x02, 0x00}, reply), nil
+		return ctx, verified.Client, frameToken([]byte{0x02, 0x00}, reply), nil
 	}
-	return ctx, nil, nil
+	return ctx, verified.Client, nil, nil
 }
 
 // Wrap protects a message with an RFC 4121 MIC or encrypted token.
