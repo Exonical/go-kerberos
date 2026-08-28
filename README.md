@@ -45,8 +45,12 @@ disposable integration test environments.
   `kiprop/<host>` RPCSEC_GSS update polling, and `iprop.Replica` applies
   committed principal snapshots to a Go KDB. The in-memory update log has
   configurable retention and MIT cursor/full-resync status semantics. The
-  separate kprop dump push used after full resync is not started by this
-  package, so replicas must be seeded from a dump before polling.
+  integration suite exercises a Go replica pulling `GET_UPDATES` from a real
+  MIT `kadmind`, bootstrapping its cursor from an MIT ipropx dump header. The
+  separate MIT kprop dump push used after full resync is not implemented; the
+  reverse `kpropd` gate records the environment's missing `/usr/sbin/kpropd`
+  binary, so replicas must otherwise be seeded from a compatible dump before
+  polling.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,

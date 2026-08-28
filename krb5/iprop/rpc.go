@@ -348,13 +348,17 @@ func (c *Client) rawCall(ctx context.Context, xid, proc, flavor uint32, cred, ve
 	if err != nil || kind != msgReply {
 		return nil, 0, nil, errors.New("iprop: invalid RPC reply")
 	}
-	stat, err := r.u32()
-	if err != nil || stat != 0 {
+	replyStat, err := r.u32()
+	if err != nil || replyStat != 0 {
 		return nil, 0, nil, errors.New("iprop: RPC call rejected")
 	}
 	flavor, verifier, err = r.auth()
 	if err != nil {
 		return nil, 0, nil, err
+	}
+	acceptStat, err := r.u32()
+	if err != nil || acceptStat != 0 {
+		return nil, 0, nil, errors.New("iprop: RPC call failed")
 	}
 	body, err = r.take(len(r.data) - r.off)
 	if err != nil {

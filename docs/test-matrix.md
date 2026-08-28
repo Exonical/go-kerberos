@@ -28,7 +28,7 @@ when absent.
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
-| MIT iprop GET_UPDATES | Go master ↔ Go replica unit coverage | MIT `kadmind`/`kpropd` live gate not exercised | Go `iprop.Replica` applies updates; MIT kprop dump push skipped |
+| MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse MIT `kpropd` attempt is blocked because `/usr/sbin/kpropd` is not installed in the integration environment (the test records the exact exec error) | Separate MIT kprop dump-push/full-resync transfer remains unimplemented; reverse gate is evidence-backed skipped, not a wire-compatibility claim |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or

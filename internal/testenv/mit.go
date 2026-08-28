@@ -43,6 +43,7 @@ type Realm struct {
 	Port        int
 	AdminPort   int
 	KPasswdPort int
+	IPropPort   int
 
 	cmds   []*exec.Cmd
 	output bytes.Buffer
@@ -50,16 +51,22 @@ type Realm struct {
 
 // Start creates and starts an MIT realm entirely below t.TempDir.
 func Start(t *testing.T) *Realm {
-	return start(t, "")
+	return start(t, "", false)
 }
 
 // StartWithMasterEType creates and starts an MIT realm with the requested
 // database master-key enctype.
 func StartWithMasterEType(t *testing.T, enctype string) *Realm {
-	return start(t, enctype)
+	return start(t, enctype, false)
 }
 
-func start(t *testing.T, masterEType string) *Realm {
+// StartWithIPROP creates and starts an MIT realm with incremental propagation
+// enabled on kadmind.
+func StartWithIPROP(t *testing.T) *Realm {
+	return start(t, "", true)
+}
+
+func start(t *testing.T, masterEType string, iprop bool) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -73,6 +80,10 @@ func start(t *testing.T, masterEType string) *Realm {
 	port := freePort(t)
 	adminPort := freePort(t)
 	kpasswdPort := freePort(t)
+	ipropPort := 0
+	if iprop {
+		ipropPort = freePort(t)
+	}
 	r := &Realm{
 		Dir:         dir,
 		Config:      filepath.Join(dir, "krb5.conf"),
@@ -82,6 +93,16 @@ func start(t *testing.T, masterEType string) *Realm {
 		Port:        port,
 		AdminPort:   adminPort,
 		KPasswdPort: kpasswdPort,
+		IPropPort:   ipropPort,
+	}
+	ipropKDCConfig := ""
+	if iprop {
+		ipropKDCConfig = fmt.Sprintf(`
+  iprop_enable = true
+  iprop_ulog_size = 1000
+  iprop_port = %d
+  iprop_logfile = %s/iprop.ulog
+`, ipropPort, dir)
 	}
 	writeFile(t, r.Config, fmt.Sprintf(`[libdefaults]
  default_realm = %s
@@ -110,9 +131,14 @@ func start(t *testing.T, masterEType string) *Realm {
   admin_keytab = %s/kadm5.keytab
   acl_file = %s/kadm5.acl
   key_stash_file = %s/.k5.%s
+%s
  }
-`, port, port, RealmName, dir, dir, dir, dir, dir, dir, RealmName))
-	writeFile(t, filepath.Join(dir, "kadm5.acl"), "admin/admin@"+RealmName+" sxe\n")
+`, port, port, RealmName, dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig))
+	acl := "admin/admin@" + RealmName + " sxe\n"
+	if iprop {
+		acl += "kiprop/replica@" + RealmName + " p\n"
+	}
+	writeFile(t, filepath.Join(dir, "kadm5.acl"), acl)
 	createArgs := []string{"create", "-s"}
 	if masterEType != "" {
 		createArgs = append(createArgs, "-k", masterEType)
@@ -130,6 +156,15 @@ func start(t *testing.T, masterEType string) *Realm {
 		"ktadd -k " + r.Keytab + " -e aes128-cts-hmac-sha1-96,aes256-cts-hmac-sha1-96,aes128-cts-hmac-sha256-128,aes256-cts-hmac-sha384-192 host/service.test",
 	} {
 		run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
+	}
+	if iprop {
+		for _, command := range []string{
+			"addprinc -pw kiprop-replica-password kiprop/replica",
+			"addprinc -randkey kiprop/127.0.0.1",
+			"ktadd -k " + r.Keytab + " kiprop/127.0.0.1",
+		} {
+			run(t, r.env(), "", "/usr/sbin/kadmin.local", "-q", command)
+		}
 	}
 	r.startKDC(t)
 	r.startKadmind(t)
