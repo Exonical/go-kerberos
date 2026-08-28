@@ -45,6 +45,91 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerAuthorizationHookASAndTGS(t *testing.T) {
+	now := time.Unix(2000000020, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	var gotClient, gotService principal.Principal
+	var gotAS bool
+	server.Authorize = func(client, requestedService principal.Principal, asExchange bool) error {
+		gotClient, gotService, gotAS = client, requestedService, asExchange
+		return errors.New("authorization denied")
+	}
+	request := asRequest(user, principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}, 1)
+	asService := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	addPreauthPassword(t, &request, "alice-password", now)
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+		t.Fatalf("AS authorization response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrPolicy {
+		t.Fatalf("AS authorization code = %d, want %d", kerberosError.ErrorCode, kdcErrPolicy)
+	}
+	if kerberosError.EText == nil || *kerberosError.EText != "authorization denied" {
+		t.Fatalf("AS authorization text = %v, want authorization denied", kerberosError.EText)
+	}
+	if !samePrincipal(gotClient, user) || !samePrincipal(gotService, asService) || !gotAS {
+		t.Fatalf("AS authorization arguments = %v, %v, %v", gotClient, gotService, gotAS)
+	}
+
+	server.Authorize = func(principal.Principal, principal.Principal, bool) error { return nil }
+	if _, err := kclient.ASExchange(context.Background(), user, "alice-password"); err != nil {
+		t.Fatalf("allowed AS exchange: %v", err)
+	}
+
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("TGS setup AS exchange: %v", err)
+	}
+	server.Authorize = func(client, requestedService principal.Principal, asExchange bool) error {
+		if asExchange {
+			t.Fatal("TGS authorization unexpectedly marked as AS exchange")
+		}
+		if !samePrincipal(client, user) || !samePrincipal(requestedService, service) {
+			t.Fatalf("TGS authorization arguments = %v, %v", client, requestedService)
+		}
+		return errors.New("TGS authorization denied")
+	}
+	if err := asn1.Unmarshal(server.HandleMessage(rawTGSRequest(t, tgt, service, now, 0)), &kerberosError); err != nil {
+		t.Fatalf("TGS authorization response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrPolicy {
+		t.Fatalf("TGS authorization code = %d, want %d", kerberosError.ErrorCode, kdcErrPolicy)
+	}
+	if kerberosError.EText == nil || *kerberosError.EText != "TGS authorization denied" {
+		t.Fatalf("TGS authorization text = %v, want TGS authorization denied", kerberosError.EText)
+	}
+
+	server.Authorize = nil
+	if _, err := kclient.TGSExchange(context.Background(), tgt, service); err != nil {
+		t.Fatalf("nil authorization hook TGS exchange: %v", err)
+	}
+}
+
+func TestServerFASTAuthorizationDenial(t *testing.T) {
+	now := time.Unix(2000000030, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor AS exchange: %v", err)
+	}
+	server.Authorize = func(principal.Principal, principal.Principal, bool) error {
+		return errors.New("FAST authorization denied")
+	}
+	if _, err := kclient.ASExchangeFAST(context.Background(), user, "alice-password", armorTGT); err == nil ||
+		!hasKRBCode(err, kdcErrPolicy) {
+		t.Fatalf("FAST authorization error = %v, want KDC_ERR_POLICY", err)
+	}
+}
+
 func TestASAccountLockout(t *testing.T) {
 	now := time.Unix(2000000100, 0).UTC()
 	server, _ := testServer(t, now)
@@ -551,7 +636,7 @@ func TestServerFASTErrorContainsFXError(t *testing.T) {
 		t.Fatal(err)
 	}
 	armorContext := &fastContext{etype: armor.EType, key: armor.Key, nonce: 77}
-	response := server.fastErrorResponse(kdcErrBadOption, protocolPrincipal(service), nil, 77, armorContext)
+	response := server.fastErrorResponseWithText(kdcErrPolicy, protocolPrincipal(service), nil, 77, armorContext, "policy denied")
 	var outer protocol.KRBError
 	if err := asn1.Unmarshal(response, &outer); err != nil {
 		t.Fatalf("outer KRB-ERROR: %v", err)
@@ -596,8 +681,9 @@ func TestServerFASTErrorContainsFXError(t *testing.T) {
 	if err := asn1.Unmarshal(fxError.PADataValue, &inner); err != nil {
 		t.Fatalf("inner KRB-ERROR: %v", err)
 	}
-	if inner.ErrorCode != kdcErrBadOption || inner.EData != nil {
-		t.Fatalf("inner KRB-ERROR = %#v, want code %d and absent e-data", inner, kdcErrBadOption)
+	if inner.ErrorCode != kdcErrPolicy || inner.EData != nil ||
+		inner.EText == nil || *inner.EText != "policy denied" {
+		t.Fatalf("inner KRB-ERROR = %#v, want code %d, text, and absent e-data", inner, kdcErrPolicy)
 	}
 }
 

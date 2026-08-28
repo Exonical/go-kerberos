@@ -55,6 +55,9 @@ disposable integration test environments.
 - KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with a
   `DelegationPolicy` hook for protocol transition and constrained delegation;
   MIT `kvno -U` and `kvno -P` interoperability is covered.
+- Optional `Authorize` hook for authenticated AS exchanges and validated TGS
+  requests, including TGT gating and per-service policy checks; denials return
+  `KDC_ERR_POLICY` and preserve FAST error wrapping.
 - RFC-correct key-usage handling (authenticator subkey → usage 9 replies,
   mandatory checksum-type enforcement, raw request-body checksum
   verification).

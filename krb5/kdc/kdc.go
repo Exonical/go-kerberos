@@ -78,6 +78,9 @@ type Server struct {
 	PKINITSigner      stdcrypto.Signer
 	// PKINITClientCAs trusts client certificates for PKINIT authentication.
 	PKINITClientCAs *x509.CertPool
+	// Authorize optionally controls authenticated AS exchanges and validated
+	// TGS requests. A nil hook permits all requests.
+	Authorize func(client, service principal.Principal, asExchange bool) error
 
 	replayMu sync.Mutex
 	replays  map[string]time.Time
@@ -271,13 +274,16 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if s.passwordExpired(clientRecord) {
 			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
 		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
 			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
-		s.recordPreauthSuccess(clientName, &clientRecord)
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, &paRep)
 	}
@@ -345,6 +351,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
 		}
 		return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+	}
+	if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+		return response
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil)
@@ -675,6 +684,10 @@ func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.Encrypt
 }
 
 func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, data []byte, nonce uint32, armor *fastContext) []byte {
+	return s.fastErrorResponseWithText(code, service, data, nonce, armor, "")
+}
+
+func (s *Server) fastErrorResponseWithText(code int32, service *protocol.PrincipalName, data []byte, nonce uint32, armor *fastContext, text string) []byte {
 	var inner protocol.MethodData
 	if armor.cookie != nil {
 		inner = append(inner, *armor.cookie)
@@ -687,12 +700,12 @@ func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, 
 	}
 	inner = append(inner, protocol.PAData{
 		PADataType:  fast.PAFXError,
-		PADataValue: s.errorResponse(code, service),
+		PADataValue: s.errorResponseWithText(code, service, text),
 	})
 	fastResponse := protocol.KrbFastResponse{PAData: inner, Nonce: nonce}
 	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
 	if err != nil {
-		return s.errorResponse(code, service)
+		return s.errorResponseWithText(code, service, text)
 	}
 	outer := protocol.MethodData{{
 		PADataType: fast.PAFXFast,
@@ -791,6 +804,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			return s.errorResponse(errCode, request.ReqBody.SName)
 		}
 	}
+	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	options := request.ReqBody.KDCOptions
 	if options&types.KDCRenew != 0 {
 		if code, ok := s.ticketValidity(ticketPart); !ok {
@@ -815,6 +829,10 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	} else if code, ok := s.ticketValidity(ticketPart); !ok {
 		return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 	}
+	ticketClient := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
+	if response := s.authorizationError(ticketClient, requestedServiceName, false, armor); response != nil {
+		return response
+	}
 	if apRequest.Ticket.Realm != s.Realm {
 		if (ticketPart.Transited.TrType == 0 && len(ticketPart.Transited.Contents) != 0) ||
 			(ticketPart.Transited.TrType != 0 && ticketPart.Transited.TrType != domainX500Compress) {
@@ -838,7 +856,6 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		ticketPart.Flags&types.TicketMayPostdate == 0 {
 		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 	}
-	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	serviceName := requestedServiceName
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
 		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
@@ -1332,19 +1349,45 @@ func selectKVNO(record kdb.PrincipalRecord, enctype int32, kvno *uint32) (kdb.Ke
 }
 
 func (s *Server) errorResponse(code int32, service *protocol.PrincipalName) []byte {
-	return s.errorResponseWithData(code, service, nil)
+	return s.errorResponseWithText(code, service, "")
 }
 
 func (s *Server) errorResponseWithData(code int32, service *protocol.PrincipalName, data []byte) []byte {
+	return s.errorResponseWithTextAndData(code, service, data, "")
+}
+
+func (s *Server) errorResponseWithText(code int32, service *protocol.PrincipalName, text string) []byte {
+	return s.errorResponseWithTextAndData(code, service, nil, text)
+}
+
+func (s *Server) errorResponseWithTextAndData(code int32, service *protocol.PrincipalName, data []byte, text string) []byte {
 	now := s.now().UTC()
 	if service == nil {
 		service = &protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", s.Realm}}
 	}
-	return marshalDER(protocol.KRBError{
+	reply := protocol.KRBError{
 		PVNO: 5, MsgType: 30,
 		STime: types.KerberosTime{Time: now, Present: true}, Susec: int32(now.Nanosecond() / 1000),
 		ErrorCode: code, Realm: s.Realm, SName: *service, EData: append([]byte(nil), data...),
-	})
+	}
+	if text != "" {
+		reply.EText = &text
+	}
+	return marshalDER(reply)
+}
+
+func (s *Server) authorizationError(client, service principal.Principal, asExchange bool, armor *fastContext) []byte {
+	if s.Authorize == nil {
+		return nil
+	}
+	if err := s.Authorize(client, service, asExchange); err != nil {
+		serviceName := protocolPrincipal(service)
+		if armor != nil {
+			return s.fastErrorResponseWithText(kdcErrPolicy, serviceName, nil, armor.nonce, armor, err.Error())
+		}
+		return s.errorResponseWithText(kdcErrPolicy, serviceName, err.Error())
+	}
+	return nil
 }
 
 func (s *Server) now() time.Time {
