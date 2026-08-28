@@ -30,7 +30,8 @@ disposable integration test environments.
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
   against real MIT `kinit`, `klist`, and `kvno` clients.
 - KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with a
-  `DelegationPolicy` hook for protocol transition and constrained delegation.
+  `DelegationPolicy` hook for protocol transition and constrained delegation;
+  MIT `kvno -U` and `kvno -P` interoperability is covered.
 - RFC-correct key-usage handling (authenticator subkey → usage 9 replies,
   mandatory checksum-type enforcement, raw request-body checksum
   verification).

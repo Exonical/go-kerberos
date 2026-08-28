@@ -173,6 +173,170 @@ func TestPAForUserChecksum(t *testing.T) {
 	if !verifyPAForUserChecksumForEType(etype, aesKey, crypto.ChecksumHMACSHA196AES128, data, aesChecksum) {
 		t.Fatal("valid AES PA-FOR-USER checksum rejected")
 	}
+	sha2, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha2Key := bytes.Repeat([]byte{0x32}, sha2.KeySize())
+	sha2Checksum, err := sha2.Checksum(sha2Key, 17, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifyPAForUserChecksumForEType(etype, sha2Key, crypto.ChecksumHMACSHA256128AES128, data, sha2Checksum) {
+		t.Fatal("valid AES-SHA2 PA-FOR-USER checksum rejected")
+	}
+}
+
+func TestServerS4UX509UsesAuthenticatorSubkey(t *testing.T) {
+	now := time.Unix(2000001817, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subkey := protocol.EncryptionKey{KeyType: tgt.Key.KeyType, KeyValue: bytes.Repeat([]byte{0x53}, len(tgt.Key.KeyValue))}
+	options := protocol.S4UOptionsUseReplyKeyUsage
+	userID := protocol.S4UUserID{
+		Nonce: 202, CName: protocolPrincipalForTest(user), CRealm: user.Realm, Options: &options,
+	}
+	placeholder := mustMarshal(t, protocol.PAS4UX509User{
+		UserID:   userID,
+		Checksum: protocol.Checksum{ChecksumType: mandatoryChecksumType(tgt.Key.KeyType), Checksum: make([]byte, 32)},
+	})
+	userIDDER, err := asn1.FieldContent(placeholder, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checksum, err := etype.Checksum(subkey.KeyValue, 26, userIDDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	padata := protocol.MethodData{{PADataType: protocol.PADataS4UX509User, PADataValue: mustMarshal(t, protocol.PAS4UX509User{
+		UserID:   userID,
+		Checksum: protocol.Checksum{ChecksumType: mandatoryChecksumType(tgt.Key.KeyType), Checksum: checksum},
+	})}}
+	response := server.HandleMessage(rawTGSRequestWithPadataAndSubkey(t, tgt, service, now, 0, padata, nil, &subkey))
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		t.Fatalf("TGS-REP: %v", err)
+	}
+	if len(reply.PAData) != 1 {
+		t.Fatalf("reply padata = %#v", reply.PAData)
+	}
+	var replyPA protocol.PAS4UX509User
+	if err := asn1.Unmarshal(reply.PAData[0].PADataValue, &replyPA); err != nil {
+		t.Fatal(err)
+	}
+	replyUserIDDER, err := asn1.FieldContent(reply.PAData[0].PADataValue, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := etype.VerifyChecksum(subkey.KeyValue, 27, replyUserIDDER, replyPA.Checksum.Checksum); err != nil {
+		t.Fatalf("reply checksum did not use authenticator subkey: %v", err)
+	}
+	if err := etype.VerifyChecksum(tgt.Key.KeyValue, 27, replyUserIDDER, replyPA.Checksum.Checksum); err == nil {
+		t.Fatal("reply checksum unexpectedly verified with TGT session key")
+	}
+}
+
+func TestS4UX509ChecksumKeySelection(t *testing.T) {
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionKey := bytes.Repeat([]byte{0x55}, etype.KeySize())
+	subkey := bytes.Repeat([]byte{0x56}, etype.KeySize())
+	data := []byte("S4U-X509 checksum data")
+	checksum, err := etype.Checksum(subkey, 26, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifyS4UChecksum(subkey, crypto.ChecksumHMACSHA196AES256, 26, data, checksum) {
+		t.Fatal("authenticator subkey checksum rejected")
+	}
+	if verifyS4UChecksum(sessionKey, crypto.ChecksumHMACSHA196AES256, 26, data, checksum) {
+		t.Fatal("checksum verified with wrong session key")
+	}
+	fallback, err := etype.Checksum(sessionKey, 26, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifyS4UChecksum(sessionKey, crypto.ChecksumHMACSHA196AES256, 26, data, fallback) {
+		t.Fatal("session-key fallback checksum rejected")
+	}
+	if verifyS4UChecksum(subkey, crypto.ChecksumHMACSHA196AES256, 26, data, fallback) {
+		t.Fatal("fallback checksum verified with wrong subkey")
+	}
+}
+
+func TestServerFASTErrorContainsFXError(t *testing.T) {
+	now := time.Unix(2000001818, 0).UTC()
+	server, kclient := testServer(t, now)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subkey := protocol.EncryptionKey{KeyType: tgt.Key.KeyType, KeyValue: bytes.Repeat([]byte{0x54}, len(tgt.Key.KeyValue))}
+	armor, err := fast.NewTGSArmor(fast.TGT{Key: tgt.Key}, subkey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	armorContext := &fastContext{etype: armor.EType, key: armor.Key, nonce: 77}
+	response := server.fastErrorResponse(kdcErrBadOption, protocolPrincipal(service), nil, 77, armorContext)
+	var outer protocol.KRBError
+	if err := asn1.Unmarshal(response, &outer); err != nil {
+		t.Fatalf("outer KRB-ERROR: %v", err)
+	}
+	var outerPA protocol.MethodData
+	if err := asn1.Unmarshal(outer.EData, &outerPA); err != nil {
+		t.Fatalf("outer error padata: %v", err)
+	}
+	var wrapper protocol.PAFXFastReply
+	var fastPA *protocol.PAData
+	for i := range outerPA {
+		if outerPA[i].PADataType == fast.PAFXFast {
+			fastPA = &outerPA[i]
+			break
+		}
+	}
+	if fastPA == nil {
+		t.Fatal("outer error missing PA-FX-FAST")
+	}
+	if err := asn1.Unmarshal(fastPA.PADataValue, &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := armor.EType.Decrypt(armor.Key, fast.UsageRep, wrapper.ArmoredData.EncFastRep.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fastResponse protocol.KrbFastResponse
+	if err := asn1.Unmarshal(plain, &fastResponse); err != nil {
+		t.Fatal(err)
+	}
+	var fxError *protocol.PAData
+	for i := range fastResponse.PAData {
+		if fastResponse.PAData[i].PADataType == fast.PAFXError {
+			fxError = &fastResponse.PAData[i]
+			break
+		}
+	}
+	if fxError == nil {
+		t.Fatal("FAST response missing PA-FX-ERROR")
+	}
+	var inner protocol.KRBError
+	if err := asn1.Unmarshal(fxError.PADataValue, &inner); err != nil {
+		t.Fatalf("inner KRB-ERROR: %v", err)
+	}
+	if inner.ErrorCode != kdcErrBadOption || inner.EData != nil {
+		t.Fatalf("inner KRB-ERROR = %#v, want code %d and absent e-data", inner, kdcErrBadOption)
+	}
 }
 
 func TestServerS4U2SelfLegacyPAForUser(t *testing.T) {
@@ -1957,6 +2121,10 @@ func rawTGSRequestWithTill(t *testing.T, tgt *client.Credentials, service princi
 }
 
 func rawTGSRequestWithPadata(t *testing.T, tgt *client.Credentials, service principal.Principal, now time.Time, options types.KDCOptions, padata protocol.MethodData, additional []protocol.Ticket, addresses ...protocol.HostAddresses) []byte {
+	return rawTGSRequestWithPadataAndSubkey(t, tgt, service, now, options, padata, additional, nil, addresses...)
+}
+
+func rawTGSRequestWithPadataAndSubkey(t *testing.T, tgt *client.Credentials, service principal.Principal, now time.Time, options types.KDCOptions, padata protocol.MethodData, additional []protocol.Ticket, subkey *protocol.EncryptionKey, addresses ...protocol.HostAddresses) []byte {
 	t.Helper()
 	etype, err := crypto.NewRegistry().Get(tgt.Key.KeyType)
 	if err != nil {
@@ -1980,6 +2148,7 @@ func rawTGSRequestWithPadata(t *testing.T, tgt *client.Credentials, service prin
 		AuthenticatorVNO: 5, CRealm: tgt.Client.Realm,
 		CName:    *protocolPrincipalForTest(tgt.Client),
 		Checksum: &protocol.Checksum{ChecksumType: mandatoryChecksumType(tgt.Key.KeyType), Checksum: checksum},
+		SubKey:   subkey,
 		Ctime:    types.KerberosTime{Time: now, Present: true},
 	}
 	authCipher, err := etype.Encrypt(tgt.Key.KeyValue, 7, mustMarshal(t, authenticator))
