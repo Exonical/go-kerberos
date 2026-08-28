@@ -75,6 +75,11 @@ disposable integration test environments.
   authenticated AS exchanges and validated TGS requests, including TGT gating
   and per-service policy checks; protocol-range KRB-ERROR codes are preserved,
   plain denials use `KDC_ERR_POLICY`, and FAST error wrapping is retained.
+- MIT-style KDC operational hardening: complete-request lookaside replay
+  caching for non-empty AS/TGS replies, including encoded KRB-ERROR replies,
+  over UDP and TCP, concurrent UDP processing, configurable UDP reply-size
+  fallback to `KRB_ERR_RESPONSE_TOO_BIG`, bounded UDP workers, one-minute TCP
+  idle deadlines, and a default 45-connection TCP cap.
 - RFC-correct key-usage handling (authenticator subkey → usage 9 replies,
   mandatory checksum-type enforcement, raw request-body checksum
   verification).

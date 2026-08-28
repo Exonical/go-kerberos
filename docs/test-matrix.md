@@ -29,6 +29,7 @@ when absent.
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 | MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Separate MIT kprop dump-push/full-resync transfer remains unimplemented; both live gates use compatible dump bootstrap before incremental polling |
+| KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -42,6 +43,20 @@ by unit and MIT integration tests. The optional `kdc.Server.Authorize` hook
 mirrors MIT's `kdcpolicy` plugin interface semantics for authenticated AS
 exchanges and validated TGS requests, preserving protocol-range KRB-ERROR
 codes and returning FAST-armored policy errors when denied.
+
+KDC UDP and TCP dispatches key the complete request packet in a bounded,
+two-minute lookaside cache. Successful AS-REP and TGS-REP responses are
+replayed verbatim, as are encoded protocol-error responses; an in-progress
+duplicate is discarded. UDP replies above the configured
+`MaxDatagramReplySize` are replaced with `KRB_ERR_RESPONSE_TOO_BIG`, allowing
+the client transport to retry over TCP. UDP request handlers are bounded by
+`MaxUDPWorkers` (default 1024) to provide backpressure. TCP connections use a
+one-minute idle deadline and a default 45-connection cap. The pinned MIT sources verify
+`MAX_DGRAM_SIZE` as 65536 bytes and `max_stream_data_connections` as 45;
+the inspected `net-server.c` does not expose an explicit idle-timeout
+constant, so the one-minute Go default follows the approved hardening design.
+MIT evicts an existing least-recently-started stream when its cap is exceeded;
+the Go listener closes newly accepted excess connections instead.
 
 MIT dump persistence decrypts database key data with AES master-key enctypes
 17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). Go version-7/r1.11 exports include
