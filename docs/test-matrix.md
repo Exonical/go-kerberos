@@ -28,6 +28,7 @@ when absent.
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
 | KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
+| MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Separate MIT kprop dump-push/full-resync transfer remains unimplemented; both live gates use compatible dump bootstrap before incremental polling |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
 
 The KDC supports optional server-wide preauthentication disablement, default
@@ -131,14 +132,18 @@ Go-to-MIT history round trips. Without a history principal, the KDB retains
 native history enforcement but cannot emit encrypted MIT history entries.
 The RFC 3244 `kpasswd.Server` serves password changes and set-password requests
 over UDP and TCP; the live integration suite covers the Go server with the MIT
-`kpasswd` client.
+`kpasswd` client. UDP requests are keyed by their complete packet bytes in a
+bounded, two-minute lookaside cache, so retransmissions receive the original
+response without repeating the password change; requests still in progress are
+dropped silently.
 
 The KDC applies named-policy lockout controls to PA-ENC-TIMESTAMP failures.
 Failure counters reset after `FailureCountInterval`, accounts are permanently
 or temporarily rejected with `KDC_ERR_CLIENT_REVOKED`, successful
 preauthentication resets the counter and records `LastSuccess`, and expired
-passwords return `KDC_ERR_KEY_EXP`. Lockout state is persisted only when the
-configured store implements the optional `kdb.LockoutUpdater`; lookup-only
+passwords return `KDC_ERR_KEY_EXP`. Lockout state uses atomic updates when the
+configured store implements the optional `kdb.LockoutRecorder`, with the
+legacy `kdb.LockoutUpdater` path retained for compatible stores; lookup-only
 stores continue to operate without durable counters.
 
 The Go client and `kadm5.Server` implement a focused MIT `kadm5`
