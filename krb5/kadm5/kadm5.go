@@ -44,6 +44,7 @@ const (
 	modifyPrincipal  = 3
 	renamePrincipal  = 4
 	chpassPrincipal  = 6
+	chpassPrincipal3 = 19
 	chrandPrincipal  = 7
 	createPolicy     = 8
 	deletePolicy     = 9

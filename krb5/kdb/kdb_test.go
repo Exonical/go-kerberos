@@ -64,6 +64,55 @@ func TestChangePasswordPreservesAdministrativeFields(t *testing.T) {
 	}
 }
 
+func TestChangePasswordPolicy(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "Old-password1!"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(2000000000, 0).UTC()
+	policy := PolicyRecord{
+		Name: "strong", MinLength: 12, MinClasses: 3, HistoryNum: 3,
+		MinLife: 60, MaxLife: 3600,
+	}
+	record, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	record.LastPasswordChange = now
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ChangePasswordWithPolicy(*name, "short", now, &policy, false); err != ErrPasswordTooShort {
+		t.Fatalf("short password error = %v", err)
+	}
+	if err := db.ChangePasswordWithPolicy(*name, "all-lowercase", now, &policy, false); err != ErrPasswordClasses {
+		t.Fatalf("class password error = %v", err)
+	}
+	if err := db.ChangePasswordWithPolicy(*name, "New-password1!", now.Add(time.Second), &policy, false); err != ErrPasswordTooSoon {
+		t.Fatalf("minimum-life error = %v", err)
+	}
+	if err := db.ChangePasswordWithPolicy(*name, "New-password1!", now, &policy, true); err != nil {
+		t.Fatalf("administrative change: %v", err)
+	}
+	record, ok, err = db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	if !record.PasswordExpiration.Equal(now.Add(time.Hour)) {
+		t.Fatalf("password expiration = %v, want %v", record.PasswordExpiration, now.Add(time.Hour))
+	}
+	if len(record.PasswordHistory) != 1 {
+		t.Fatalf("password history length = %d, want 1", len(record.PasswordHistory))
+	}
+	if err := db.ChangePasswordWithPolicy(*name, "Old-password1!", now.Add(2*time.Minute), &policy, true); err != ErrPasswordReuse {
+		t.Fatalf("history reuse error = %v", err)
+	}
+}
+
 func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddPrincipal("alice", "alice-password", 3, 7); err != nil {

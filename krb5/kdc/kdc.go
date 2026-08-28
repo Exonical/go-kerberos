@@ -40,6 +40,8 @@ const (
 	kdcErrBadOption        = 13
 	kdcErrPolicy           = 12
 	kdcErrCannotPostdate   = 10
+	kdcErrClientRevoked    = 18
+	kdcErrKeyExpired       = 23
 	kdcErrClientNotTrusted = 62
 	krbAPErrBadIntegrity   = 31
 	krbAPErrTktExpired     = 32
@@ -223,6 +225,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(kdcErrCPrincipal, request.ReqBody.SName)
 	}
+	if s.lockedOut(clientName, &clientRecord) {
+		return s.errorResponse(kdcErrClientRevoked, request.ReqBody.SName)
+	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
@@ -263,17 +268,24 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			clientName.Realm, clientName.Components); err != nil {
 			return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 		}
+		if s.passwordExpired(clientRecord) {
+			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+		}
 		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
 			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
+		s.recordPreauthSuccess(clientName, &clientRecord)
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, &paRep)
 	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
+			if s.passwordExpired(clientRecord) {
+				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, false, nil, nil)
 		}
@@ -312,6 +324,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	timestampPlain, err := etype.Decrypt(clientKey.Key, 1, timestampCipher)
 	if err != nil {
+		s.recordPreauthFailure(clientName, &clientRecord)
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
 		}
@@ -324,6 +337,14 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.fastErrorResponse(krbAPErrSkew, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
 		}
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
+	}
+	s.recordPreauthSuccess(clientName, &clientRecord)
+	if !clientRecord.PasswordExpiration.IsZero() &&
+		!s.now().Before(clientRecord.PasswordExpiration) {
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil)
@@ -1331,6 +1352,70 @@ func (s *Server) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func (s *Server) passwordPolicy(record kdb.PrincipalRecord) (kdb.PolicyRecord, bool) {
+	if record.Policy == "" {
+		return kdb.PolicyRecord{}, false
+	}
+	resolver, ok := s.DB.(kdb.PolicyResolver)
+	if !ok {
+		return kdb.PolicyRecord{}, false
+	}
+	policy, err := resolver.GetPolicy(record.Policy)
+	if err != nil {
+		return kdb.PolicyRecord{}, false
+	}
+	return policy, true
+}
+
+func (s *Server) persistLockout(name principal.Principal, record kdb.PrincipalRecord) {
+	updater, ok := s.DB.(kdb.LockoutUpdater)
+	if !ok {
+		return
+	}
+	_ = updater.UpdateLockout(name, record.FailAuthCount, record.LastFailed, record.LastSuccess)
+}
+
+func (s *Server) lockedOut(name principal.Principal, record *kdb.PrincipalRecord) bool {
+	policy, ok := s.passwordPolicy(*record)
+	if !ok {
+		return false
+	}
+	now := s.now()
+	if policy.FailureCountInterval > 0 && !record.LastFailed.IsZero() &&
+		!now.Before(record.LastFailed.Add(time.Duration(policy.FailureCountInterval)*time.Second)) {
+		record.FailAuthCount = 0
+		s.persistLockout(name, *record)
+	}
+	if policy.MaxFailure == 0 || record.FailAuthCount < policy.MaxFailure {
+		return false
+	}
+	if policy.LockoutDuration == 0 {
+		return true
+	}
+	return now.Before(record.LastFailed.Add(time.Duration(policy.LockoutDuration) * time.Second))
+}
+
+func (s *Server) recordPreauthFailure(name principal.Principal, record *kdb.PrincipalRecord) {
+	policy, ok := s.passwordPolicy(*record)
+	if ok && policy.FailureCountInterval > 0 && !record.LastFailed.IsZero() &&
+		!s.now().Before(record.LastFailed.Add(time.Duration(policy.FailureCountInterval)*time.Second)) {
+		record.FailAuthCount = 0
+	}
+	record.FailAuthCount++
+	record.LastFailed = s.now()
+	s.persistLockout(name, *record)
+}
+
+func (s *Server) recordPreauthSuccess(name principal.Principal, record *kdb.PrincipalRecord) {
+	record.FailAuthCount = 0
+	record.LastSuccess = s.now()
+	s.persistLockout(name, *record)
+}
+
+func (s *Server) passwordExpired(record kdb.PrincipalRecord) bool {
+	return !record.PasswordExpiration.IsZero() && !s.now().Before(record.PasswordExpiration)
 }
 
 // ticketValidity reports whether a presented ticket is usable now, returning

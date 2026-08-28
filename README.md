@@ -30,6 +30,12 @@ disposable integration test environments.
   entries use MIT's ordered permissions, component wildcards, and target
   back-references. Restriction clauses are rejected because the server cannot
   apply field-level ACL restrictions.
+- **MIT password policy and account lockout**: kadm5 cleartext password
+  changes enforce minimum length, character classes, minimum lifetime,
+  password history, and maximum lifetime. The KDC tracks preauthentication
+  failures, failure intervals, temporary/permanent lockouts, and expired
+  passwords. `kdb.Store` remains backward compatible; lockout persistence is
+  used when a store implements `kdb.LockoutUpdater`.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
@@ -139,6 +145,12 @@ encryption type.
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
 transited-policy checking are intentionally out of scope.
+
+Password history is retained as derived key sets in the in-memory
+`PrincipalRecord`; it is never stored as cleartext. This store-native history
+is not represented in MIT version-7 dump files. RFC 3244 kpasswd server
+handling is not included because this repository currently provides only the
+kpasswd client; kadm5 cleartext changes are policy-enforced.
 
 ## License
 

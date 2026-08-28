@@ -30,6 +30,10 @@ const (
 	authExtract     = 43787587
 	authList        = 43787571
 	apiUnsupported  = 43787530
+	passTooShort    = 43787542
+	passClass       = 43787543
+	passReuse       = 43787545
+	passTooSoon     = 43787546
 )
 
 // Server implements the kadm5 RPC service over a TCP listener.
@@ -44,6 +48,7 @@ type Server struct {
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
 	API            uint32
 	ErrorLog       func(error)
+	Now            func() time.Time
 
 	wg sync.WaitGroup
 }
@@ -326,7 +331,7 @@ func (s *Server) handleGSS(_ net.Conn, call rpcCall, session *serverSession) ([]
 func knownProcedure(proc uint32) bool {
 	switch proc {
 	case initProcedure, createPrincipal, deletePrincipal, modifyPrincipal,
-		renamePrincipal, getPrincipal, chpassPrincipal, chrandPrincipal,
+		renamePrincipal, getPrincipal, chpassPrincipal, chpassPrincipal3, chrandPrincipal,
 		createPolicy, deletePolicy, modifyPolicy, getPolicy, getPrivs,
 		getPrincs, getPolicies, getStrings, setString, setkeyPrincipal4,
 		extractKeys:
@@ -493,10 +498,27 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		w.raw(status(0))
 		writeEntryWithModifier(&w, recordEntry(record), KADM5Policy, true)
 		return w.bytes()
-	case chpassPrincipal:
+	case chpassPrincipal, chpassPrincipal3:
 		p, err := readPrincipal()
 		if err != nil {
 			return status(43787548)
+		}
+		if proc == chpassPrincipal3 {
+			if _, err := r.boolean(); err != nil {
+				return status(43787548)
+			}
+			count, err := r.u32()
+			if err != nil || count > 1024 {
+				return status(43787548)
+			}
+			for i := uint32(0); i < count; i++ {
+				if _, err := r.i32(); err != nil {
+					return status(43787548)
+				}
+				if _, err := r.i32(); err != nil {
+					return status(43787548)
+				}
+			}
 		}
 		password, err := r.nullString()
 		if err != nil || r.done() != nil {
@@ -505,7 +527,22 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "change-password", p) {
 			return status(authChangePass)
 		}
-		return status(kdbCode(s.Database.ChangePassword(p, password)))
+		record, ok, err := s.Database.Lookup(p)
+		if err != nil || !ok {
+			return status(43787534)
+		}
+		var policy *kdb.PolicyRecord
+		if record.Policy != "" {
+			value, policyErr := s.Database.GetPolicy(record.Policy)
+			if policyErr != nil {
+				return status(kdbCode(policyErr))
+			}
+			policy = &value
+		}
+		bypassMinLife := !principalEqual(client, p) &&
+			s.authorize(client, "modify", p)
+		return status(kdbCode(s.Database.ChangePasswordWithPolicy(
+			p, password, s.now(), policy, bypassMinLife)))
 	case chrandPrincipal:
 		p, err := readPrincipal()
 		if err != nil || r.done() != nil {
@@ -719,6 +756,13 @@ func statusReply(api, code uint32) []byte {
 	return w.bytes()
 }
 
+func (s *Server) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func kdbCode(err error) uint32 {
 	if err == nil {
 		return 0
@@ -734,6 +778,14 @@ func kdbCode(err error) uint32 {
 		return 43787533
 	case errors.Is(err, kdb.ErrPolicyInUse):
 		return 43787547
+	case errors.Is(err, kdb.ErrPasswordTooShort):
+		return passTooShort
+	case errors.Is(err, kdb.ErrPasswordClasses):
+		return passClass
+	case errors.Is(err, kdb.ErrPasswordReuse):
+		return passReuse
+	case errors.Is(err, kdb.ErrPasswordTooSoon):
+		return passTooSoon
 	default:
 		return 43787548
 	}
@@ -753,7 +805,8 @@ func recordEntry(r kdb.PrincipalRecord) PrincipalEntry {
 		pwExpire = int32(r.PasswordExpiration.Unix())
 	}
 	return PrincipalEntry{
-		Principal: r.Name, PrincExpireTime: expire, PWExpiration: pwExpire,
+		Principal: r.Name, PrincExpireTime: expire,
+		LastPwdChange: unixSeconds(r.LastPasswordChange), PWExpiration: pwExpire,
 		MaxLife: int32(r.MaxLife / time.Second), Attributes: int32(r.Flags),
 		KVNO: r.KVNO, Policy: r.Policy, MaxRenewableLife: int32(r.MaxRenew / time.Second),
 	}
@@ -765,6 +818,9 @@ func applyEntry(r *kdb.PrincipalRecord, e PrincipalEntry, mask int32) {
 	}
 	if mask&KADM5PrincExpireTime != 0 {
 		r.Expiration = unixTime(e.PrincExpireTime)
+	}
+	if mask&KADM5LastPwdChange != 0 {
+		r.LastPasswordChange = unixTime(e.LastPwdChange)
 	}
 	if mask&KADM5PWExpiration != 0 {
 		r.PasswordExpiration = unixTime(e.PWExpiration)
@@ -789,6 +845,13 @@ func unixTime(value int32) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(int64(value), 0).UTC()
+}
+
+func unixSeconds(value time.Time) int32 {
+	if value.IsZero() {
+		return 0
+	}
+	return int32(value.Unix())
 }
 
 func policyRecord(p Policy) kdb.PolicyRecord {

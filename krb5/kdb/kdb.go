@@ -30,8 +30,12 @@ type TLData struct {
 
 // PrincipalRecord contains a principal and its KDC policy.
 type PrincipalRecord struct {
-	Name               principal.Principal
-	Keys               map[int32]Key
+	Name principal.Principal
+	Keys map[int32]Key
+	// PasswordHistory contains prior derived key sets, newest first. It is
+	// store-native metadata and is not included in MIT dump records.
+	PasswordHistory    []map[int32]Key
+	LastPasswordChange time.Time
 	Strings            map[string]string
 	KVNO               uint32
 	Flags              uint32
@@ -68,6 +72,10 @@ var (
 	ErrPolicyExists      = errors.New("policy already exists")
 	ErrPolicyNotFound    = errors.New("policy not found")
 	ErrPolicyInUse       = errors.New("policy is in use")
+	ErrPasswordTooShort  = errors.New("password is too short")
+	ErrPasswordClasses   = errors.New("password does not contain enough character classes")
+	ErrPasswordTooSoon   = errors.New("password minimum life has not expired")
+	ErrPasswordReuse     = errors.New("password reuse")
 )
 
 // Store resolves principal records for the KDC. Lookup returns false with a
@@ -82,6 +90,18 @@ type Store interface {
 // reply; Store implementations may keep ordinary Lookup canonical-only.
 type AliasResolver interface {
 	ResolveAlias(principal.Principal) (principal.Principal, bool, error)
+}
+
+// LockoutUpdater optionally persists authentication status updates made by
+// the KDC. Stores which do not implement it remain usable without lockout
+// persistence.
+type LockoutUpdater interface {
+	UpdateLockout(principal.Principal, uint32, time.Time, time.Time) error
+}
+
+// PolicyResolver optionally resolves named password policies for the KDC.
+type PolicyResolver interface {
+	GetPolicy(string) (PolicyRecord, error)
 }
 
 // Database is a concurrency-safe in-memory principal store.
@@ -148,7 +168,8 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 		}
 		keys[enctype] = Key{Enctype: enctype, KVNO: latest, Key: derived, Salt: string(salt)}
 	}
-	record := PrincipalRecord{Name: *parsedName, Keys: keys, Strings: make(map[string]string), KVNO: latest}
+	record := PrincipalRecord{Name: *parsedName, Keys: keys, Strings: make(map[string]string),
+		KVNO: latest, LastPasswordChange: time.Now().UTC()}
 	db.mu.Lock()
 	db.principals[canonical(*parsedName)] = record
 	db.mu.Unlock()
@@ -195,7 +216,8 @@ func deriveRecord(name principal.Principal, password string, kvno uint32) (Princ
 		}
 		keys[enctype] = Key{Enctype: enctype, KVNO: kvno, Key: derived, Salt: string(salt)}
 	}
-	return PrincipalRecord{Name: name, Keys: keys, Strings: make(map[string]string), KVNO: kvno}, nil
+	return PrincipalRecord{Name: name, Keys: keys, Strings: make(map[string]string),
+		KVNO: kvno, LastPasswordChange: time.Now().UTC()}, nil
 }
 
 // DeletePrincipal removes a principal.
@@ -231,12 +253,45 @@ func (db *Database) UpdatePrincipal(record PrincipalRecord) error {
 	if record.Strings == nil {
 		record.Strings = current.Strings
 	}
+	if record.PasswordHistory == nil {
+		record.PasswordHistory = current.PasswordHistory
+	}
+	if record.LastPasswordChange.IsZero() {
+		record.LastPasswordChange = current.LastPasswordChange
+	}
 	db.principals[key] = copyRecord(record)
+	return nil
+}
+
+// UpdateLockout updates only authentication status fields for a principal.
+func (db *Database) UpdateLockout(name principal.Principal, failCount uint32,
+	lastFailed, lastSuccess time.Time) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	record, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	record.FailAuthCount = failCount
+	record.LastFailed = lastFailed
+	record.LastSuccess = lastSuccess
+	db.principals[key] = record
 	return nil
 }
 
 // ChangePassword replaces all supported keys with keys derived from password.
 func (db *Database) ChangePassword(name principal.Principal, password string) error {
+	return db.ChangePasswordWithPolicy(name, password, time.Now().UTC(), nil, false)
+}
+
+// ChangePasswordWithPolicy derives new keys and applies password policy
+// checks. A nil policy performs an unrestricted password change.
+func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password string,
+	now time.Time, policy *PolicyRecord, bypassMinLife bool) error {
 	if db == nil {
 		return ErrPrincipalNotFound
 	}
@@ -251,10 +306,89 @@ func (db *Database) ChangePassword(name principal.Principal, password string) er
 	if err != nil {
 		return err
 	}
+	if policy != nil {
+		if policy.MinLength > 0 && int32(len(password)) < policy.MinLength {
+			return ErrPasswordTooShort
+		}
+		if policy.MinClasses > 0 && passwordClasses(password) < policy.MinClasses {
+			return ErrPasswordClasses
+		}
+		if !bypassMinLife && policy.MinLife > 0 && !current.LastPasswordChange.IsZero() &&
+			now.Before(current.LastPasswordChange.Add(time.Duration(policy.MinLife)*time.Second)) {
+			return ErrPasswordTooSoon
+		}
+		if policy.HistoryNum > 0 {
+			historyLimit := int(policy.HistoryNum) - 1
+			limit := historyLimit
+			if passwordMatchesKeys(next.Keys, current.Keys) {
+				return ErrPasswordReuse
+			}
+			if limit > len(current.PasswordHistory) {
+				limit = len(current.PasswordHistory)
+			}
+			for _, historical := range current.PasswordHistory[:limit] {
+				if passwordMatchesKeys(next.Keys, historical) {
+					return ErrPasswordReuse
+				}
+			}
+			history := make([]map[int32]Key, 0, limit+1)
+			history = append(history, copyKeys(current.Keys))
+			history = append(history, current.PasswordHistory...)
+			if len(history) > historyLimit {
+				history = history[:historyLimit]
+			}
+			current.PasswordHistory = history
+		}
+		if policy.MaxLife > 0 {
+			current.PasswordExpiration = now.Add(time.Duration(policy.MaxLife) * time.Second)
+		} else {
+			current.PasswordExpiration = time.Time{}
+		}
+	}
 	current.Keys = next.Keys
 	current.KVNO = next.KVNO
+	current.LastPasswordChange = now.UTC()
 	db.principals[key] = current
 	return nil
+}
+
+func passwordClasses(password string) int32 {
+	var lower, upper, digit, punct, other bool
+	for _, c := range []byte(password) {
+		switch {
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= '0' && c <= '9':
+			digit = true
+		case (c >= '!' && c <= '/') || (c >= ':' && c <= '@') ||
+			(c >= '[' && c <= '`') || (c >= '{' && c <= '~'):
+			punct = true
+		default:
+			other = true
+		}
+	}
+	var count int32
+	for _, present := range []bool{lower, upper, digit, punct, other} {
+		if present {
+			count++
+		}
+	}
+	return count
+}
+
+func passwordMatchesKeys(candidate, stored map[int32]Key) bool {
+	if len(candidate) == 0 || len(candidate) != len(stored) {
+		return false
+	}
+	for enctype, key := range candidate {
+		other, ok := stored[enctype]
+		if !ok || key.Salt != other.Salt || string(key.Key) != string(other.Key) {
+			return false
+		}
+	}
+	return true
 }
 
 // RandomizeKeys generates fresh keys and increments the principal KVNO.
@@ -577,6 +711,11 @@ func copyKeys(keys map[int32]Key) map[int32]Key {
 
 func copyRecord(record PrincipalRecord) PrincipalRecord {
 	record.Keys = copyKeys(record.Keys)
+	history := make([]map[int32]Key, len(record.PasswordHistory))
+	for i, keys := range record.PasswordHistory {
+		history[i] = copyKeys(keys)
+	}
+	record.PasswordHistory = history
 	stringsCopy := make(map[string]string, len(record.Strings))
 	for key, value := range record.Strings {
 		stringsCopy[key] = value
