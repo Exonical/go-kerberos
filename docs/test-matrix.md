@@ -38,8 +38,9 @@ requested; a non-nil policy clears disallowed flags, matching MIT's
 flag restrictions per principal, while this implementation exposes
 server-level knobs. Renewable, postdated, and validation behavior is covered
 by unit and MIT integration tests. The optional `kdc.Server.Authorize` hook
-gates authenticated AS exchanges and validated TGS requests, returning
-`KDC_ERR_POLICY` (including FAST-armored policy errors) when denied.
+mirrors MIT's `kdcpolicy` plugin interface semantics for authenticated AS
+exchanges and validated TGS requests, preserving protocol-range KRB-ERROR
+codes and returning FAST-armored policy errors when denied.
 
 MIT dump persistence decrypts database key data with AES master-key enctypes
 17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). Go version-7/r1.11 exports include

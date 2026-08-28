@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -110,6 +111,57 @@ func TestServerAuthorizationHookASAndTGS(t *testing.T) {
 	server.Authorize = nil
 	if _, err := kclient.TGSExchange(context.Background(), tgt, service); err != nil {
 		t.Fatalf("nil authorization hook TGS exchange: %v", err)
+	}
+}
+
+func TestServerAuthorizationHookMapsKRBErrorCodes(t *testing.T) {
+	now := time.Unix(2000000025, 0).UTC()
+	tests := []struct {
+		name string
+		err  error
+		want int32
+	}{
+		{
+			name: "wrapped policy",
+			err:  fmt.Errorf("wrapped: %w", krberrors.NewKRBError(12, "", "TEST.REALM", now, 0, nil)),
+			want: kdcErrPolicy,
+		},
+		{
+			name: "wrapped client revoked",
+			err:  fmt.Errorf("wrapped: %w", krberrors.NewKRBError(18, "", "TEST.REALM", now, 0, nil)),
+			want: kdcErrClientRevoked,
+		},
+		{name: "plain error", err: errors.New("plain authorization denial"), want: kdcErrPolicy},
+		{
+			name: "out of range",
+			err:  krberrors.NewKRBError(129, "", "TEST.REALM", now, 0, nil),
+			want: kdcErrGeneric,
+		},
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := testServer(t, now)
+			server.Authorize = func(principal.Principal, principal.Principal, bool) error {
+				return test.err
+			}
+			request := asRequest(user, service, 1)
+			addPreauthPassword(t, &request, "alice-password", now)
+			var kerberosError protocol.KRBError
+			if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &kerberosError); err != nil {
+				t.Fatalf("authorization response: %v", err)
+			}
+			if kerberosError.ErrorCode != test.want {
+				t.Fatalf("authorization code = %d, want %d", kerberosError.ErrorCode, test.want)
+			}
+			if kerberosError.EText == nil || *kerberosError.EText != test.err.Error() {
+				t.Fatalf("authorization text = %v, want %q", kerberosError.EText, test.err.Error())
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -78,8 +80,10 @@ type Server struct {
 	PKINITSigner      stdcrypto.Signer
 	// PKINITClientCAs trusts client certificates for PKINIT authentication.
 	PKINITClientCAs *x509.CertPool
-	// Authorize optionally controls authenticated AS exchanges and validated
-	// TGS requests. A nil hook permits all requests.
+	// Authorize optionally mirrors MIT's kdcpolicy plugin hook for authenticated
+	// AS exchanges and validated TGS requests. A nil hook permits all requests.
+	// Hook KRBError codes in the protocol range are returned unchanged; other
+	// errors default to KDC_ERR_POLICY or KRB_ERR_GENERIC as appropriate.
 	Authorize func(client, service principal.Principal, asExchange bool) error
 
 	replayMu sync.Mutex
@@ -1382,10 +1386,18 @@ func (s *Server) authorizationError(client, service principal.Principal, asExcha
 	}
 	if err := s.Authorize(client, service, asExchange); err != nil {
 		serviceName := protocolPrincipal(service)
-		if armor != nil {
-			return s.fastErrorResponseWithText(kdcErrPolicy, serviceName, nil, armor.nonce, armor, err.Error())
+		code := int32(kdcErrPolicy)
+		var kerberosError *krberrors.KRBError
+		if stderrors.As(err, &kerberosError) {
+			code = int32(kerberosError.Code)
+			if code < 0 || code > 128 {
+				code = kdcErrGeneric
+			}
 		}
-		return s.errorResponseWithText(kdcErrPolicy, serviceName, err.Error())
+		if armor != nil {
+			return s.fastErrorResponseWithText(code, serviceName, nil, armor.nonce, armor, err.Error())
+		}
+		return s.errorResponseWithText(code, serviceName, err.Error())
 	}
 	return nil
 }
