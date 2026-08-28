@@ -184,6 +184,23 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	}
 }
 
+func TestMITClientS4U2SelfAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	k.run(t, "host-password\n", "/usr/bin/kinit", "-f", "host/service.test")
+	output := k.run(t, "", "/usr/bin/kvno", "-U", "alice", "host/service.test")
+	t.Logf("MIT kvno S4U2Self output:\n%s", output)
+	if !strings.Contains(output, "host/service.test@"+goKDCRealm) ||
+		!strings.Contains(output, "kvno = 1") {
+		t.Fatalf("MIT kvno S4U2Self output unexpected:\n%s", output)
+	}
+	proxy := k.run(t, "", "/usr/bin/kvno", "-P", "-U", "alice", "HTTP/backend.test")
+	t.Logf("MIT kvno S4U2Proxy output:\n%s", proxy)
+	if !strings.Contains(proxy, "HTTP/backend.test@"+goKDCRealm) ||
+		!strings.Contains(proxy, "kvno = 1") {
+		t.Fatalf("MIT kvno S4U2Proxy output unexpected:\n%s", proxy)
+	}
+}
+
 func TestGoClientS4UAgainstGoKDC(t *testing.T) {
 	k := startGoKDC(t)
 	data, err := os.ReadFile(k.config)

@@ -658,6 +658,10 @@ func (s *Server) fastErrorResponse(code int32, service *protocol.PrincipalName, 
 			inner = append(inner, errorData...)
 		}
 	}
+	inner = append(inner, protocol.PAData{
+		PADataType:  fast.PAFXError,
+		PADataValue: s.errorResponse(code, service),
+	})
 	fastResponse := protocol.KrbFastResponse{PAData: inner, Nonce: nonce}
 	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
 	if err != nil {
@@ -831,21 +835,23 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		if err := asn1.Unmarshal(pa130.PADataValue, &value); err != nil ||
 			value.UserID.CName == nil || value.UserID.CRealm == "" ||
 			len(value.UserID.CName.NameString) == 0 ||
-			value.UserID.Nonce != request.ReqBody.Nonce ||
-			value.Checksum.ChecksumType != mandatoryChecksumType(ticketPart.Key.KeyType) {
+			value.UserID.Nonce != request.ReqBody.Nonce {
 			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
 		}
 		userIDDER, err := asn1.FieldContent(pa130.PADataValue, 0)
 		if err != nil {
 			userIDDER = marshalDER(value.UserID)
 		}
-		etype, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
-		if err != nil || etype.VerifyChecksum(ticketPart.Key.KeyValue, 26, userIDDER, value.Checksum.Checksum) != nil {
+		s4uKey := ticketPart.Key
+		if authenticator.SubKey != nil {
+			s4uKey = *authenticator.SubKey
+		}
+		if !verifyS4UChecksum(s4uKey.KeyValue, value.Checksum.ChecksumType, 26, userIDDER, value.Checksum.Checksum) {
 			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
 		}
 		id := value.UserID
 		s4uUser = &id
-		checksum, err := etype.Checksum(ticketPart.Key.KeyValue, 27, userIDDER)
+		checksum, err := makeS4UChecksum(s4uKey.KeyValue, value.Checksum.ChecksumType, 27, userIDDER)
 		if err != nil {
 			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
 		}
@@ -1003,8 +1009,56 @@ func verifyPAForUserChecksumForEType(etype crypto.EType, key []byte, checksumTyp
 	if checksumType == -138 {
 		return verifyPAForUserChecksum(key, 17, data, expected)
 	}
-	return etype != nil && checksumType == mandatoryChecksumType(etype.ID()) &&
-		etype.VerifyChecksum(key, 17, data, expected) == nil
+	return etype != nil && verifyS4UChecksum(key, checksumType, 17, data, expected)
+}
+
+// verifyS4UChecksum verifies one of the keyed checksum types supported by the
+// AES session-key enctypes.  PA-FOR-USER additionally accepts the legacy
+// RFC 4757 checksum above; callers choose the usage appropriate to the
+// padata being processed.
+func verifyS4UChecksum(key []byte, checksumType int32, usage uint32, data, expected []byte) bool {
+	if checksumType == -138 {
+		return usage == 17 && verifyPAForUserChecksum(key, usage, data, expected)
+	}
+	etypeID := int32(0)
+	switch checksumType {
+	case crypto.ChecksumHMACSHA196AES128:
+		etypeID = crypto.EnctypeAES128SHA1
+	case crypto.ChecksumHMACSHA196AES256:
+		etypeID = crypto.EnctypeAES256SHA1
+	case crypto.ChecksumHMACSHA256128AES128:
+		etypeID = crypto.EnctypeAES128SHA256
+	case crypto.ChecksumHMACSHA384192AES256:
+		etypeID = crypto.EnctypeAES256SHA384
+	default:
+		return false
+	}
+	etype, err := crypto.NewRegistry().Get(etypeID)
+	return err == nil && etype.VerifyChecksum(key, usage, data, expected) == nil
+}
+
+func makeS4UChecksum(key []byte, checksumType int32, usage uint32, data []byte) ([]byte, error) {
+	if checksumType == -138 {
+		return nil, fmt.Errorf("unsupported S4U checksum type %d", checksumType)
+	}
+	var etypeID int32
+	switch checksumType {
+	case crypto.ChecksumHMACSHA196AES128:
+		etypeID = crypto.EnctypeAES128SHA1
+	case crypto.ChecksumHMACSHA196AES256:
+		etypeID = crypto.EnctypeAES256SHA1
+	case crypto.ChecksumHMACSHA256128AES128:
+		etypeID = crypto.EnctypeAES128SHA256
+	case crypto.ChecksumHMACSHA384192AES256:
+		etypeID = crypto.EnctypeAES256SHA384
+	default:
+		return nil, fmt.Errorf("unsupported S4U checksum type %d", checksumType)
+	}
+	etype, err := crypto.NewRegistry().Get(etypeID)
+	if err != nil {
+		return nil, err
+	}
+	return etype.Checksum(key, usage, data)
 }
 
 func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byte, ticketPart protocol.EncTicketPart, authenticator protocol.Authenticator) (protocol.TGSReq, *fastContext, int32) {
