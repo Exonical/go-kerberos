@@ -209,3 +209,106 @@ func TestGoDumpLoadsIntoMIT(t *testing.T) {
 		t.Fatalf("klist does not show dumped principal:\n%s", listing)
 	}
 }
+
+func TestMITPasswordHistoryRoundTrip(t *testing.T) {
+	t.Run("MITToGo", func(t *testing.T) {
+		mitRealm := testenv.Start(t)
+		mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+			"addpol -minlength 1 -history 3 history-policy")
+		mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+			"modprinc -policy history-policy alice")
+		mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+			"cpw -pw alice-history-2 alice")
+		mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+			"cpw -pw alice-history-3 alice")
+
+		dumpPath := filepath.Join(mitRealm.Dir, "history.dump")
+		mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "dump", "-r18", dumpPath)
+		store, err := mitdump.LoadWithMasterPassword(dumpPath, testenv.MasterKey)
+		if err != nil {
+			t.Fatalf("load MIT history dump: %v", err)
+		}
+		name, err := principal.Parse("alice@" + testenv.RealmName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, ok, err := store.Lookup(*name)
+		if err != nil || !ok {
+			t.Fatalf("lookup dumped alice: %v, %v", err, ok)
+		}
+		if len(record.PasswordHistory) != 2 {
+			t.Fatalf("MIT password history entries = %d, want 2", len(record.PasswordHistory))
+		}
+		if record.Policy != "history-policy" {
+			t.Fatalf("MIT password policy = %q, want history-policy", record.Policy)
+		}
+		if record.AdminHistoryKVNO == 0 {
+			t.Fatal("MIT history KVNO was not decoded")
+		}
+
+		db := kdb.NewDatabase(testenv.RealmName)
+		if err := db.AddPrincipal("alice", "placeholder"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.UpdatePrincipal(record); err != nil {
+			t.Fatal(err)
+		}
+		err = db.ChangePasswordWithPolicy(*name, "alice-password",
+			time.Now().UTC(), &kdb.PolicyRecord{Name: "history-policy", HistoryNum: 3}, true)
+		if err != kdb.ErrPasswordReuse {
+			t.Fatalf("Go history reuse error = %v, want %v", err, kdb.ErrPasswordReuse)
+		}
+	})
+
+	t.Run("GoToMIT", func(t *testing.T) {
+		mitRealm := testenv.Start(t)
+		mitRealm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
+			"addpol -minlength 1 -history 3 history-policy")
+		db := kdb.NewDatabase(testenv.RealmName)
+		if err := db.AddPrincipal("kadmin/history", "go-history-key", 2); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.AddPrincipal("history-user", "go-history-1"); err != nil {
+			t.Fatal(err)
+		}
+		name, err := principal.Parse("history-user@" + testenv.RealmName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, ok, err := db.Lookup(*name)
+		if err != nil || !ok {
+			t.Fatalf("lookup history-user: %v, %v", err, ok)
+		}
+		record.Policy = "history-policy"
+		if err := db.UpdatePrincipal(record); err != nil {
+			t.Fatal(err)
+		}
+		policy := &kdb.PolicyRecord{Name: "history-policy", HistoryNum: 3}
+		if err := db.ChangePasswordWithPolicy(*name, "go-history-2",
+			time.Now().UTC(), policy, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ChangePasswordWithPolicy(*name, "go-history-3",
+			time.Now().UTC().Add(time.Second), policy, true); err != nil {
+			t.Fatal(err)
+		}
+		dump, err := mitdump.Dump(db, testenv.MasterKey)
+		if err != nil {
+			t.Fatalf("dump Go history database: %v", err)
+		}
+		dumpPath := filepath.Join(mitRealm.Dir, "go-history.dump")
+		if err := os.WriteFile(dumpPath, dump, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "load", "-update", dumpPath)
+
+		cmd := exec.Command("/usr/sbin/kadmin.local", "-q",
+			"cpw -pw go-history-1 history-user")
+		cmd.Env = []string{"KRB5_CONFIG=" + mitRealm.Config,
+			"KRB5_KDC_PROFILE=" + mitRealm.KDCConfig}
+		output, err := cmd.CombinedOutput()
+		if !strings.Contains(string(output), "Cannot reuse password") {
+			t.Fatalf("MIT password reuse output = %s", output)
+		}
+	})
+}
