@@ -64,6 +64,33 @@ func TestChangePasswordPreservesAdministrativeFields(t *testing.T) {
 	}
 }
 
+func TestPrincipalUpdatesIncludeMITModifierTLData(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "password"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, updates := db.UpdateLog.Entries(0, time.Time{})
+	if status != 0 || len(updates) != 1 {
+		t.Fatalf("updates = %d/%#v, want one update", status, updates)
+	}
+	var modifier TLData
+	for _, value := range updates[0].Record.TLData {
+		if value.Type == 2 {
+			modifier = value
+			break
+		}
+	}
+	if modifier.Type != 2 || len(modifier.Data) < 5 ||
+		!bytes.Equal(modifier.Data[4:], []byte(name.String()+"\x00")) {
+		t.Fatalf("modifier TL-data = %#v, want principal %q", modifier,
+			name.String())
+	}
+}
+
 func TestChangePasswordPolicy(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddPrincipal("alice", "Old-password1!"); err != nil {
