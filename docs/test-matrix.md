@@ -57,7 +57,7 @@ one-minute idle deadline and a default 45-connection cap. The pinned MIT sources
 the inspected `net-server.c` does not expose an explicit idle-timeout
 constant, so the one-minute Go default follows the approved hardening design.
 MIT evicts an existing least-recently-started stream when its cap is exceeded;
-the Go listener closes newly accepted excess connections instead.
+the Go listener follows the same newest-connection-preserving behavior.
 
 MIT dump persistence decrypts database key data with AES master-key enctypes
 17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). Go version-7/r1.11 exports include
