@@ -37,6 +37,9 @@ func TestKDCTooBigUDPReplyUsesKRBError(t *testing.T) {
 		!bytes.Equal([]byte(stringsJoin(kerberosError.SName.NameString)), []byte(stringsJoin(service.Components))) {
 		t.Fatalf("error server = %#v, want %#v", kerberosError.SName, service)
 	}
+	if kerberosError.Realm != server.Realm {
+		t.Fatalf("error server realm = %q, want %q", kerberosError.Realm, server.Realm)
+	}
 	if kerberosError.CName != nil {
 		t.Fatalf("error client = %#v, want absent", kerberosError.CName)
 	}

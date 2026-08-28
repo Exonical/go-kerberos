@@ -94,8 +94,8 @@ type Server struct {
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
 	MaxDatagramReplySize int
-	// TCPIdleTimeout bounds each TCP read and write operation. Zero uses
-	// MIT's one-minute KDC TCP idle timeout.
+	// TCPIdleTimeout bounds each TCP read and write operation. Zero uses the
+	// approved one-minute KDC TCP idle timeout.
 	TCPIdleTimeout time.Duration
 	// MaxTCPConnections bounds concurrent TCP connections. Zero uses MIT's
 	// default max_stream_data_connections value of 45.
