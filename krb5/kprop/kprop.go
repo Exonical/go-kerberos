@@ -285,11 +285,11 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	if err := writeContextFrame(ctx, conn, nil); err != nil {
 		return fmt.Errorf("kprop AP authentication response: %w", err)
 	}
-	var serverSeq uint32
-	if _, err := io.ReadFull(crypto.RandomSource, uint32Bytes(&serverSeq)); err != nil {
+	var serverSeqBytes [4]byte
+	if _, err := io.ReadFull(crypto.RandomSource, serverSeqBytes[:]); err != nil {
 		return fmt.Errorf("kprop AP-REP sequence: %w", err)
 	}
-	serverSeq &= uint32(0x7fffffff)
+	serverSeq := binary.BigEndian.Uint32(serverSeqBytes[:]) & 0x7fffffff
 	apReply, err := ap.BuildAPRepWithSequence(request, serverSeq)
 	if err != nil {
 		return fmt.Errorf("kprop AP-REP: %w", err)
@@ -648,10 +648,4 @@ func contextError(ctx context.Context) error {
 		return errors.New("kprop: nil context")
 	}
 	return ctx.Err()
-}
-
-func uint32Bytes(v *uint32) []byte {
-	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], *v)
-	return b[:]
 }

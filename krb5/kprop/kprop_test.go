@@ -3,6 +3,7 @@ package kprop
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net"
@@ -156,6 +157,11 @@ func TestGoClientServerTransfer(t *testing.T) {
 	creds := &client.Credentials{Client: user, Server: service,
 		Key: protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: sessionKey}, Ticket: ticketDER}
 	payload := bytes.Repeat([]byte("kprop"), 10000)
+	random := append([]byte{0, 0, 0, 1}, bytes.Repeat([]byte{0xa5}, 16)...)
+	random = append(random, []byte{0x12, 0x34, 0x56, 0x78}...)
+	random = append(random, bytes.Repeat([]byte{0x42}, 1<<20)...)
+	restoreRandom := crypto.SetRandomSource(bytes.NewReader(random))
+	defer restoreRandom()
 	var loaded []byte
 	server := &Server{
 		Keytab: &keytab.Keytab{Entries: []keytab.Entry{{Principal: service, KVNO: 1, Enctype: etype.ID(), Key: serviceKey}}},
@@ -179,8 +185,9 @@ func TestGoClientServerTransfer(t *testing.T) {
 		},
 	}
 	left, right := net.Pipe()
+	recording := &recordingConn{Conn: right}
 	done := make(chan error, 1)
-	go func() { done <- server.ServeConn(context.Background(), right) }()
+	go func() { done <- server.ServeConn(context.Background(), recording) }()
 	if err := Send(context.Background(), left, creds, bytes.NewReader(payload), uint64(len(payload))); err != nil {
 		t.Fatal(err)
 	}
@@ -191,4 +198,44 @@ func TestGoClientServerTransfer(t *testing.T) {
 	if !bytes.Equal(loaded, payload) {
 		t.Fatalf("loaded payload mismatch: %d vs %d", len(loaded), len(payload))
 	}
+	apReply, err := framedPayload(recording.written, 1+4)
+	if err != nil {
+		t.Fatalf("recorded AP-REP: %v", err)
+	}
+	var apRep protocol.APRep
+	if err := asn1.Unmarshal(apReply, &apRep); err != nil {
+		t.Fatalf("decode AP-REP: %v", err)
+	}
+	plain, err := etype.Decrypt(sessionKey, 12, apRep.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt AP-REP: %v", err)
+	}
+	var apPart protocol.EncAPRepPart
+	if err := asn1.Unmarshal(plain, &apPart); err != nil {
+		t.Fatalf("decode AP-REP part: %v", err)
+	}
+	if apPart.SeqNumber == nil || *apPart.SeqNumber != 0x12345678 {
+		t.Fatalf("AP-REP sequence = %v, want 0x12345678", apPart.SeqNumber)
+	}
+}
+
+type recordingConn struct {
+	net.Conn
+	written []byte
+}
+
+func (c *recordingConn) Write(p []byte) (int, error) {
+	c.written = append(c.written, p...)
+	return c.Conn.Write(p)
+}
+
+func framedPayload(data []byte, offset int) ([]byte, error) {
+	if offset < 0 || len(data) < offset+4 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	n := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+	if n < 0 || len(data) < offset+4+n {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data[offset+4 : offset+4+n], nil
 }
