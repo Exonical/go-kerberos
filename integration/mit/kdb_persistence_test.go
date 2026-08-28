@@ -107,6 +107,59 @@ func TestMITDumpToGoKDCPersistence(t *testing.T) {
 	}
 }
 
+func TestMITDumpWithMITStash(t *testing.T) {
+	mitRealm := testenv.Start(t)
+	dumpPath := filepath.Join(mitRealm.Dir, "principal-stash.dump")
+	mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "dump", "-r18", dumpPath)
+	stashPath := filepath.Join(mitRealm.Dir, ".k5."+testenv.RealmName)
+	store, err := mitdump.LoadWithStash(dumpPath, stashPath)
+	if err != nil {
+		t.Fatalf("load MIT dump with stash: %v", err)
+	}
+	record, ok, err := store.Lookup(principal.Principal{
+		Realm: testenv.RealmName, Components: []string{"alice"},
+	})
+	if err != nil {
+		t.Fatalf("lookup alice: %v", err)
+	}
+	if !ok {
+		t.Fatal("alice missing")
+	}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := etype.StringToKey([]byte("alice-password"),
+		[]byte(testenv.RealmName+"alice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok := record.Keys[etype.ID()]
+	if !ok || !bytes.Equal(key.Key, expected) {
+		t.Fatalf("alice key does not match stash-decrypted key: %#v", key)
+	}
+}
+
+func TestGoWrittenStashConsumedByMIT(t *testing.T) {
+	mitRealm := testenv.Start(t)
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterKey, err := etype.StringToKey([]byte(testenv.MasterKey),
+		[]byte(testenv.RealmName+"KM"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stashPath := filepath.Join(mitRealm.Dir, ".k5."+testenv.RealmName)
+	if err := mitdump.WriteStashFile(stashPath, testenv.RealmName,
+		etype.ID(), 1, masterKey); err != nil {
+		t.Fatalf("write Go stash: %v", err)
+	}
+	dumpPath := filepath.Join(mitRealm.Dir, "go-stash-consumed.dump")
+	mitRealm.Run(t, "", "/usr/sbin/kdb5_util", "dump", "-r18", dumpPath)
+}
+
 func TestMITDumpMasterKeyEnctypes(t *testing.T) {
 	for _, enctype := range []string{
 		"aes128-cts-hmac-sha1-96",

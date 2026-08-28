@@ -165,7 +165,13 @@ MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 include the encrypted `K/M@REALM` record, and encrypt principal key data with
 AES master enctypes 17, 18, 19, or 20. The dump writer is covered by
 decrypting round-trip tests and a live `kdb5_util load`/`kinit` integration
-gate; the existing MIT-to-Go loader path remains supported as well.
+gate; the existing MIT-to-Go loader path remains supported as well. MIT dumps
+can be loaded without a password using `mitdump.LoadWithStash`, which reads
+modern FILE keytab-format `.k5.REALM` stashes and the legacy binary stash
+format (with supported AES master enctypes). `mitdump.WriteStash` and
+`mitdump.WriteStashFile` write keytab-format K/M stashes for those enctypes;
+the stash reader and writer are covered by unit tests and a live MIT stash
+loading gate.
 
 PA-FOR-USER verification accepts the keyed checksum types supported by the
 TGT session enctype, plus the RFC 4757 HMAC-MD5 checksum used by legacy
