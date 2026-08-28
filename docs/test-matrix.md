@@ -105,7 +105,10 @@ and other procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 
-The Go KDC accepts both PA-S4U-X509-USER and legacy PA-FOR-USER protocol
+The installed MIT `kvno` supports `-U` and `-P`, but its S4U request is
+FAST-armored in a way this focused harness does not currently exercise; the
+Go-client ↔ Go-KDC gate therefore provides the live S4U coverage. The Go KDC
+accepts both PA-S4U-X509-USER and legacy PA-FOR-USER protocol
 transition requests. PA-FOR-USER validates keyed AES checksums matching the
 TGT session enctype and the RFC 4757 HMAC-MD5 compatibility checksum; this
 is defensive verification only and does not add RC4. S4U2Self tickets are
