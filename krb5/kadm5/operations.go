@@ -247,16 +247,15 @@ func readStringList(r *xdrReader, kind string) ([]string, error) {
 	if n < 0 || n > 1<<20 {
 		return nil, fmt.Errorf("kadm5: invalid %s list count", kind)
 	}
+	arrayCount, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	if arrayCount != uint32(n) {
+		return nil, fmt.Errorf("kadm5: mismatched %s list counts", kind)
+	}
 	out := make([]string, 0, n)
 	for i := int32(0); i < n; i++ {
-		present, err := r.boolean()
-		if err != nil {
-			return nil, err
-		}
-		if !present {
-			out = append(out, "")
-			continue
-		}
 		name, err := r.nullString()
 		if err != nil {
 			return nil, err
@@ -355,8 +354,27 @@ func readPolicy(r *xdrReader, api uint32) (Policy, error) {
 		if _, err := r.i16(); err != nil {
 			return Policy{}, err
 		}
-		if _, err := r.boolean(); err != nil {
+		nullTL, err := r.boolean()
+		if err != nil {
 			return Policy{}, err
+		}
+		if !nullTL {
+			more, err := r.boolean()
+			if err != nil {
+				return Policy{}, err
+			}
+			for more {
+				if _, err := r.i16(); err != nil {
+					return Policy{}, err
+				}
+				if _, err := r.opaque(); err != nil {
+					return Policy{}, err
+				}
+				more, err = r.boolean()
+				if err != nil {
+					return Policy{}, err
+				}
+			}
 		}
 		policy.Attributes = attrs
 		policy.MaxTicketLife = ticketLife

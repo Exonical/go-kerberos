@@ -193,18 +193,31 @@ func TestGoKadm5CommonOperationsAgainstMIT(t *testing.T) {
 	if err != nil || entry.Policy != policyName {
 		t.Fatalf("attached policy entry = %+v, err=%v", entry, err)
 	}
+	second := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal,
+		Components: []string{"kadm5-ops-second"},
+	}
+	if err := a.CreatePrincipal(ctx, second, "second-password"); err != nil {
+		t.Fatalf("create second principal: %v", err)
+	}
 	principals, err := a.ListPrincipals(ctx, "kadm5-ops*")
 	if err != nil {
 		t.Fatalf("list principals: %v", err)
 	}
-	found = false
+	foundRenamed, foundSecond := false, false
 	for _, name := range principals {
 		if name == targetRenamed.String() {
-			found = true
+			foundRenamed = true
+		}
+		if name == second.String() {
+			foundSecond = true
 		}
 	}
-	if !found {
-		t.Fatalf("principal list %v does not contain %q", principals, targetRenamed)
+	if !foundRenamed || !foundSecond {
+		t.Fatalf("principal list %v missing %q or %q", principals, targetRenamed, second)
+	}
+	if err := a.DeletePrincipal(ctx, second); err != nil {
+		t.Fatalf("delete second principal: %v", err)
 	}
 	if _, err := a.GetPrivs(ctx); err != nil {
 		t.Fatalf("get privileges: %v", err)

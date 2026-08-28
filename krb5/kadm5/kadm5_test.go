@@ -205,7 +205,7 @@ func TestRenamePrincipalGolden(t *testing.T) {
 func TestStringListRejectsMalformedInput(t *testing.T) {
 	w := xdrWriter{}
 	w.i32(1)
-	w.boolean(true)
+	w.u32(1)
 	w.nullString("not-terminated")
 	data := w.bytes()
 	data[len(data)-1] = 1
@@ -218,15 +218,21 @@ func TestStringListRejectsMalformedInput(t *testing.T) {
 	if _, err := readStringList(&xdrReader{b: w.bytes()}, "policy"); err == nil {
 		t.Fatal("accepted negative list count")
 	}
+	w = xdrWriter{}
+	w.i32(2)
+	w.u32(1)
+	w.nullString("alice@EXAMPLE.COM")
+	if _, err := readStringList(&xdrReader{b: w.bytes()}, "principal"); err == nil {
+		t.Fatal("accepted mismatched list counts")
+	}
 }
 
 func TestStringListSynthetic(t *testing.T) {
 	w := xdrWriter{}
 	w.i32(3)
-	w.boolean(true)
+	w.u32(3)
 	w.nullString("alice@EXAMPLE.COM")
-	w.boolean(false)
-	w.boolean(true)
+	w.nullString("")
 	w.nullString("bob@EXAMPLE.COM")
 	got, err := readStringList(&xdrReader{b: w.bytes()}, "principal")
 	if err != nil {
@@ -235,6 +241,35 @@ func TestStringListSynthetic(t *testing.T) {
 	if len(got) != 3 || got[0] != "alice@EXAMPLE.COM" || got[1] != "" ||
 		got[2] != "bob@EXAMPLE.COM" {
 		t.Fatalf("list = %#v", got)
+	}
+}
+
+func TestReadPolicyConsumesTLData(t *testing.T) {
+	w := xdrWriter{}
+	writePolicy(&w, Policy{Name: "default", Attributes: 9}, APIv4)
+	data := w.bytes()
+	// Replace the trailing NULL tl_data marker with a two-entry list.
+	data = data[:len(data)-4]
+	tail := xdrWriter{}
+	tail.boolean(false)
+	tail.boolean(true)
+	tail.i16(1)
+	tail.opaque([]byte{1, 2, 3})
+	tail.boolean(true)
+	tail.i16(2)
+	tail.opaque([]byte{4})
+	tail.boolean(false)
+	data = append(data, tail.bytes()...)
+	r := xdrReader{b: data}
+	got, err := readPolicy(&r, APIv4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "default" || got.Attributes != 9 {
+		t.Fatalf("policy = %+v", got)
+	}
+	if err := r.done(); err != nil {
+		t.Fatalf("tl_data not fully consumed: %v", err)
 	}
 }
 
