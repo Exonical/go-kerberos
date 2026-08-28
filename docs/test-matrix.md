@@ -25,6 +25,7 @@ when absent.
 | PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client |
 | MIT kadm5 administrative RPC subset | Go client + live MIT kadmind | MIT `kadmind` | Go client |
+| KDC aliases and canonicalization | Go client ↔ Go KDC + unit | MIT `kinit -C` client alias gate | Go client |
 | KDC S4U2Self / S4U2Proxy / forwarded TGT | Go client ↔ Go KDC + unit | MIT `kvno` where supported | Go client |
 
 The KDC supports optional server-wide preauthentication disablement, default
@@ -110,6 +111,21 @@ random-key and explicit API-v4 keys, aliases, and other procedures remain out
 of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
+
+The KDB `Store` interface remains compatible with Lookup-only stores.
+Stores may additionally implement `kdb.AliasResolver` to resolve an alias
+principal to its canonical record. The in-memory database exposes this through
+`AddAlias`. For AS requests, an alias is accepted only when the
+`KDCCanonicalize` option is set; the AS-REP and issued ticket then contain the
+canonical client principal. Without that option the KDC returns
+`KDC_ERR_C_PRINCIPAL_UNKNOWN`. For TGS requests, an alias service lookup is
+allowed without canonicalization and the issued ticket echoes the requested
+alias. With canonicalization, the ticket and encrypted reply carry the
+canonical service principal. The Go client accepts the canonical TGS name when
+canonicalization is enabled while retaining strict exact-name checks otherwise.
+The installed MIT `kvno` in the integration environment does not expose a
+`--canonicalize` option, so MIT coverage is limited to `kinit -C`; TGS alias
+echo and canonicalization are covered by Go client/KDC tests.
 
 The installed MIT `kvno` supports `-U` and `-P`; both FAST-armored S4U2Self
 and S4U2Proxy requests pass against the Go KDC in

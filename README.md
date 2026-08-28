@@ -29,6 +29,9 @@ disposable integration test environments.
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
   against real MIT `kinit`, `klist`, and `kvno` clients.
+- Optional principal aliases through `kdb.AliasResolver`. AS aliases require
+  client canonicalization and return the canonical client name; TGS aliases
+  echo the requested service name unless canonicalization is requested.
 - KDC-side **S4U2Self**, **S4U2Proxy**, and forwarded-TGT handling, with a
   `DelegationPolicy` hook for protocol transition and constrained delegation;
   MIT `kvno -U` and `kvno -P` interoperability is covered.
@@ -100,7 +103,8 @@ notes, and the full test matrix.
 
 ## Roadmap
 
-S4U (constrained delegation), including KDC-side protocol transition and
+Principal aliases with MIT-compatible AS/TGS canonicalization, and S4U
+(constrained delegation), including KDC-side protocol transition and
 forwarded TGTs, PKINIT, KDC replay cache and renewals,
 kdb persistence, server-side FAST, RFC 3244 password changes, and a focused
 MIT kadm5 administrative RPC subset are implemented. The kadm5 client also

@@ -214,6 +214,12 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
+	if !ok && request.ReqBody.KDCOptions&types.KDCCanonicalize != 0 {
+		clientRecord, ok, clientName, err = s.lookupAlias(clientName)
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+	}
 	if !ok {
 		return s.errorResponse(kdcErrCPrincipal, request.ReqBody.SName)
 	}
@@ -514,7 +520,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	reply := protocol.ASRep{
 		PVNO: 5, MsgType: 11,
 		CRealm:  clientName.Realm,
-		CName:   *request.ReqBody.CName,
+		CName:   *protocolPrincipal(clientName),
 		Ticket:  ticket,
 		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
 	}
@@ -811,7 +817,8 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		ticketPart.Flags&types.TicketMayPostdate == 0 {
 		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 	}
-	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
+	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
+	serviceName := requestedServiceName
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
 		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
 	} else if serviceName.Realm != s.Realm {
@@ -823,6 +830,16 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if !ok && options&(types.KDCRenew|types.KDCValidate) == 0 {
+		var canonicalName principal.Principal
+		serviceRecord, ok, canonicalName, err = s.lookupAlias(serviceName)
+		if err != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+		if ok && options&types.KDCCanonicalize != 0 {
+			serviceName = canonicalName
+		}
 	}
 	if !ok {
 		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
@@ -1500,6 +1517,30 @@ func sameProtocolPrincipal(left, right protocol.PrincipalName) bool {
 		}
 	}
 	return true
+}
+
+// lookupAlias resolves an optional KDB alias and returns its canonical record
+// name. Ordinary Store implementations need only implement Lookup.
+func (s *Server) lookupAlias(name principal.Principal) (kdb.PrincipalRecord, bool, principal.Principal, error) {
+	resolver, ok := s.DB.(kdb.AliasResolver)
+	if !ok {
+		return kdb.PrincipalRecord{}, false, name, nil
+	}
+	canonicalName, isAlias, err := resolver.ResolveAlias(name)
+	if err != nil || !isAlias {
+		return kdb.PrincipalRecord{}, false, name, err
+	}
+	if canonicalName.Realm == "" || len(canonicalName.Components) == 0 {
+		return kdb.PrincipalRecord{}, false, name, fmt.Errorf("alias resolver returned invalid canonical principal")
+	}
+	record, found, err := s.DB.Lookup(canonicalName)
+	if err != nil || !found {
+		return kdb.PrincipalRecord{}, false, name, err
+	}
+	if record.Name.Realm != "" && len(record.Name.Components) > 0 {
+		canonicalName = record.Name
+	}
+	return record, true, canonicalName, nil
 }
 
 func joinComponents(values []string) string {

@@ -44,6 +44,93 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerPrincipalAliases(t *testing.T) {
+	now := time.Unix(2000000050, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.AddAlias("alice-alias", "alice"); err != nil {
+		t.Fatalf("client alias: %v", err)
+	}
+	if err := db.AddAlias("host/alias.test", "host/service.test"); err != nil {
+		t.Fatalf("service alias: %v", err)
+	}
+	aliasUser := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice-alias"},
+	}
+	canonicalUser := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	withoutCanonicalize := kclient
+	if _, err := withoutCanonicalize.ASExchange(context.Background(), aliasUser, "alice-password"); err == nil || !hasKRBCode(err, 6) {
+		t.Fatalf("alias AS without canonicalization = %v, want client unknown", err)
+	}
+	withCanonicalize := *kclient
+	withCanonicalize.Canonicalize = true
+	tgt, err := withCanonicalize.ASExchange(context.Background(), aliasUser, "alice-password")
+	if err != nil {
+		t.Fatalf("alias AS with canonicalization: %v", err)
+	}
+	if !samePrincipal(tgt.Client, canonicalUser) {
+		t.Fatalf("canonicalized AS client = %v, want %v", tgt.Client, canonicalUser)
+	}
+	var issuedTicket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &issuedTicket); err != nil {
+		t.Fatalf("decode canonicalized AS ticket: %v", err)
+	}
+	tgtName := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	tgtRecord, ok, err := server.DB.Lookup(tgtName)
+	if err != nil || !ok {
+		t.Fatalf("lookup TGT record: %v, %v", err, ok)
+	}
+	tgtKey, ok := selectKVNO(tgtRecord, issuedTicket.EncPart.EType, issuedTicket.EncPart.KVNO)
+	if !ok {
+		t.Fatal("missing TGT encryption key")
+	}
+	tgtEType, err := crypto.NewRegistry().Get(tgtKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgtPlain, err := tgtEType.Decrypt(tgtKey.Key, 2, issuedTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt canonicalized AS ticket: %v", err)
+	}
+	var issuedPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(tgtPlain, &issuedPart); err != nil {
+		t.Fatalf("decode canonicalized AS ticket: %v", err)
+	}
+	if !samePrincipal(principalFromProtocol(issuedPart.CName, issuedPart.CRealm), canonicalUser) {
+		t.Fatalf("ticket client = %v, want %v",
+			principalFromProtocol(issuedPart.CName, issuedPart.CRealm), canonicalUser)
+	}
+	aliasService := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "alias.test"},
+	}
+	withoutCanonicalizeTGS, err := withoutCanonicalize.TGSExchange(context.Background(), tgt, aliasService)
+	if err != nil {
+		t.Fatalf("alias TGS without canonicalization: %v", err)
+	}
+	if !samePrincipal(withoutCanonicalizeTGS.Server, aliasService) {
+		t.Fatalf("echoed alias service = %v, want %v", withoutCanonicalizeTGS.Server, aliasService)
+	}
+	withCanonicalizeTGS, err := withCanonicalize.TGSExchange(context.Background(), tgt, aliasService)
+	if err != nil {
+		t.Fatalf("alias TGS with canonicalization: %v", err)
+	}
+	canonicalService := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"host", "service.test"},
+	}
+	if !samePrincipal(withCanonicalizeTGS.Server, canonicalService) {
+		t.Fatalf("canonicalized TGS service = %v, want %v", withCanonicalizeTGS.Server, canonicalService)
+	}
+}
+
 func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	now := time.Unix(2000001800, 0).UTC()
 	server, kclient := testServer(t, now)

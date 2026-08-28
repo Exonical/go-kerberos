@@ -38,17 +38,29 @@ type Store interface {
 	Lookup(principal.Principal) (PrincipalRecord, bool, error)
 }
 
+// AliasResolver optionally resolves an alias principal to its canonical
+// principal. KDC callers decide whether a resolved alias is exposed in a
+// reply; Store implementations may keep ordinary Lookup canonical-only.
+type AliasResolver interface {
+	ResolveAlias(principal.Principal) (principal.Principal, bool, error)
+}
+
 // Database is a concurrency-safe in-memory principal store.
 type Database struct {
 	Realm string
 
 	mu         sync.RWMutex
 	principals map[string]PrincipalRecord
+	aliases    map[string]principal.Principal
 }
 
 // NewDatabase creates an empty database for realm.
 func NewDatabase(realm string) *Database {
-	return &Database{Realm: realm, principals: make(map[string]PrincipalRecord)}
+	return &Database{
+		Realm:      realm,
+		principals: make(map[string]PrincipalRecord),
+		aliases:    make(map[string]principal.Principal),
+	}
 }
 
 // AddPrincipal derives all supported AES keys for name and stores them.
@@ -102,6 +114,34 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 	return nil
 }
 
+// AddAlias maps alias to an existing canonical principal.
+func (db *Database) AddAlias(alias, target string) error {
+	if db == nil {
+		return fmt.Errorf("add alias: nil database")
+	}
+	if db.Realm == "" {
+		return fmt.Errorf("add alias: empty database realm")
+	}
+	parsedAlias, err := parseName(alias, db.Realm)
+	if err != nil {
+		return fmt.Errorf("add alias: alias: %w", err)
+	}
+	parsedTarget, err := parseName(target, db.Realm)
+	if err != nil {
+		return fmt.Errorf("add alias: target: %w", err)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if _, exists := db.principals[canonical(*parsedTarget)]; !exists {
+		return fmt.Errorf("add alias: target principal %q does not exist", parsedTarget)
+	}
+	if canonical(*parsedAlias) == canonical(*parsedTarget) {
+		return fmt.Errorf("add alias: alias and target are identical")
+	}
+	db.aliases[canonical(*parsedAlias)] = *parsedTarget
+	return nil
+}
+
 // Lookup returns a copy of the record for name.
 func (db *Database) Lookup(name principal.Principal) (PrincipalRecord, bool, error) {
 	if db == nil {
@@ -115,6 +155,21 @@ func (db *Database) Lookup(name principal.Principal) (PrincipalRecord, bool, err
 	}
 	record.Keys = copyKeys(record.Keys)
 	return record, true, nil
+}
+
+// ResolveAlias implements AliasResolver. It returns only configured aliases;
+// canonical principals are reported as not aliases.
+func (db *Database) ResolveAlias(name principal.Principal) (principal.Principal, bool, error) {
+	if db == nil {
+		return principal.Principal{}, false, nil
+	}
+	db.mu.RLock()
+	target, ok := db.aliases[canonical(name)]
+	db.mu.RUnlock()
+	if !ok {
+		return principal.Principal{}, false, nil
+	}
+	return target, true, nil
 }
 
 func parseName(name, realm string) (*principal.Principal, error) {
