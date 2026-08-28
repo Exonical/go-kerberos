@@ -743,9 +743,12 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 	}
 	referral := isReferralPrincipal(reply.Ticket.SName, requestedService)
 	if !referral {
+		serviceNameMatches := sameProtocolPrincipal(reply.Ticket.SName, service) &&
+			sameProtocolPrincipal(part.SName, service)
+		canonicalizedService := c.canonicalizeEnabled() &&
+			sameProtocolPrincipal(reply.Ticket.SName, principalFromProtocol(part.SName))
 		if (serviceRealmKnown && (reply.Ticket.Realm != service.Realm || part.SRealm != service.Realm)) ||
-			!sameProtocolPrincipal(reply.Ticket.SName, service) ||
-			!sameProtocolPrincipal(part.SName, service) {
+			(!serviceNameMatches && !canonicalizedService) {
 			return nil, false, fmt.Errorf("TGS exchange: service principal mismatch")
 		}
 	} else if len(reply.Ticket.SName.NameString) != 2 {

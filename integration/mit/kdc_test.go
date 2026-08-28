@@ -43,6 +43,12 @@ func startGoKDC(t *testing.T) *goKDC {
 			t.Fatal(err)
 		}
 	}
+	if err := db.AddAlias("alice-alias", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAlias("host/alias.test", "host/service.test"); err != nil {
+		t.Fatal(err)
+	}
 	server := &kdc.Server{
 		Realm:            goKDCRealm,
 		DB:               db,
@@ -184,6 +190,20 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	}
 }
 
+func TestMITClientAliasesAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-C", "alice-alias")
+	klist := k.run(t, "", "/usr/bin/klist")
+	if !strings.Contains(klist, "Default principal: alice@"+goKDCRealm) {
+		t.Fatalf("canonicalized kinit principal missing:\n%s", klist)
+	}
+	kvno := k.run(t, "", "/usr/bin/kvno", "host/alias.test")
+	if !strings.Contains(kvno, "host/service.test@"+goKDCRealm) ||
+		!strings.Contains(kvno, "kvno = 1") {
+		t.Fatalf("alias kvno output unexpected:\n%s", kvno)
+	}
+}
+
 func TestMITClientS4U2SelfAgainstGoKDC(t *testing.T) {
 	k := startGoKDC(t)
 	k.run(t, "host-password\n", "/usr/bin/kinit", "-f", "host/service.test")
@@ -235,5 +255,60 @@ func TestGoClientS4UAgainstGoKDC(t *testing.T) {
 	}
 	if proxy.Client.String() != user.String() || proxy.Server.String() != backend.String() {
 		t.Fatalf("unexpected S4U2Proxy credentials: %#v", proxy)
+	}
+}
+
+func TestGoClientAliasesAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	data, err := os.ReadFile(k.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.UDPPreferenceLimit = 1400
+	aliasUser := principal.Principal{
+		Realm: goKDCRealm, NameType: principal.NTPrincipal,
+		Components: []string{"alice-alias"},
+	}
+	canonicalUser := principal.Principal{
+		Realm: goKDCRealm, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	plain := &client.Client{Config: cfg}
+	if _, err := plain.ASExchange(context.Background(), aliasUser, "alice-password"); err == nil {
+		t.Fatal("non-canonicalized alias AS unexpectedly succeeded")
+	}
+	canonical := &client.Client{Config: cfg, Canonicalize: true}
+	tgt, err := canonical.ASExchange(context.Background(), aliasUser, "alice-password")
+	if err != nil {
+		t.Fatalf("canonicalized alias AS: %v", err)
+	}
+	if tgt.Client.String() != canonicalUser.String() {
+		t.Fatalf("canonicalized AS client = %s, want %s", tgt.Client, canonicalUser)
+	}
+	aliasService := principal.Principal{
+		Realm: goKDCRealm, NameType: principal.NTSrvHst,
+		Components: []string{"host", "alias.test"},
+	}
+	plainTGT, err := plain.ASExchange(context.Background(), canonicalUser, "alice-password")
+	if err != nil {
+		t.Fatalf("plain AS exchange: %v", err)
+	}
+	echoed, err := plain.TGSExchange(context.Background(), plainTGT, aliasService)
+	if err != nil {
+		t.Fatalf("alias TGS echo: %v", err)
+	}
+	if echoed.Server.String() != aliasService.String() {
+		t.Fatalf("echoed alias service = %s, want %s", echoed.Server, aliasService)
+	}
+	canonicalized, err := canonical.TGSExchange(context.Background(), tgt, aliasService)
+	if err != nil {
+		t.Fatalf("canonicalized alias TGS: %v", err)
+	}
+	if canonicalized.Server.String() != "host/service.test@"+goKDCRealm {
+		t.Fatalf("canonicalized service = %s", canonicalized.Server)
 	}
 }
