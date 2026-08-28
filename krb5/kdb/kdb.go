@@ -241,8 +241,9 @@ func (db *Database) ChangePassword(name principal.Principal, password string) er
 	if err != nil {
 		return err
 	}
-	next.Strings = current.Strings
-	db.principals[key] = next
+	current.Keys = next.Keys
+	current.KVNO = next.KVNO
+	db.principals[key] = current
 	return nil
 }
 
@@ -566,9 +567,10 @@ func copyKeys(keys map[int32]Key) map[int32]Key {
 
 func copyRecord(record PrincipalRecord) PrincipalRecord {
 	record.Keys = copyKeys(record.Keys)
-	record.Strings = make(map[string]string, len(record.Strings))
+	stringsCopy := make(map[string]string, len(record.Strings))
 	for key, value := range record.Strings {
-		record.Strings[key] = value
+		stringsCopy[key] = value
 	}
+	record.Strings = stringsCopy
 	return record
 }

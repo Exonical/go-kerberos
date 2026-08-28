@@ -6,7 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
-	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -831,8 +831,50 @@ func (s *Server) listPrincipals(expr string) []string {
 }
 
 func globMatch(expr, name string) bool {
-	ok, err := path.Match(expr, name)
-	return err == nil && ok
+	var pattern strings.Builder
+	pattern.WriteByte('^')
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '*':
+			pattern.WriteString(".*")
+		case '?':
+			pattern.WriteByte('.')
+		case '\\':
+			if i+1 == len(expr) {
+				return false
+			}
+			i++
+			pattern.WriteString(regexp.QuoteMeta(expr[i : i+1]))
+		case '[':
+			end := i + 1
+			if end < len(expr) && (expr[end] == '!' || expr[end] == '^') {
+				end++
+			}
+			if end < len(expr) && expr[end] == ']' {
+				end++
+			}
+			for end < len(expr) && expr[end] != ']' {
+				end++
+			}
+			if end == len(expr) {
+				return false
+			}
+			class := expr[i : end+1]
+			if class[1] == '!' {
+				class = "[^" + class[2:]
+			}
+			pattern.WriteString(class)
+			i = end
+		default:
+			pattern.WriteString(regexp.QuoteMeta(expr[i : i+1]))
+		}
+	}
+	pattern.WriteByte('$')
+	compiled, err := regexp.Compile(pattern.String())
+	if err != nil {
+		return false
+	}
+	return compiled.MatchString(name)
 }
 
 func stringListReply(api uint32, names []string) []byte {

@@ -31,6 +31,9 @@ func TestMITKadminAgainstGoKadmind(t *testing.T) {
 	if err := db.AddPrincipal("admin/admin@"+testenv.RealmName, "admin-password"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AddPrincipal("nfs/host@"+testenv.RealmName, "nfs-password"); err != nil {
+		t.Fatal(err)
+	}
 	server := kadm5.NewServer(db, serviceKeytab)
 	admin := principal.Principal{Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"admin", "admin"}}
 	server.AdminPrincipal = admin
@@ -54,6 +57,9 @@ func TestMITKadminAgainstGoKadmind(t *testing.T) {
 	}
 	if output := kadmin("listprincs scratch"); !strings.Contains(output, "scratch@"+testenv.RealmName) {
 		t.Fatalf("listprincs output = %s", output)
+	}
+	if output := kadmin("listprincs */*"); !strings.Contains(output, "nfs/host@"+testenv.RealmName) {
+		t.Fatalf("listprincs service glob output = %s", output)
 	}
 	kadmin("delprinc -force scratch")
 }

@@ -114,6 +114,27 @@ func TestReadRPCRecordRejectsOversizedFragment(t *testing.T) {
 	}
 }
 
+func TestGlobMatchWholePrincipal(t *testing.T) {
+	tests := []struct {
+		pattern string
+		name    string
+		want    bool
+	}{
+		{"*/*@TEST.REALM", "nfs/host@TEST.REALM", true},
+		{"*/?ost@TEST.REALM", "nfs/host@TEST.REALM", true},
+		{"nfs?host@TEST.REALM", "nfs/host@TEST.REALM", true},
+		{"*/*@TEST.REALM", "alice@TEST.REALM", false},
+		{"nfs/[a-z]*@TEST.REALM", "nfs/host@TEST.REALM", true},
+		{"nfs/[!a-z]*@TEST.REALM", "nfs/host@TEST.REALM", false},
+		{"nfs/[a-z", "nfs/host@TEST.REALM", false},
+	}
+	for _, test := range tests {
+		if got := globMatch(test.pattern, test.name); got != test.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", test.pattern, test.name, got, test.want)
+		}
+	}
+}
+
 func TestServerGoClientRoundTrip(t *testing.T) {
 	const realm = "TEST.REALM"
 	kt, creds := serverTestCredentials(t, realm)
