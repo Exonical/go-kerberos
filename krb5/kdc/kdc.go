@@ -75,6 +75,10 @@ type Server struct {
 	// DefaultTicketLife applies when a request omits its maximum till time.
 	DefaultTicketLife time.Duration
 	MaxRenewableLife  time.Duration
+	// UDPPorts and TCPPorts retain kdc.conf listener settings for callers
+	// constructing listeners. ListenAndServe does not create listeners itself.
+	UDPPorts []int
+	TCPPorts []int
 	// DefaultRenewableLife applies when RENEWABLE omits its rtime.
 	DefaultRenewableLife time.Duration
 	// DisablePreauth disables the server-wide preauthentication requirement.

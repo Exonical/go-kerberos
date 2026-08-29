@@ -241,6 +241,26 @@ require the Ubuntu `krb5-otp` package (the test remains conditional when
 the plugin is unavailable). The Go KDC includes a FAST cookie in the
 initial OTP challenge, as required by MIT's retry processing.
 
+## Realm discovery and KDC configuration
+
+Unit coverage exercises MIT profile `[domain_realm]` matching (exact host,
+case-insensitive parent walking, leading-dot suffixes, and numeric-address
+exclusion), the opt-in upper-cased parent-domain fallback,
+`_kerberos.<host>` TXT fallback, and
+`krb5srv:flags:transport:residual` URI parsing and priority ordering. DNS
+tests use an injectable fake resolver rather than live DNS, so they are
+deterministic in CI. URI lookup is attempted before SRV lookup by default;
+callers can disable it to model `dns_uri_lookup = false`.
+
+`config.ParseKDCConf` is covered against generated MIT profile syntax,
+including `[kdcdefaults]` inheritance into `[realms]`, port lists, ticket
+lifetime values, master-key enctype, supported enctypes, and preservation of
+unknown realm settings. `kdc.Server.ApplyKDCConf` is covered for listener
+ports and lifetime settings that have direct Go server equivalents. The
+integration harness uses the same profile-format KDC configuration with a
+disposable MIT KDC; DNS itself is intentionally not a live integration
+dependency.
+
 ## Testing layers
 
 Each major subsystem will use several complementary layers:

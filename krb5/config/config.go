@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ type Config struct {
 	DefaultRealm            string
 	DNSLookupKDC            bool
 	DNSLookupRealm          bool
+	DNSURILookup            bool
 	RDNS                    bool
 	Canonicalize            bool
 	ClockSkew               time.Duration
@@ -31,6 +33,9 @@ type Config struct {
 	Capaths                 map[string][]string
 	RealmOptions            map[string]map[string][]string
 	CapathOptions           map[string]map[string][]string
+	// Options retains profile relations which are not interpreted by the
+	// client-side configuration parser, including kdc.conf defaults.
+	Options map[string]map[string][]string
 }
 
 // RealmPath returns the configured direct authentication path from client to
@@ -102,6 +107,8 @@ func Parse(data []byte) (*Config, error) {
 		Capaths:       make(map[string][]string),
 		RealmOptions:  make(map[string]map[string][]string),
 		CapathOptions: make(map[string]map[string][]string),
+		Options:       make(map[string]map[string][]string),
+		DNSURILookup:  true,
 	}
 	section := ""
 	subsection := ""
@@ -200,6 +207,38 @@ func ParseDuration(value string) (time.Duration, error) {
 	if value == "" {
 		return 0, fmt.Errorf("parse MIT duration: empty value")
 	}
+	if fields := strings.Fields(value); len(fields) > 1 {
+		var total time.Duration
+		for _, field := range fields {
+			if len(field) < 2 {
+				return 0, fmt.Errorf("parse MIT duration: invalid value")
+			}
+			unit := field[len(field)-1]
+			number, err := strconv.ParseFloat(field[:len(field)-1], 64)
+			if err != nil || number < 0 {
+				return 0, fmt.Errorf("parse MIT duration: invalid value")
+			}
+			var scale time.Duration
+			switch unit {
+			case 'd':
+				scale = 24 * time.Hour
+			case 'h':
+				scale = time.Hour
+			case 'm':
+				scale = time.Minute
+			case 's':
+				scale = time.Second
+			default:
+				return 0, fmt.Errorf("parse MIT duration: invalid value")
+			}
+			add := time.Duration(number * float64(scale))
+			if add < 0 || total > (time.Duration(1<<63-1)-add) {
+				return 0, fmt.Errorf("parse MIT duration: invalid value")
+			}
+			total += add
+		}
+		return total, nil
+	}
 	if strings.HasSuffix(value, "d") {
 		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
 		if err != nil || days < 0 {
@@ -248,6 +287,10 @@ func splitValues(value string) []string {
 }
 
 func applyOption(cfg *Config, section, key string, values []string) error {
+	if cfg.Options[section] == nil {
+		cfg.Options[section] = make(map[string][]string)
+	}
+	cfg.Options[section][key] = append([]string(nil), values...)
 	switch section {
 	case "libdefaults":
 		value := values[len(values)-1]
@@ -258,6 +301,8 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DNSLookupKDC = parseBool(value)
 		case "dns_lookup_realm":
 			cfg.DNSLookupRealm = parseBool(value)
+		case "dns_uri_lookup":
+			cfg.DNSURILookup = parseBool(value)
 		case "rdns":
 			cfg.RDNS = parseBool(value)
 		case "canonicalize":
@@ -304,7 +349,9 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DefaultTKTEnctypes = parseEnctypes(values)
 		}
 	case "domain_realm":
-		cfg.DomainRealm[key] = values[len(values)-1]
+		// Profile keys are case-insensitive for this section, but preserve
+		// the leading dot and normalize the key for deterministic lookup.
+		cfg.DomainRealm[strings.ToLower(key)] = values[len(values)-1]
 	}
 	return nil
 }
@@ -361,22 +408,71 @@ func (cfg *Config) RealmForHost(host string) (string, bool) {
 	if cfg == nil {
 		return "", false
 	}
-	if realm, ok := cfg.DomainRealm[host]; ok {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" || net.ParseIP(host) != nil {
+		return "", false
+	}
+	// MIT's profile module tries host, .suffix, suffix, and repeats until
+	// there are no labels left.  This also gives exact host entries priority
+	// over broader domain entries.
+	lookup := func(candidate string) (string, bool) {
+		if realm, ok := cfg.DomainRealm[candidate]; ok && realm != "" {
+			return realm, true
+		}
+		for configured, realm := range cfg.DomainRealm {
+			if strings.EqualFold(configured, candidate) && realm != "" {
+				return realm, true
+			}
+		}
+		return "", false
+	}
+	if realm, ok := lookup(host); ok {
+		return realm, true
+	}
+	firstDot := strings.IndexByte(host, '.')
+	if firstDot < 0 {
+		return "", false
+	}
+	for suffix := host[firstDot:]; suffix != ""; {
+		for _, candidate := range []string{suffix, suffix[1:]} {
+			if realm, ok := lookup(candidate); ok {
+				return realm, true
+			}
+		}
+		dot := strings.IndexByte(suffix[1:], '.')
+		if dot < 0 {
+			break
+		}
+		suffix = suffix[dot+1:]
+	}
+	return "", false
+}
+
+// RealmForHostWithFallback applies the profile mapping and then MIT's
+// upper-cased parent-domain heuristic.  The heuristic is kept separate from
+// RealmForHost because callers which require an authoritative profile answer
+// must be able to distinguish a no-match.
+func (cfg *Config) RealmForHostWithFallback(host string) (string, bool) {
+	if realm, ok := cfg.RealmForHost(host); ok {
 		return realm, true
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	var match string
-	for domain, realm := range cfg.DomainRealm {
-		domainLower := strings.ToLower(domain)
-		if strings.HasPrefix(domainLower, ".") &&
-			strings.HasSuffix(host, domainLower) &&
-			len(domainLower) > len(match) {
-			match = domainLower
-			if realm == "" {
-				continue
-			}
-			return realm, true
-		}
+	if host == "" || net.ParseIP(host) != nil {
+		return "", false
+	}
+	if dot := strings.IndexByte(host, '.'); dot >= 0 && dot+1 < len(host) {
+		return strings.ToUpper(host[dot+1:]), true
 	}
 	return "", false
+}
+
+// DNSURIEnabled reports the effective MIT default for dns_uri_lookup.
+func (cfg *Config) DNSURIEnabled() bool {
+	if cfg == nil {
+		return true
+	}
+	if values := cfg.Options["libdefaults"]["dns_uri_lookup"]; len(values) > 0 {
+		return parseBool(values[len(values)-1])
+	}
+	return true
 }
