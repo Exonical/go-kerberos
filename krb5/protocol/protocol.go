@@ -27,6 +27,49 @@ type PAData struct {
 	PADataValue []byte `krb5:"tag:2"`
 }
 
+// OTPTokenInfo describes an RFC 6560 token accepted by the KDC.
+type OTPTokenInfo struct {
+	Flags          int32             `krb5:"tag:0,implicit"`
+	Vendor         *types.UTF8String `krb5:"tag:1,optional,implicit"`
+	Challenge      []byte            `krb5:"tag:2,optional,implicit"`
+	Length         *int32            `krb5:"tag:3,optional,implicit"`
+	Format         *int32            `krb5:"tag:4,optional,implicit"`
+	TokenID        []byte            `krb5:"tag:5,optional,implicit"`
+	AlgID          *types.UTF8String `krb5:"tag:6,optional,implicit"`
+	IterationCount *int32            `krb5:"tag:8,optional,implicit"`
+}
+
+// PAOTPChallenge is the PA-OTP-CHALLENGE payload.
+type PAOTPChallenge struct {
+	Nonce     []byte            `krb5:"tag:0,implicit"`
+	Service   *types.UTF8String `krb5:"tag:1,optional,implicit"`
+	TokenInfo []OTPTokenInfo    `krb5:"tag:2,implicit"`
+	Salt      *string           `krb5:"tag:3,optional,implicit"`
+	S2KParams []byte            `krb5:"tag:4,optional,implicit"`
+}
+
+// PAOTPRequest is the PA-OTP-REQUEST payload.
+type PAOTPRequest struct {
+	Flags          int32               `krb5:"tag:0,implicit"`
+	Nonce          []byte              `krb5:"tag:1,optional,implicit"`
+	EncData        EncryptedData       `krb5:"tag:2,implicit"`
+	IterationCount *int32              `krb5:"tag:4,optional,implicit"`
+	OTPValue       []byte              `krb5:"tag:5,optional,implicit"`
+	PIN            *types.UTF8String   `krb5:"tag:6,optional,implicit"`
+	Challenge      []byte              `krb5:"tag:7,optional,implicit"`
+	Time           *types.KerberosTime `krb5:"tag:8,optional,implicit"`
+	Counter        []byte              `krb5:"tag:9,optional,implicit"`
+	Format         *int32              `krb5:"tag:10,optional,implicit"`
+	TokenID        []byte              `krb5:"tag:11,optional,implicit"`
+	AlgID          *types.UTF8String   `krb5:"tag:12,optional,implicit"`
+	Vendor         *types.UTF8String   `krb5:"tag:13,optional,implicit"`
+}
+
+// PAOTPEncRequest is the encrypted nonce wrapper used by MIT.
+type PAOTPEncRequest struct {
+	Nonce []byte `krb5:"tag:0,implicit"`
+}
+
 const (
 	// PADataSPAKE is the RFC PA-SPAKE padata type.
 	PADataSPAKE int32 = 151

@@ -12,6 +12,10 @@ type Clock interface {
 	Now() time.Time
 }
 
+// UTF8String is an ASN.1 UTF8String value. KerberosString fields use Go's
+// built-in string type and are encoded as GeneralString instead.
+type UTF8String string
+
 // RandomSource is the injectable source used for security-sensitive
 // randomness. Production code should use crypto/rand.Reader.
 type RandomSource io.Reader
