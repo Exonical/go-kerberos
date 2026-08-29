@@ -20,6 +20,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/spnego"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestGoSPNEGOInitiatorAgainstMIT(t *testing.T) {
@@ -123,6 +124,59 @@ func TestMITSPNEGOInitiatorAgainstGo(t *testing.T) {
 	}
 	if err := peer.unwrap(replyWire); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMITGSSDelegationAgainstGo(t *testing.T) {
+	python := requirePythonGSSAPI(t)
+	realm := testenv.Start(t)
+	realm.Run(t, "alice-password\n", "/usr/bin/kinit", "-c", realm.Cache, "alice")
+	file, err := os.Open(realm.Keytab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kt, err := keytab.Read(file)
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := startPythonSPNEGOPeer(t, python, realm, "delegate")
+	defer peer.close()
+	first, err := peer.initial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, reply, err := gssapi.NewAcceptor(kt).Accept(first, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply) != 0 {
+		t.Fatal("unexpected AP-REP for non-mutual delegation exchange")
+	}
+	if ctx.Flags()&gssapi.GSS_C_DELEG_FLAG == 0 || len(ctx.DelegatedCredentials) != 1 {
+		t.Fatalf("delegation result flags=%#x credentials=%d", ctx.Flags(), len(ctx.DelegatedCredentials))
+	}
+	delegated := ctx.DelegatedCredentials[0]
+	if delegated.Flags&types.TicketForwarded == 0 ||
+		len(delegated.Server.Components) != 2 ||
+		delegated.Server.Components[0] != "krbtgt" {
+		t.Fatalf("delegated credential = %#v", delegated)
+	}
+	cfgData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(cfgData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kclient := &client.Client{Config: cfg}
+	_, err = kclient.TGSExchange(t.Context(), delegated, principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	})
+	if err != nil {
+		t.Fatalf("delegated TGT unusable: %v", err)
 	}
 }
 
@@ -295,11 +349,16 @@ import gssapi
 from gssapi.raw.oids import OID
 
 spnego = OID.from_int_seq((1, 3, 6, 1, 5, 5, 2))
+kerberos = OID.from_int_seq((1, 2, 840, 113554, 1, 2, 2))
 mode, config, cache, keytab, realm = sys.argv[1:]
 if mode == "accept":
     acceptor_name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
     acceptor_creds = gssapi.Credentials(name=acceptor_name, usage="accept", mechs=[spnego])
     ctx = gssapi.SecurityContext(creds=acceptor_creds, usage="accept")
+elif mode == "delegate":
+    name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
+    flags = [gssapi.RequirementFlag.delegate_to_peer]
+    ctx = gssapi.SecurityContext(name=name, usage="initiate", mech=kerberos, flags=flags)
 else:
     name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
     flags = [gssapi.RequirementFlag.mutual_authentication,
@@ -310,7 +369,7 @@ else:
 def emit(kind, value):
     print(kind + " " + base64.b64encode(value or b"").decode("ascii"), flush=True)
 
-if mode == "initiate":
+if mode in ("initiate", "delegate"):
     emit("step", ctx.step(None))
 
 for line in sys.stdin:

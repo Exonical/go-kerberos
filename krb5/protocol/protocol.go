@@ -343,6 +343,43 @@ type EncKRBPrivPart struct {
 
 func (EncKRBPrivPart) ApplicationTag() int { return TagEncKRBPrivPart }
 
+// KRBCred is the RFC 4120 forwarded-credentials message.
+type KRBCred struct {
+	PVNO    int32         `krb5:"tag:0"`
+	MsgType int32         `krb5:"tag:1"`
+	Tickets []Ticket      `krb5:"tag:2"`
+	EncPart EncryptedData `krb5:"tag:3"`
+}
+
+func (KRBCred) ApplicationTag() int { return TagKRBCred }
+
+// EncKrbCredPart is the encrypted part of a KRB-CRED message.
+type EncKrbCredPart struct {
+	TicketInfo []KrbCredInfo       `krb5:"tag:0"`
+	Nonce      *uint32             `krb5:"tag:1,optional"`
+	Timestamp  *types.KerberosTime `krb5:"tag:2,optional"`
+	Usec       *int32              `krb5:"tag:3,optional"`
+	SAddress   *HostAddress        `krb5:"tag:4,optional"`
+	RAddress   *HostAddress        `krb5:"tag:5,optional"`
+}
+
+func (EncKrbCredPart) ApplicationTag() int { return TagEncKrbCredPart }
+
+// KrbCredInfo describes one ticket carried by a KRB-CRED message.
+type KrbCredInfo struct {
+	Key       EncryptionKey       `krb5:"tag:0"`
+	Prealm    *string             `krb5:"tag:1,optional"`
+	PName     *PrincipalName      `krb5:"tag:2,optional"`
+	Flags     *types.TicketFlags  `krb5:"tag:3,optional"`
+	AuthTime  *types.KerberosTime `krb5:"tag:4,optional"`
+	StartTime *types.KerberosTime `krb5:"tag:5,optional"`
+	EndTime   *types.KerberosTime `krb5:"tag:6,optional"`
+	RenewTill *types.KerberosTime `krb5:"tag:7,optional"`
+	SRealm    *string             `krb5:"tag:8,optional"`
+	SName     *PrincipalName      `krb5:"tag:9,optional"`
+	CAddr     HostAddresses       `krb5:"tag:10,optional"`
+}
+
 type KRBError struct {
 	PVNO      int32               `krb5:"tag:0"`
 	MsgType   int32               `krb5:"tag:1"`
@@ -496,6 +533,8 @@ const (
 	TagEncTGSRepPart  = 26
 	TagEncAPRepPart   = 27
 	TagEncKRBPrivPart = 28
+	TagKRBCred        = 22
+	TagEncKrbCredPart = 29
 	TagKRBError       = 30
 )
 

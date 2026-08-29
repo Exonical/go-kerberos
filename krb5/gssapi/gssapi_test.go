@@ -2,6 +2,7 @@ package gssapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -18,6 +19,28 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
+
+func samePrincipal(left, right principal.Principal) bool {
+	if left.Realm != right.Realm || left.NameType != right.NameType ||
+		len(left.Components) != len(right.Components) {
+		return false
+	}
+	for i := range left.Components {
+		if left.Components[i] != right.Components[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := asn1.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
 
 func TestInitialTokenFraming(t *testing.T) {
 	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
@@ -39,6 +62,191 @@ func TestInitialTokenFraming(t *testing.T) {
 	if len(mutual) == 0 || !bytes.Contains(mutual, []byte{0x02, 0x00}) {
 		t.Fatalf("missing AP-REP token id: %x", mutual)
 	}
+}
+
+func TestKRBCredRoundTrip(t *testing.T) {
+	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	start := types.KerberosTime{Time: creds.AuthTime.Time.Add(time.Minute), Present: true}
+	renew := types.KerberosTime{Time: creds.EndTime.Time.Add(time.Hour), Present: true}
+	creds.StartTime = &start
+	creds.RenewTill = &renew
+	creds.Flags = types.TicketForwarded
+	key := &creds.Key
+	encoded, err := MarshalKRBCred([]*client.Credentials{creds}, key, krbCredEncPartUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := ReadKRBCred(encoded, key, krbCredEncPartUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 1 || !samePrincipal(decoded[0].Client, creds.Client) ||
+		!samePrincipal(decoded[0].Server, creds.Server) ||
+		!bytes.Equal(decoded[0].Key.KeyValue, creds.Key.KeyValue) ||
+		!bytes.Equal(decoded[0].Ticket, creds.Ticket) ||
+		decoded[0].Flags != creds.Flags || decoded[0].StartTime == nil ||
+		decoded[0].RenewTill == nil {
+		t.Fatalf("decoded KRB-CRED = %#v", decoded)
+	}
+	wrongKey := *key
+	wrongKey.KeyValue = append([]byte(nil), key.KeyValue...)
+	wrongKey.KeyValue[0] ^= 1
+	if _, err := ReadKRBCred(encoded, &wrongKey, krbCredEncPartUsage); err == nil {
+		t.Fatal("wrong KRB-CRED key unexpectedly succeeded")
+	}
+	plaintext, err := MarshalKRBCred([]*client.Credentials{creds}, nil, krbCredEncPartUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := ReadKRBCred(plaintext, nil, krbCredEncPartUsage); err != nil || len(decoded) != 1 {
+		t.Fatalf("plaintext KRB-CRED decode = %#v, %v", decoded, err)
+	}
+}
+
+func TestDelegatedCredentialsRoundTrip(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700000100, 0).UTC()
+	tgt := *creds
+	tgt.AuthTime = types.KerberosTime{Time: now, Present: true}
+	tgt.EndTime = types.KerberosTime{Time: now.Add(time.Hour), Present: true}
+	tgt.Server = principal.Principal{
+		Realm: creds.Client.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", creds.Client.Realm},
+	}
+	forwarded := *creds
+	forwarded.AuthTime = tgt.AuthTime
+	forwarded.EndTime = tgt.EndTime
+	forwarded.Server = tgt.Server
+	forwarded.Flags |= types.TicketForwarded
+	kclient := &client.Client{
+		Now: func() time.Time { return now },
+		Exchange: func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+			var request protocol.TGSReq
+			if err := asn1.Unmarshal(payload, &request); err != nil {
+				return nil, err
+			}
+			if request.ReqBody.KDCOptions&types.KDCForwarded == 0 {
+				t.Fatal("forwarded request missing KDCForwarded")
+			}
+			if len(request.ReqBody.Addresses) != 0 {
+				t.Fatalf("forwarded request addresses = %#v, want omitted", request.ReqBody.Addresses)
+			}
+			return forwardedTGSReply(t, request, forwarded), nil
+		},
+	}
+	initiator, err := NewInitiatorWithDelegationClient(creds, &tgt, kclient, GSSDelegFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptor := NewAcceptor(kt)
+	acceptedContext, _, _, err := acceptor.accept(token, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acceptedContext == nil || len(acceptedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("delegated credentials = %#v", acceptedContext)
+	}
+
+	preobtained, err := kclient.TGSExchangeForwarded(context.Background(), &tgt)
+	if err != nil {
+		t.Fatalf("pre-obtain forwarded TGT: %v", err)
+	}
+	preobtainedInitiator, err := NewInitiatorWithDelegation(creds, &tgt, GSSDelegFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := preobtainedInitiator.SetForwardedCredential(preobtained); err != nil {
+		t.Fatalf("SetForwardedCredential: %v", err)
+	}
+	preobtainedToken, err := preobtainedInitiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("pre-obtained InitialToken: %v", err)
+	}
+	if preobtainedContext, _, _, err := acceptor.accept(preobtainedToken, now); err != nil ||
+		preobtainedContext == nil || len(preobtainedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("pre-obtained delegated credentials = %#v, %v", preobtainedContext, err)
+	}
+}
+
+func TestDelegationInitialTokenContextCancellation(t *testing.T) {
+	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	tgt := *creds
+	tgt.Server = principal.Principal{
+		Realm: creds.Client.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", creds.Client.Realm},
+	}
+	calls := 0
+	kclient := &client.Client{
+		Exchange: func(context.Context, string, []byte) ([]byte, error) {
+			calls++
+			return nil, errors.New("unexpected KDC exchange")
+		},
+	}
+	initiator, err := NewInitiatorWithDelegationClient(creds, &tgt, kclient, GSSDelegFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.SetForwardedCredential(creds); err == nil {
+		t.Fatal("non-forwarded credential unexpectedly accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := initiator.InitialTokenContext(ctx, time.Unix(1700000000, 0).UTC()); err == nil {
+		t.Fatal("canceled delegation context unexpectedly succeeded")
+	}
+	if calls != 0 {
+		t.Fatalf("KDC exchange calls = %d, want 0", calls)
+	}
+	if _, err := kclient.TGSExchangeForwarded(ctx, &tgt); err == nil {
+		t.Fatal("canceled forwarded exchange unexpectedly succeeded")
+	}
+}
+
+func forwardedTGSReply(t *testing.T, request protocol.TGSReq, credentials client.Credentials) []byte {
+	t.Helper()
+	etype, err := crypto.NewRegistry().Get(credentials.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, err := asn1.Marshal(protocol.EncTGSRepPart{
+		Key:      credentials.Key,
+		Flags:    credentials.Flags,
+		Nonce:    request.ReqBody.Nonce,
+		AuthTime: credentials.AuthTime,
+		EndTime:  credentials.EndTime,
+		SRealm:   credentials.Server.Realm,
+		SName: protocol.PrincipalName{
+			NameType:   int32(credentials.Server.NameType),
+			NameString: credentials.Server.Components,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := etype.Encrypt(credentials.Key.KeyValue, 8, part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustMarshal(t, protocol.TGSRep{
+		PVNO: 5, MsgType: 13, CRealm: credentials.Client.Realm,
+		CName: protocol.PrincipalName{
+			NameType:   int32(credentials.Client.NameType),
+			NameString: credentials.Client.Components,
+		},
+		Ticket: protocol.Ticket{
+			TktVNO: 5, Realm: credentials.Server.Realm,
+			SName: protocol.PrincipalName{
+				NameType:   int32(credentials.Server.NameType),
+				NameString: credentials.Server.Components,
+			},
+			EncPart: protocol.EncryptedData{EType: credentials.Key.KeyType, Cipher: []byte{2}},
+		},
+		EncPart: protocol.EncryptedData{EType: credentials.Key.KeyType, Cipher: cipher},
+	})
 }
 
 func TestContextAndPerMessageRoundTrip(t *testing.T) {
