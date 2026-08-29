@@ -1359,6 +1359,23 @@ func TestASP256SPAKE(t *testing.T) {
 	}
 }
 
+func TestASUnsupportedSPAKESupportFallsBackToTimestamp(t *testing.T) {
+	now := time.Unix(2000000135, 0).UTC()
+	server, c := testServer(t, now)
+	server.EnableSPAKE = true
+	server.SPAKEGroups = []int32{spake.GroupP256}
+	c.SPAKEGroups = []int32{spake.GroupEdwards25519}
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	credentials, err := c.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("unsupported SPAKE support AS exchange: %v", err)
+	}
+	if credentials == nil || credentials.Key.KeyType == 0 || len(credentials.Key.KeyValue) == 0 {
+		t.Fatalf("timestamp fallback AS reply has no session key: %#v", credentials)
+	}
+}
+
 func TestASDisablePreauth(t *testing.T) {
 	now := time.Unix(2000000150, 0).UTC()
 	server, _ := testServer(t, now)
