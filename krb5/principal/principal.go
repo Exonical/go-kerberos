@@ -19,6 +19,7 @@ const (
 	NTX500Principal NameType = 6
 	NTSMTPName      NameType = 7
 	NTEnterprise    NameType = 10
+	NTWellKnown     NameType = 11
 )
 
 // Principal is a structured Kerberos principal. Components are not collapsed

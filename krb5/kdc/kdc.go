@@ -61,6 +61,7 @@ const (
 	krbAPErrRepeat         = 34
 	krbAPErrSkew           = 37
 	krbAPErrInKeyUsage     = 44
+	keyUsagePAPKINITKX     = 44
 )
 
 // Server is a Kerberos KDC backed by a pluggable principal store.
@@ -373,10 +374,23 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.errorResponse(errCode, request.ReqBody.SName)
 		}
 	}
+	anonymousRequest := request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0
 	clientName := principalFromProtocol(*request.ReqBody.CName, request.ReqBody.Realm)
-	clientRecord, ok, err := s.DB.Lookup(clientName)
-	if err != nil {
-		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	if anonymousRequest && !isAnonymousPrincipal(clientName) {
+		return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+	}
+	var clientRecord kdb.PrincipalRecord
+	var ok bool
+	var err error
+	if anonymousRequest {
+		clientName = anonymousPrincipal()
+		clientRecord = kdb.PrincipalRecord{Name: clientName}
+		ok = true
+	} else {
+		clientRecord, ok, err = s.DB.Lookup(clientName)
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
 	}
 	if !ok && request.ReqBody.KDCOptions&types.KDCCanonicalize != 0 {
 		clientRecord, ok, clientName, err = s.lookupAlias(clientName)
@@ -387,7 +401,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(kdcErrCPrincipal, request.ReqBody.SName)
 	}
-	if s.lockedOut(clientName, &clientRecord) {
+	if !anonymousRequest && s.lockedOut(clientName, &clientRecord) {
 		return s.errorResponse(kdcErrClientRevoked, request.ReqBody.SName)
 	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
@@ -403,7 +417,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
 	var etypeID int32
 	var clientKey, serviceKey kdb.Key
-	if pkinitPA != nil {
+	if pkinitPA != nil || anonymousRequest {
 		etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
 	} else {
 		etypeID, clientKey, serviceKey, ok = s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
@@ -414,7 +428,17 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(14, request.ReqBody.SName)
 	}
-	if s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
+	if anonymousRequest && pkinitPA == nil {
+		if s.PKINITCertificate == nil || s.PKINITSigner == nil {
+			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
+		}
+		methodData := protocol.MethodData{{PADataType: protocol.PADataPKASReq}}
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+	}
+	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp},
@@ -431,7 +455,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
 	selectedSPAKEGroup := s.selectSPAKEGroup(spakePA)
-	if selectedSPAKEGroup != 0 &&
+	if !anonymousRequest && selectedSPAKEGroup != 0 &&
 		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
 			{PADataType: paSPAKE, PADataValue: marshalDER(protocol.PASPAKE{
@@ -535,7 +559,8 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 	}
 	if pkinitPA != nil {
-		if s.PKINITCertificate == nil || s.PKINITSigner == nil || s.PKINITClientCAs == nil {
+		if s.PKINITCertificate == nil || s.PKINITSigner == nil ||
+			(!anonymousRequest && s.PKINITClientCAs == nil) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		bodyDER, err := asn1.FieldContent(raw, protocol.TagASReq, 4)
@@ -547,9 +572,18 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			verified.Authenticator.CTime.IsZero() || !s.withinSkew(verified.Authenticator.CTime) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
-			clientName.Realm, clientName.Components); err != nil {
-			return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
+		if anonymousRequest {
+			if verified.Signed {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+		} else {
+			if !verified.Signed {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
+				clientName.Realm, clientName.Components); err != nil {
+				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
+			}
 		}
 		if s.passwordExpired(clientRecord) {
 			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
@@ -564,8 +598,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
+		replyPAs := protocol.MethodData{paRep}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, &paRep)
+			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs)
 	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
@@ -751,7 +786,7 @@ func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.A
 	return request, armor, 0
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPA *protocol.PAData) []byte {
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -766,6 +801,9 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	flags := types.TicketInitial
 	if preauthenticated {
 		flags |= types.TicketPreAuthent
+	}
+	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 {
+		flags |= types.TicketAnonymous
 	}
 	if request.ReqBody.KDCOptions&types.KDCForwardable != 0 {
 		flags |= types.TicketForwardable
@@ -795,6 +833,16 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	if renewTill != nil {
 		flags |= types.TicketRenewable
 	}
+	var contributionKey []byte
+	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 &&
+		replyEncryptionKey != nil {
+		contributionKey = append([]byte(nil), sessionValue...)
+		sessionValue, err = crypto.CF2(etype, contributionKey, replyEncryptionKey.Key,
+			[]byte("PKINIT"), []byte("KEYEXCHANGE"))
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+	}
 	ticketPart := protocol.EncTicketPart{
 		Flags:    flags,
 		Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
@@ -812,6 +860,22 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		TktVNO: 5, Realm: request.ReqBody.Realm,
 		SName:   *request.ReqBody.SName,
 		EncPart: protocol.EncryptedData{EType: etypeID, KVNO: &ticketKVNO, Cipher: ticketCipher},
+	}
+	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 &&
+		replyEncryptionKey != nil {
+		encodedKey := marshalDER(protocol.EncryptionKey{
+			KeyType: etypeID, KeyValue: contributionKey,
+		})
+		cipher, encryptErr := etype.Encrypt(replyEncryptionKey.Key, keyUsagePAPKINITKX, encodedKey)
+		if encryptErr != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+		replyPAs = append(replyPAs, protocol.PAData{
+			PADataType: 147,
+			PADataValue: marshalDER(protocol.EncryptedData{
+				EType: etypeID, Cipher: cipher,
+			}),
+		})
 	}
 	lastReq := protocol.LastReq{{LRType: 0, LRValue: types.KerberosTime{Time: now, Present: true}}}
 	part := protocol.EncASRepPart{
@@ -837,16 +901,16 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		Ticket:  ticket,
 		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
 	}
-	if replyPA != nil {
-		reply.PAData = protocol.MethodData{*replyPA}
+	if len(replyPAs) > 0 {
+		reply.PAData = replyPAs
 	}
 	if armor == nil {
 		return marshalDER(reply)
 	}
-	return s.wrapFASTASRep(reply, replyKey, armor, replyPA)
+	return s.wrapFASTASRep(reply, replyKey, armor, replyPAs)
 }
 
-func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext, replyPA *protocol.PAData) []byte {
+func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext, replyPAs protocol.MethodData) []byte {
 	strengthenValue := make([]byte, armor.etype.KeySize())
 	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
@@ -891,8 +955,8 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 	if armor.cookie != nil {
 		fastResponse.PAData = protocol.MethodData{*armor.cookie}
 	}
-	if replyPA != nil {
-		fastResponse.PAData = append(fastResponse.PAData, *replyPA)
+	if len(replyPAs) > 0 {
+		fastResponse.PAData = append(fastResponse.PAData, replyPAs...)
 	}
 	responseCipher, err := armor.etype.Encrypt(armor.key, fast.UsageRep, marshalDER(fastResponse))
 	if err != nil {
@@ -2086,6 +2150,26 @@ func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, b
 
 func principalFromProtocol(value protocol.PrincipalName, realm string) principal.Principal {
 	return principal.Principal{Realm: realm, NameType: principal.NameType(value.NameType), Components: append([]string(nil), value.NameString...)}
+}
+
+func anonymousPrincipal() principal.Principal {
+	return principal.Principal{
+		Realm: "WELLKNOWN:ANONYMOUS", NameType: principal.NTWellKnown,
+		Components: []string{"WELLKNOWN", "ANONYMOUS"},
+	}
+}
+
+func isAnonymousPrincipal(p principal.Principal) bool {
+	a := anonymousPrincipal()
+	if p.NameType != a.NameType || len(p.Components) != len(a.Components) {
+		return false
+	}
+	for i := range a.Components {
+		if p.Components[i] != a.Components[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func protocolPrincipal(value principal.Principal) *protocol.PrincipalName {

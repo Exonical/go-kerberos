@@ -109,10 +109,9 @@ func TestFlagsGoldenBITString(t *testing.T) {
 			[]byte{0x03, 0x05, 0x00, 0x50, 0x80, 0x00, 0x00},
 		},
 		{
-			"canonicalize-last-octet",
+			"canonicalize",
 			uint32(KDCCanonicalize),
-			// Bit 15 is the low bit of the third flag octet:
-			// 03 05 00 [octet1] [octet2] [octet3] [octet4].
+			// Bit 15 is the low bit of the second flag octet.
 			[]byte{0x03, 0x05, 0x00, 0x00, 0x01, 0x00, 0x00},
 		},
 	}

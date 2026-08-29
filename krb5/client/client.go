@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	stdcrypto "crypto"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/binary"
 	"fmt"
@@ -1019,7 +1020,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 		ReqBody: protocol.KDCReqBody{
 			KDCOptions: options,
 			CName:      protocolPrincipal(clientPrincipal),
-			Realm:      clientPrincipal.Realm,
+			Realm:      service.Realm,
 			SName: &protocol.PrincipalName{
 				NameType:   int32(service.NameType),
 				NameString: append([]string(nil), service.Components...),
@@ -1092,7 +1093,12 @@ func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service pri
 	if reply.MsgType != 11 {
 		return nil, fmt.Errorf("AS exchange: unexpected message type %d", reply.MsgType)
 	}
-	if reply.CRealm != clientPrincipal.Realm ||
+	anonymousReply := clientPrincipal.NameType == principal.NTWellKnown &&
+		len(clientPrincipal.Components) == 2 &&
+		clientPrincipal.Components[0] == "WELLKNOWN" &&
+		clientPrincipal.Components[1] == "ANONYMOUS" &&
+		reply.CRealm == "WELLKNOWN:ANONYMOUS"
+	if (reply.CRealm != clientPrincipal.Realm && !anonymousReply) ||
 		(!samePrincipal(reply.CName, clientPrincipal) && !c.canonicalizeEnabled()) {
 		return nil, fmt.Errorf("AS exchange: AS-REP client principal mismatch")
 	}
@@ -1299,4 +1305,168 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		return nil, err
 	}
 	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
+}
+
+// AnonymousASExchange obtains an anonymous initial ticket using RFC 8062
+// unsigned PKINIT. anchors must trust the KDC's PKINIT certificate.
+func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors *x509.CertPool) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: nil context")
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: empty realm")
+	}
+	anon := principal.Principal{
+		Realm: realm, NameType: principal.NTWellKnown,
+		Components: []string{"WELLKNOWN", "ANONYMOUS"},
+	}
+	service := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", realm},
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, err := c.newASReqForService(anon, service, now)
+	if err != nil {
+		return nil, err
+	}
+	request.ReqBody.KDCOptions |= types.KDCRequestAnonymous
+	response, err := c.roundTrip(ctx, realm, request)
+	if err != nil {
+		return nil, err
+	}
+	kerberosError, ok := decodeKRBError(response)
+	if !ok || kerberosError.Code != 25 {
+		if ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: expected PREAUTH_REQUIRED")
+	}
+	bodyDER, err := asn1.Marshal(request.ReqBody)
+	if err != nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS request body: %w", err)
+	}
+	pa, pkClient, err := pkinit.BuildAnonymousPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{pa}
+	response, err = c.roundTrip(ctx, realm, request)
+	if err != nil {
+		return nil, err
+	}
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(response); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange AS-REP: %w", err)
+	}
+	var pkReply []byte
+	for _, item := range reply.PAData {
+		if item.PADataType == pkinit.PADataASRep {
+			pkReply = item.PADataValue
+			break
+		}
+	}
+	if len(pkReply) == 0 {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
+	}
+	replyKey, err := pkClient.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyAnonymousReplyKX(reply, replyKey); err != nil {
+		return nil, err
+	}
+	credentials, err := c.decodeASRepForService(
+		response, anon, service, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireAnonymousTicketFlag(credentials); err != nil {
+		return nil, err
+	}
+	return credentials, nil
+}
+
+func requireAnonymousTicketFlag(credentials *Credentials) error {
+	if credentials == nil || credentials.Flags&types.TicketAnonymous == 0 {
+		return fmt.Errorf(
+			"anonymous PKINIT: AS-REP lacks anonymous ticket flag: %w",
+			krberrors.ErrIntegrity,
+		)
+	}
+	return nil
+}
+
+const (
+	paPKINITKX         int32 = 147
+	keyUsagePAPKINITKX       = 44
+)
+
+func verifyAnonymousReplyKX(reply protocol.ASRep, replyKey []byte) error {
+	var kxValue []byte
+	for _, item := range reply.PAData {
+		if item.PADataType == paPKINITKX {
+			kxValue = item.PADataValue
+			break
+		}
+	}
+	if len(kxValue) == 0 {
+		return fmt.Errorf("anonymous PKINIT: missing PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+	}
+	var encryptedKey protocol.EncryptedData
+	if err := asn1.Unmarshal(kxValue, &encryptedKey); err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+	}
+	if encryptedKey.EType != reply.EncPart.EType {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype mismatch: %w", krberrors.ErrIntegrity)
+	}
+	etype, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype: %w", krberrors.ErrIntegrity)
+	}
+	plainKey, err := etype.Decrypt(replyKey, keyUsagePAPKINITKX, encryptedKey.Cipher)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX decrypt: %w", krberrors.ErrIntegrity)
+	}
+	var kdcKey protocol.EncryptionKey
+	if err := asn1.Unmarshal(plainKey, &kdcKey); err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key: %w", krberrors.ErrIntegrity)
+	}
+	if kdcKey.KeyType != reply.EncPart.EType {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key enctype mismatch: %w", krberrors.ErrIntegrity)
+	}
+	plainReply, err := etype.Decrypt(replyKey, 3, reply.EncPart.Cipher)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT AS-REP decrypt: %w", krberrors.ErrIntegrity)
+	}
+	if len(plainReply) > 0 && plainReply[0] == 0x7a {
+		plainReply = append([]byte(nil), plainReply...)
+		plainReply[0] = 0x79
+	}
+	var part protocol.EncASRepPart
+	if err := asn1.Unmarshal(plainReply, &part); err != nil {
+		return fmt.Errorf("anonymous PKINIT AS-REP: %w", krberrors.ErrIntegrity)
+	}
+	expected, err := crypto.CF2(
+		etype, kdcKey.KeyValue, replyKey,
+		[]byte("PKINIT"), []byte("KEYEXCHANGE"),
+	)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX derive: %w", krberrors.ErrIntegrity)
+	}
+	if part.Key.KeyType != reply.EncPart.EType ||
+		len(part.Key.KeyValue) != len(expected) ||
+		subtle.ConstantTimeCompare(part.Key.KeyValue, expected) != 1 {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX session key mismatch: %w", krberrors.ErrIntegrity)
+	}
+	return nil
 }

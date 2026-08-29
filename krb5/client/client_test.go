@@ -107,6 +107,13 @@ func TestASExchangePreauthRetry(t *testing.T) {
 	}
 }
 
+func TestAnonymousASExchangeRejectsMissingTicketFlag(t *testing.T) {
+	err := requireAnonymousTicketFlag(&Credentials{})
+	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+		t.Fatalf("missing anonymous ticket flag error = %v, want integrity", err)
+	}
+}
+
 func TestASExchangeAcceptsMixedSPAKEFactors(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	clientPrincipal := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}

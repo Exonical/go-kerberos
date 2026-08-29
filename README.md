@@ -172,6 +172,13 @@ supports per-principal string attributes, principal-key extraction, and
 API-v4 explicit key setting. General kadmin RPC coverage beyond the documented
 operations remains out of scope.
 
+PKINIT supports both certificate-backed RFC 4556 exchanges and anonymous
+PKINIT (RFC 6112/8062). Anonymous exchanges use unsigned DH-only PKINIT; the
+Go KDC requires the anonymous request option, issues an addressless ticket
+with the anonymous flag, and interoperates with MIT `kinit -n` in both
+directions. Ordinary PKINIT continues to require configured client trust
+anchors.
+
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
 include the encrypted `K/M@REALM` record, and encrypt principal key data with

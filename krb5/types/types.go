@@ -57,14 +57,15 @@ func (t KerberosTime) EncodeGeneralizedTime() (string, error) {
 type KDCOptions uint32
 
 const (
-	KDCForwardable   KDCOptions = 1 << 1
-	KDCForwarded     KDCOptions = 1 << 2
-	KDCProxiable     KDCOptions = 1 << 3
-	KDCProxy         KDCOptions = 1 << 4
-	KDCAllowPostdate KDCOptions = 1 << 5
-	KDCPostdated     KDCOptions = 1 << 6
-	KDCRenewable     KDCOptions = 1 << 8
-	KDCCanonicalize  KDCOptions = 1 << 15
+	KDCForwardable      KDCOptions = 1 << 1
+	KDCForwarded        KDCOptions = 1 << 2
+	KDCProxiable        KDCOptions = 1 << 3
+	KDCProxy            KDCOptions = 1 << 4
+	KDCAllowPostdate    KDCOptions = 1 << 5
+	KDCPostdated        KDCOptions = 1 << 6
+	KDCRenewable        KDCOptions = 1 << 8
+	KDCCanonicalize     KDCOptions = 1 << 15
+	KDCRequestAnonymous KDCOptions = 1 << 16
 	// KDCCNameInAddlTkt requests constrained delegation ([MS-SFU] S4U2Proxy).
 	KDCCNameInAddlTkt        KDCOptions = 1 << 14
 	KDCDisableTransitedCheck KDCOptions = 1 << 26
@@ -91,7 +92,7 @@ const (
 	TicketHWAuthent    TicketFlags = 1 << 11
 	TicketTransited    TicketFlags = 1 << 12
 	TicketOKAsDelegate TicketFlags = 1 << 13
-	TicketAnonymous    TicketFlags = 1 << 14
+	TicketAnonymous    TicketFlags = 1 << 16
 )
 
 // APOptions is the 32-bit AP-options field from RFC 4120, section 5.5.1.
