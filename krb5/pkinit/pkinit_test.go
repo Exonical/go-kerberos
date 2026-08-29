@@ -310,6 +310,39 @@ func TestPAASReqChecksumAndNonce(t *testing.T) {
 	}
 }
 
+func TestLegacyPAASReqDoesNotAdvertiseKDFs(t *testing.T) {
+	cert, key := testCertificate(t)
+	client, err := NewClient(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x30, 0x02, 0x05, 0x00}
+	legacy, err := client.BuildPAASReq(body, time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyPAASReqForKDC(legacy.PADataValue, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.SupportedKDFs != nil {
+		t.Fatalf("legacy request advertised supported KDFs: %v", verified.SupportedKDFs)
+	}
+	clientName := principal.Principal{Realm: "PKINIT.TEST", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	serverName := principal.Principal{Realm: "PKINIT.TEST", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "PKINIT.TEST"}}
+	agile, err := client.BuildPAASReqForPrincipals(body, time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 77, clientName, serverName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err = VerifyPAASReqForKDC(agile.PADataValue, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verified.SupportedKDFs) != len(SupportedKDFAlgorithmIDs()) {
+		t.Fatalf("context-aware request KDF count = %d, want %d", len(verified.SupportedKDFs), len(SupportedKDFAlgorithmIDs()))
+	}
+}
+
 func TestAnonymousPAASReqUnsignedCMS(t *testing.T) {
 	body := []byte{0x30, 0x00}
 	pa, client, err := BuildAnonymousPAASReq(body,

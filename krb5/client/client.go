@@ -1477,7 +1477,12 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 		Realm: realm, NameType: principal.NTSrvInstance,
 		Components: []string{"krbtgt", realm},
 	}
-	pa, pkClient, err := pkinit.BuildAnonymousPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	pkClient, err := pkinit.NewAnonymousClient()
+	if err != nil {
+		return nil, err
+	}
+	pa, err := pkClient.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
+		anon, serverPrincipal)
 	if err != nil {
 		return nil, err
 	}

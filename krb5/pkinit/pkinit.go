@@ -135,14 +135,18 @@ func newDHPrivate() (*big.Int, error) {
 // BuildPAASReq constructs PA-PK-AS-REQ. bodyDER must be the exact DER bytes
 // of the AS-REQ KDC-REQ-BODY received by the KDC.
 func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (protocol.PAData, error) {
-	return c.BuildPAASReqForPrincipals(bodyDER, now, nonce,
-		principal.Principal{}, principal.Principal{})
+	return c.buildPAASReq(bodyDER, now, nonce, nil)
 }
 
 // BuildPAASReqForPrincipals constructs PA-PK-AS-REQ with algorithm-agility
 // context for the supplied client and KDC principals.
 func (c *Client) BuildPAASReqForPrincipals(bodyDER []byte, now time.Time,
 	nonce uint32, client, server principal.Principal) (protocol.PAData, error) {
+	return c.buildPAASReq(bodyDER, now, nonce, SupportedKDFAlgorithmIDs())
+}
+
+func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
+	supportedKDFs [][]byte) (protocol.PAData, error) {
 	if c == nil || c.Private == nil || (!c.Anonymous && (c.Certificate == nil || c.Signer == nil)) {
 		return protocol.PAData{}, errors.New("pkinit: incomplete client state")
 	}
@@ -150,7 +154,7 @@ func (c *Client) BuildPAASReqForPrincipals(bodyDER []byte, now time.Time,
 		return protocol.PAData{}, errors.New("pkinit: empty AS-REQ body")
 	}
 	sum := sha1.Sum(bodyDER)
-	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public), SupportedKDFAlgorithmIDs())
+	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public), supportedKDFs)
 	var cms []byte
 	var err error
 	if c.Anonymous {
