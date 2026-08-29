@@ -120,15 +120,21 @@ func startGoKDCWithOptions(t *testing.T, policy *kdb.PolicyRecord, enableSPAKE b
     dns_lookup_realm = false
     rdns = false
 %s
+%s
 
 [realms]
     %s = {
         kdc = 127.0.0.1:%d
         kdc = tcp/127.0.0.1:%d
     }
-`, goKDCRealm, func() string {
+	`, goKDCRealm, func() string {
 		if enableSPAKE {
 			return "    spake_preauth_groups = edwards25519\n"
+		}
+		return ""
+	}(), func() string {
+		if enableSPAKE {
+			return "    preferred_preauth_types = 151\n"
 		}
 		return ""
 	}(), goKDCRealm, udpPort, tcpPort)

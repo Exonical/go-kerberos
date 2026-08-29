@@ -412,6 +412,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
+			{PADataType: paEncTimestamp},
 			{PADataType: paSPAKE},
 		}
 		if clientKey.Enctype != 0 {

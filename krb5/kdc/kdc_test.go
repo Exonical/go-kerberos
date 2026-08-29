@@ -1178,6 +1178,41 @@ func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 	}
 }
 
+func TestASEncryptedTimestampWithSPAKEAdvertisement(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnableSPAKE = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 1)
+
+	var hint protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &hint); err != nil {
+		t.Fatalf("preauthentication hint: %v", err)
+	}
+	if hint.ErrorCode != kdcErrPreauthRequired {
+		t.Fatalf("hint error code = %d, want %d", hint.ErrorCode, kdcErrPreauthRequired)
+	}
+	methodData, err := preauth.ParseMethodData(hint.EData)
+	if err != nil {
+		t.Fatalf("parse method data: %v", err)
+	}
+	timestampHint := preauth.FindPAData(methodData, paEncTimestamp)
+	if timestampHint == nil || len(timestampHint.PADataValue) != 0 {
+		t.Fatalf("PA-ENC-TIMESTAMP hint = %#v, want empty padata", timestampHint)
+	}
+	if preauth.FindPAData(methodData, paSPAKE) == nil {
+		t.Fatal("PA-SPAKE hint missing")
+	}
+
+	addPreauthPassword(t, &request, "alice-password", now)
+	response := server.HandleMessage(mustMarshal(t, request))
+	part := asReplyPart(t, response)
+	if part.Key.KeyType == 0 || len(part.Key.KeyValue) == 0 {
+		t.Fatalf("encrypted-timestamp AS reply has no session key: %#v", part.Key)
+	}
+}
+
 func TestASDisablePreauth(t *testing.T) {
 	now := time.Unix(2000000150, 0).UTC()
 	server, _ := testServer(t, now)
