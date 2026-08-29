@@ -50,8 +50,12 @@ enforces the 10 MiB reply limit, maps the Heimdal matching flags, retries
 cached retrieval for older daemons, and falls back from the MIT
 `GET_CRED_LIST` extension to UUID iteration. Linux does not implement the
 optional Mach transport. The Go server is intentionally an in-memory daemon
-for tests and local development; it does not provide daemon authentication or
-persistent storage.
+for tests and local development; it does not provide persistent storage.
+`KCMServer` defaults to the unauthenticated shared namespace matching
+`kcmserver.py`. On Linux, setting `IsolatePeers` enables server-side
+per-UID cache, UUID, default-cache, and offset isolation through
+`SO_PEERCRED`; isolated servers reject connections without available Unix
+peer credentials.
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or

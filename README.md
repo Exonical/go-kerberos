@@ -120,7 +120,11 @@ disposable integration test environments.
   including cache replacement, retrieval, collection enumeration, KDC
   offsets, and the MIT `GET_CRED_LIST`/`REPLACE` extensions. The default
   socket is `/var/run/.heim_org.h5l.kcm-socket`; use `ResolveKCM` for an
-  explicit socket, or pass `-` as the socket to disable KCM.
+  explicit socket, or pass `-` as the socket to disable KCM. `KCMServer`
+  defaults to the unauthenticated shared namespace used by the MIT test
+  daemon; set `IsolatePeers` to enable Linux `SO_PEERCRED` per-UID cache
+  isolation. Isolated servers refuse connections when peer credentials are
+  unavailable.
 - **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
   DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover, and HTTPS KDC Proxy routing for `kdc =

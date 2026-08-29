@@ -3,14 +3,27 @@ package ccache
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
+
+func kcmRequest(op uint16, args ...[]byte) []byte {
+	request := []byte{2, 0, byte(op >> 8), byte(op)}
+	for _, arg := range args {
+		request = append(request, arg...)
+	}
+	return request
+}
 
 func TestKCMRoundTripAndCollection(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "kcm.sock")
@@ -161,7 +174,7 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 	if _, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetPrincipal)}, cstring(name)...)); code != kcmErrNoFile {
 		t.Fatalf("missing principal status = %d", code)
 	}
-	if len(server.caches) != 0 {
+	if len(server.shared.caches) != 0 {
 		t.Fatal("missing read created a cache")
 	}
 	cache := testCache()
@@ -214,5 +227,387 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 	remaining, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
 	if code != 0 || !bytes.Equal(remaining, uuids[kcmUUIDLen:]) {
 		t.Fatalf("remaining UUID list = %x, want %x (status %d)", remaining, uuids[kcmUUIDLen:], code)
+	}
+}
+
+func TestKCMServerPeerNamespaces(t *testing.T) {
+	server := NewKCMServer("")
+	server.IsolatePeers = true
+	cacheName := "shared-name"
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initRequest := kcmRequest(kcmOpInitialize, append(cstring(cacheName), principalBytes...))
+	if _, code := server.dispatchPeer(initRequest, 1001); code != 0 {
+		t.Fatalf("initialize status = %d", code)
+	}
+	raw, err := marshalCredentialBytes(cache.Credentials[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpStore, append(cstring(cacheName), raw...)), 1001); code != 0 {
+		t.Fatalf("store status = %d", code)
+	}
+	uuids, code := server.dispatchPeer(kcmRequest(kcmOpGetCredUUIDList, cstring(cacheName)), 1001)
+	if code != 0 || len(uuids) != kcmUUIDLen {
+		t.Fatalf("peer A UUID list = %x, status %d", uuids, code)
+	}
+	cacheUUIDs, code := server.dispatchPeer(kcmRequest(kcmOpGetCacheUUIDList), 1001)
+	if code != 0 || len(cacheUUIDs) != kcmUUIDLen {
+		t.Fatalf("peer A cache UUID list = %x, status %d", cacheUUIDs, code)
+	}
+	server.dispatchPeer(kcmRequest(kcmOpSetDefaultCache, cstring(cacheName)), 1001)
+
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetPrincipal, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer principal status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetCredList, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer credential-list status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetCredUUIDList, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer credential UUID-list status = %d", code)
+	}
+	credByUUIDArgs := append(cstring(cacheName), uuids[:kcmUUIDLen]...)
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetCredByUUID, credByUUIDArgs), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer credential-by-UUID status = %d", code)
+	}
+	match, err := marshalMatchCredential(cache.Credentials[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrieveArgs := append(cstring(cacheName), make([]byte, 4)...)
+	retrieveArgs = append(retrieveArgs, match...)
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpRetrieve, retrieveArgs), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer retrieve status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpStore, append(cstring(cacheName), raw...)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer store status = %d", code)
+	}
+	removeArgs := append(cstring(cacheName), make([]byte, 4)...)
+	removeArgs = append(removeArgs, match...)
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpRemoveCred, removeArgs), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer remove status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpDestroy, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer destroy status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetKDCOffset, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer offset status = %d", code)
+	}
+	offset := append(cstring(cacheName), make([]byte, 4)...)
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpSetKDCOffset, offset), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer set-offset status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpSetDefaultCache, cstring(cacheName)), 1002); code != kcmErrNoFile {
+		t.Fatalf("cross-peer set-default status = %d", code)
+	}
+	cacheList, code := server.dispatchPeer(kcmRequest(kcmOpGetCacheUUIDList), 1002)
+	if code != 0 || len(cacheList) != 0 {
+		t.Fatalf("cross-peer cache list = %x, status %d", cacheList, code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetCacheByUUID, cacheUUIDs[:kcmUUIDLen]), 1002); code != kcmErrEnd {
+		t.Fatalf("cross-peer credential UUID status = %d", code)
+	}
+	if _, code := server.dispatchPeer(kcmRequest(kcmOpGetDefaultCache), 1002); code != 0 {
+		t.Fatalf("cross-peer default status = %d", code)
+	}
+	defaultName, _ := server.dispatchPeer(kcmRequest(kcmOpGetDefaultCache), 1002)
+	if string(defaultName) != "default\x00" {
+		t.Fatalf("cross-peer default = %q", defaultName)
+	}
+}
+
+func TestKCMServerZeroValueIsSafe(t *testing.T) {
+	var server KCMServer
+	if _, code := server.dispatch(kcmRequest(kcmOpGetDefaultCache)); code != 0 {
+		t.Fatalf("zero-value default status = %d", code)
+	}
+	if _, code := server.dispatch(kcmRequest(kcmOpGetPrincipal, cstring("zero"))); code != kcmErrNoFile {
+		t.Fatalf("zero-value missing principal status = %d", code)
+	}
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := server.dispatch(kcmRequest(kcmOpInitialize,
+		append(cstring("zero"), principalBytes...))); code != 0 {
+		t.Fatalf("zero-value initialize status = %d", code)
+	}
+}
+
+func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
+	server := NewKCMServer("")
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialBytes, err := marshalCredentialBytes(cache.Credentials[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceRequest := func(name string) []byte {
+		args := append(cstring(name), make([]byte, 4)...)
+		args = append(args, principalBytes...)
+		var count [4]byte
+		binary.BigEndian.PutUint32(count[:], 1)
+		args = append(args, count[:]...)
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(credentialBytes)))
+		args = append(args, length[:]...)
+		args = append(args, credentialBytes...)
+		return kcmRequest(kcmOpReplace, args)
+	}
+
+	const replacements = 24
+	const generated = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, replacements+generated)
+	for i := 0; i < replacements; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, code := server.dispatchPeer(replaceRequest(fmt.Sprintf("replace-%d", i)), 0); code != 0 {
+				errs <- fmt.Errorf("replace-%d status %d", i, code)
+			}
+		}()
+	}
+	for i := 0; i < generated; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, code := server.dispatchPeer(kcmRequest(kcmOpGenNew), 0); code != 0 {
+				errs <- fmt.Errorf("generate status %d", code)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	cacheUUIDs, code := server.dispatch(kcmRequest(kcmOpGetCacheUUIDList))
+	if code != 0 || len(cacheUUIDs) != (replacements+generated)*kcmUUIDLen {
+		t.Fatalf("cache UUID list length=%d status=%d", len(cacheUUIDs), code)
+	}
+	seenCaches := make(map[[16]byte]bool)
+	for off := 0; off < len(cacheUUIDs); off += kcmUUIDLen {
+		var uuid [16]byte
+		copy(uuid[:], cacheUUIDs[off:off+kcmUUIDLen])
+		if seenCaches[uuid] {
+			t.Fatalf("duplicate cache UUID %x", uuid)
+		}
+		seenCaches[uuid] = true
+		if _, code := server.dispatch(kcmRequest(kcmOpGetCacheByUUID, uuid[:])); code != 0 {
+			t.Fatalf("cache UUID %x lookup status=%d", uuid, code)
+		}
+	}
+	seenCreds := make(map[[16]byte]bool)
+	for i := 0; i < replacements; i++ {
+		name := fmt.Sprintf("replace-%d", i)
+		uuids, code := server.dispatch(kcmRequest(kcmOpGetCredUUIDList, cstring(name)))
+		if code != 0 || len(uuids) != kcmUUIDLen {
+			t.Fatalf("%s credential UUID list length=%d status=%d", name, len(uuids), code)
+		}
+		var uuid [16]byte
+		copy(uuid[:], uuids)
+		if seenCreds[uuid] {
+			t.Fatalf("duplicate credential UUID %x", uuid)
+		}
+		seenCreds[uuid] = true
+	}
+}
+
+func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "kcm.sock")
+	server := NewKCMServer(socket)
+	server.IsolatePeers = isolate
+	if peerUID != nil {
+		server.peerUID = peerUID
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.ServeListener(listener)
+	}()
+	t.Cleanup(func() {
+		_ = server.Close()
+		<-done
+	})
+	return server, socket
+}
+
+func TestKCMServerSamePeerClientsShareNamespace(t *testing.T) {
+	_, socket := startKCMTestServer(t, true, func(net.Conn) (uint32, error) {
+		return 4242, nil
+	})
+	first, err := ResolveKCM("peer-shared", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ResolveKCM("peer-shared", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	defer second.Close()
+	value := testCache()
+	if err := first.Write(value); err != nil {
+		t.Fatal(err)
+	}
+	got, err := second.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Credentials) != len(value.Credentials) ||
+		got.DefaultPrincipal.Realm != value.DefaultPrincipal.Realm {
+		t.Fatalf("same-peer cache = %#v, want %#v", got, value)
+	}
+	if err := first.SetDefault(); err != nil {
+		t.Fatal(err)
+	}
+	defaultCache, err := ResolveKCM("", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer defaultCache.Close()
+	if defaultCache.Name() != "KCM:peer-shared" {
+		t.Fatalf("same-peer default cache = %q", defaultCache.Name())
+	}
+}
+
+func TestKCMServerLinuxPeerCredentials(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("SO_PEERCRED is Linux-specific")
+	}
+	_, socket := startKCMTestServer(t, true, nil)
+	first, err := ResolveKCM("linux-peer", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := ResolveKCM("linux-peer", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := first.Write(testCache()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Read(); err != nil {
+		t.Fatalf("same Linux peer UID could not share cache: %v", err)
+	}
+}
+
+func TestKCMServerConcurrentPeerClients(t *testing.T) {
+	_, socket := startKCMTestServer(t, true, func(net.Conn) (uint32, error) {
+		return 777, nil
+	})
+	const clients = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, clients)
+	for i := 0; i < clients; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cache, err := ResolveKCM(fmt.Sprintf("concurrent-%d", i), socket)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer cache.Close()
+			if err := cache.Write(testCache()); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type kcmSingleConnListener struct {
+	conn net.Conn
+	done bool
+}
+
+func (l *kcmSingleConnListener) Accept() (net.Conn, error) {
+	if l.done {
+		return nil, errors.New("kcm test listener stopped")
+	}
+	l.done = true
+	return l.conn, nil
+}
+
+func (l *kcmSingleConnListener) Close() error   { return nil }
+func (l *kcmSingleConnListener) Addr() net.Addr { return &net.UnixAddr{Name: "kcm-test", Net: "unix"} }
+
+func TestKCMServerRefusesUnavailablePeerCredentials(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	server := NewKCMServer("")
+	server.IsolatePeers = true
+	server.peerUID = func(net.Conn) (uint32, error) {
+		return 0, errKCMPeerCredentialsUnavailable
+	}
+	listener := &kcmSingleConnListener{conn: serverConn}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.ServeListener(listener)
+	}()
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "kcm test listener stopped" {
+			t.Fatalf("ServeListener error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not refuse unavailable peer")
+	}
+	_ = clientConn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := clientConn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("refused peer connection remained open")
+	}
+}
+
+func TestKCMServerCloseClosesActiveConnections(t *testing.T) {
+	server, socket := startKCMTestServer(t, true, func(net.Conn) (uint32, error) {
+		return 99, nil
+	})
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		active := len(server.conns)
+		server.mu.Unlock()
+		if active != 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("active KCM connection remained open after Close")
 	}
 }
