@@ -43,6 +43,12 @@ func DummyAuthorizationData() (protocol.AuthorizationData, error) {
 	return protocol.AuthorizationData{{ADType: ADIfRelevant, ADData: inner}}, nil
 }
 
+// AddDummyAuthorizationData places MIT's one-byte PAC placeholder at the
+// same location where AddAuthorizationData would place the signed PAC.
+func AddDummyAuthorizationData(data protocol.AuthorizationData) (protocol.AuthorizationData, error) {
+	return addAuthorizationData(data, []byte{0})
+}
+
 // AddAuthorizationData returns data with a PAC element added to the existing
 // authorization-data list. An existing PAC is replaced while unrelated
 // authorization data, including other AD-IF-RELEVANT elements, is retained.
@@ -50,6 +56,10 @@ func AddAuthorizationData(data protocol.AuthorizationData, value []byte) (protoc
 	if _, err := Parse(value); err != nil {
 		return nil, err
 	}
+	return addAuthorizationData(data, value)
+}
+
+func addAuthorizationData(data protocol.AuthorizationData, value []byte) (protocol.AuthorizationData, error) {
 	out := make(protocol.AuthorizationData, 0, len(data)+1)
 	replaced := false
 	for _, outer := range data {
@@ -62,18 +72,22 @@ func AddAuthorizationData(data protocol.AuthorizationData, value []byte) (protoc
 			return nil, fmt.Errorf("PAC authorization data: %w", err)
 		}
 		hasPAC := false
+		inserted := false
 		filtered := make(protocol.AuthorizationData, 0, len(inner)+1)
 		for _, entry := range inner {
 			if entry.ADType == ADWin2KPac {
 				hasPAC = true
+				if !inserted {
+					filtered = append(filtered, protocol.AuthorizationDataEntry{
+						ADType: ADWin2KPac, ADData: append([]byte(nil), value...),
+					})
+					inserted = true
+				}
 				continue
 			}
 			filtered = append(filtered, entry)
 		}
 		if hasPAC {
-			filtered = append(filtered, protocol.AuthorizationDataEntry{
-				ADType: ADWin2KPac, ADData: append([]byte(nil), value...),
-			})
 			encoded, err := asn1.Marshal(filtered)
 			if err != nil {
 				return nil, fmt.Errorf("PAC authorization data: %w", err)
@@ -84,11 +98,13 @@ func AddAuthorizationData(data protocol.AuthorizationData, value []byte) (protoc
 		out = append(out, outer)
 	}
 	if !replaced {
-		wrapped, err := AuthorizationData(value)
+		inner, err := asn1.Marshal(protocol.AuthorizationData{
+			{ADType: ADWin2KPac, ADData: append([]byte(nil), value...)},
+		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("PAC authorization data: %w", err)
 		}
-		out = append(out, wrapped...)
+		out = append(out, protocol.AuthorizationData{{ADType: ADIfRelevant, ADData: inner}}...)
 	}
 	return out, nil
 }

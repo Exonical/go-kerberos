@@ -955,12 +955,11 @@ func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service pr
 	var dummyTicket []byte
 	if serviceTicket {
 		originalAuthData := ticketPart.AuthorizationData
-		dummyAuthData, err := pac.DummyAuthorizationData()
+		dummyAuthData, err := pac.AddDummyAuthorizationData(originalAuthData)
 		if err != nil {
 			return err
 		}
-		ticketPart.AuthorizationData = append(append(protocol.AuthorizationData(nil),
-			dummyAuthData...), originalAuthData...)
+		ticketPart.AuthorizationData = dummyAuthData
 		dummyTicket = marshalDER(*ticketPart)
 		ticketPart.AuthorizationData = originalAuthData
 	}
