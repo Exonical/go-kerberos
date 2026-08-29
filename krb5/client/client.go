@@ -798,6 +798,59 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 	return result, nil
 }
 
+// TGSExchangeForwarded obtains a forwarded copy of the client's local TGT.
+// The request omits host addresses, as required for GSS credential
+// delegation, and sets the FORWARDED ticket option.
+func (c *Client) TGSExchangeForwarded(ctx context.Context, tgt *Credentials) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("forwarded TGS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("forwarded TGS exchange: nil context")
+	}
+	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
+		return nil, fmt.Errorf("forwarded TGS exchange: incomplete TGT")
+	}
+	realm := tgt.Client.Realm
+	if realm == "" {
+		realm = tgt.Server.Realm
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("forwarded TGS exchange: missing realm")
+	}
+	service := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", realm},
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, nonce, err := c.newTGSReqWithBody(tgt, service, realm, now, false, func(body *protocol.KDCReqBody) {
+		body.KDCOptions |= types.KDCForwarded
+		body.Addresses = nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.exchangePayload(ctx, realm, request, "forwarded TGS exchange request")
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		return nil, kerberosError
+	}
+	result, _, err := c.decodeTGSRepForExchange(response, tgt.Client, service, service,
+		true, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+	if err != nil {
+		return nil, err
+	}
+	if result.Flags&types.TicketForwarded == 0 {
+		return nil, fmt.Errorf("forwarded TGS exchange: reply ticket is not forwarded")
+	}
+	return result, nil
+}
+
 // TGSExchangeFAST obtains a service ticket using an RFC 6113 implicit TGS
 // armor exchange. The TGS authenticator subkey supplies the armor key input.
 func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {

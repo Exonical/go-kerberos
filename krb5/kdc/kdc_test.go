@@ -19,7 +19,9 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
@@ -124,6 +126,59 @@ func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
 	if _, err := kclient.TGSExchangeU2U(context.Background(), bobTGT, bobTGT.Ticket, alice); err == nil ||
 		!hasKRBCode(err, kdcErrServerNoMatch) {
 		t.Fatalf("U2U mismatched client error = %v, want KDC_ERR_SERVER_NOMATCH", err)
+	}
+}
+
+func TestServerGSSCredentialDelegation(t *testing.T) {
+	now := time.Unix(2000000020, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	serviceTicket, err := kclient.TGSExchange(context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("TGSExchange: %v", err)
+	}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatalf("service lookup = %#v, %v, %v", record, ok, err)
+	}
+	serviceKey, ok := record.Keys[serviceTicket.Key.KeyType]
+	if !ok {
+		t.Fatalf("service key enctype %d missing", serviceTicket.Key.KeyType)
+	}
+	initiator, err := gssapi.NewInitiatorWithDelegationClient(
+		serviceTicket, tgt, kclient, gssapi.GSSMutualFlag|gssapi.GSSIntegrityFlag,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("InitialToken: %v", err)
+	}
+	acceptor := gssapi.NewAcceptor(&keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: service, KVNO: record.KVNO, Enctype: serviceTicket.Key.KeyType, Key: serviceKey.Key,
+	}}})
+	gssContext, reply, err := acceptor.Accept(token, now)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := initiator.VerifyToken(reply); err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if gssContext.Flags()&gssapi.GSS_C_DELEG_FLAG == 0 || len(gssContext.DelegatedCredentials) != 1 {
+		t.Fatalf("delegation result flags=%#x credentials=%d", gssContext.Flags(), len(gssContext.DelegatedCredentials))
+	}
+	delegated := gssContext.DelegatedCredentials[0]
+	if delegated.Flags&types.TicketForwarded == 0 {
+		t.Fatalf("delegated ticket flags = %#x", delegated.Flags)
+	}
+	if _, err := kclient.TGSExchange(context.Background(), delegated, service); err != nil {
+		t.Fatalf("delegated TGT TGSExchange: %v", err)
 	}
 }
 

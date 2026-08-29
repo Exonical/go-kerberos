@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -33,6 +34,57 @@ func TestChangePasswdDataGolden(t *testing.T) {
 	if string(decoded.NewPassword) != "newpass" || decoded.TargetName == nil ||
 		decoded.TargetRealm == nil || *decoded.TargetRealm != realm {
 		t.Fatalf("decoded ChangePasswdData = %#v", decoded)
+	}
+}
+
+func TestKRBCredGolden(t *testing.T) {
+	realm := "REALM"
+	serverName := PrincipalName{NameType: 2, NameString: []string{"krbtgt", "REALM"}}
+	encoded, err := asn1.Marshal(KRBCred{
+		PVNO: 5, MsgType: 22,
+		Tickets: []Ticket{{TktVNO: 5, Realm: realm, SName: serverName,
+			EncPart: EncryptedData{EType: 0, Cipher: []byte{1, 2}}}},
+		EncPart: EncryptedData{EType: 0, Cipher: []byte{5}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString("765b3059a003020105a103020116a23f303d613b3039a003020105a1071b055245414c4da21a3018a003020102a111300f1b066b72627467741b055245414c4da30d300ba003020100a20404020102a30c300aa003020100a203040105")
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("KRB-CRED DER = %x, want %x", encoded, want)
+	}
+	var decoded KRBCred
+	if err := asn1.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PVNO != 5 || decoded.MsgType != 22 || len(decoded.Tickets) != 1 ||
+		decoded.Tickets[0].Realm != realm || len(decoded.Tickets[0].EncPart.Cipher) != 2 {
+		t.Fatalf("decoded KRB-CRED = %#v", decoded)
+	}
+}
+
+func TestEncKrbCredPartGolden(t *testing.T) {
+	realm := "REALM"
+	clientName := PrincipalName{NameType: 1, NameString: []string{"alice"}}
+	serverName := PrincipalName{NameType: 2, NameString: []string{"krbtgt", "REALM"}}
+	encoded, err := asn1.Marshal(EncKrbCredPart{TicketInfo: []KrbCredInfo{{
+		Key:    EncryptionKey{KeyType: 18, KeyValue: []byte{3, 4}},
+		Prealm: &realm, PName: &clientName, SRealm: &realm, SName: &serverName,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString("7d593057a05530533051a00d300ba003020112a10404020304a1071b055245414c4da2123010a003020101a10930071b05616c696365a8071b055245414c4da91a3018a003020102a111300f1b066b72627467741b055245414c4d")
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("EncKrbCredPart DER = %x, want %x", encoded, want)
+	}
+	var decoded EncKrbCredPart
+	if err := asn1.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.TicketInfo) != 1 || decoded.TicketInfo[0].PName == nil ||
+		decoded.TicketInfo[0].PName.NameString[0] != "alice" {
+		t.Fatalf("decoded EncKrbCredPart = %#v", decoded)
 	}
 }
 

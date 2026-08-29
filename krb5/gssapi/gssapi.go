@@ -2,6 +2,7 @@ package gssapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
@@ -47,10 +48,12 @@ var kerberosOldOID = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01
 
 // Initiator establishes a Kerberos GSS security context.
 type Initiator struct {
-	creds *client.Credentials
-	flags uint32
-	state *ap.APReq
-	ctx   *Context
+	creds         *client.Credentials
+	tgt           *client.Credentials
+	delegationKDC *client.Client
+	flags         uint32
+	state         *ap.APReq
+	ctx           *Context
 }
 
 // Acceptor accepts Kerberos GSS security contexts using a service keytab.
@@ -60,12 +63,13 @@ type Acceptor struct {
 
 // Context is an established Kerberos GSS security context.
 type Context struct {
-	key            protocol.EncryptionKey
-	initiator      bool
-	flags          uint32
-	acceptorSubkey bool
-	sendSeq        uint64
-	recvSeq        uint64
+	key                  protocol.EncryptionKey
+	initiator            bool
+	flags                uint32
+	DelegatedCredentials []*client.Credentials
+	acceptorSubkey       bool
+	sendSeq              uint64
+	recvSeq              uint64
 }
 
 // NewInitiator creates an initiator for the supplied service credentials.
@@ -74,6 +78,39 @@ func NewInitiator(creds *client.Credentials, flags uint32) (*Initiator, error) {
 		return nil, fmt.Errorf("GSS initiator: incomplete credentials")
 	}
 	return &Initiator{creds: creds, flags: flags}, nil
+}
+
+// NewInitiatorWithDelegation creates an initiator which requests credential
+// delegation using tgt. SetDelegationClient must be called before creating
+// the initial token unless the caller supplies a forwarded credential itself.
+func NewInitiatorWithDelegation(creds, tgt *client.Credentials, flags uint32) (*Initiator, error) {
+	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
+		return nil, fmt.Errorf("GSS initiator: incomplete delegation TGT")
+	}
+	initiator, err := NewInitiator(creds, flags|GSSDelegFlag)
+	if err != nil {
+		return nil, err
+	}
+	initiator.tgt = tgt
+	return initiator, nil
+}
+
+// NewInitiatorWithDelegationClient creates an initiator with the client
+// exchange needed to obtain a forwarded TGT for credential delegation.
+func NewInitiatorWithDelegationClient(creds, tgt *client.Credentials, kclient *client.Client, flags uint32) (*Initiator, error) {
+	initiator, err := NewInitiatorWithDelegation(creds, tgt, flags)
+	if err != nil {
+		return nil, err
+	}
+	initiator.delegationKDC = kclient
+	return initiator, nil
+}
+
+// SetDelegationClient supplies the KDC client used to obtain a forwarded TGT.
+func (i *Initiator) SetDelegationClient(kclient *client.Client) {
+	if i != nil {
+		i.delegationKDC = kclient
+	}
 }
 
 // NewAcceptor creates an acceptor backed by a service keytab.
@@ -121,6 +158,24 @@ func (i *Initiator) initialToken(now time.Time, legacy bool, channelBindings []b
 		copy(checksumData[4:], channelBindings)
 	}
 	binary.LittleEndian.PutUint32(checksumData[20:], i.flags)
+	if i.flags&GSSDelegFlag != 0 {
+		if i.tgt == nil || i.delegationKDC == nil {
+			return nil, fmt.Errorf("GSS delegation: no KDC client or TGT")
+		}
+		forwarded, err := i.delegationKDC.TGSExchangeForwarded(context.Background(), i.tgt)
+		if err != nil {
+			return nil, fmt.Errorf("GSS delegation forwarded TGT: %w", err)
+		}
+		delegated, err := MarshalKRBCred([]*client.Credentials{forwarded}, &i.creds.Key, krbCredEncPartUsage)
+		if err != nil {
+			return nil, fmt.Errorf("GSS delegation KRB-CRED: %w", err)
+		}
+		if len(delegated) > 0xffff {
+			return nil, fmt.Errorf("GSS delegation KRB-CRED: credential data too large")
+		}
+		checksumData = append(checksumData, 1, 0, byte(len(delegated)), byte(len(delegated)>>8))
+		checksumData = append(checksumData, delegated...)
+	}
 	checksum := &protocol.Checksum{ChecksumType: 0x8003, Checksum: checksumData}
 	opts := types.APOptions(0)
 	if i.flags&GSSMutualFlag != 0 {
@@ -190,7 +245,7 @@ func (a *Acceptor) accept(token []byte, now time.Time) (*Context, principal.Prin
 	if err != nil {
 		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
 	}
-	flags, err := checksumFlags(verified.Checksum)
+	flags, delegation, err := checksumData(verified.Checksum)
 	if err != nil {
 		return nil, principal.Principal{}, nil, err
 	}
@@ -198,6 +253,20 @@ func (a *Acceptor) accept(token []byte, now time.Time) (*Context, principal.Prin
 		key:     contextKey(verified.SessionKey, verified.SubKey),
 		flags:   flags,
 		recvSeq: sequenceValue(verified.SeqNumber),
+	}
+	if len(delegation) != 0 {
+		var delegated []*client.Credentials
+		keys := []*protocol.EncryptionKey{verified.SubKey, &verified.SessionKey, nil}
+		for _, key := range keys {
+			delegated, err = ReadKRBCred(delegation, key, krbCredEncPartUsage)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS delegated credentials: %w", err)
+		}
+		ctx.DelegatedCredentials = delegated
 	}
 	if flags&GSSMutualFlag != 0 {
 		reply, err := ap.BuildAPRep(verified)
@@ -299,6 +368,14 @@ func (c *Context) SetReceiveSequence(sequence uint64) {
 	if c != nil {
 		c.recvSeq = sequence
 	}
+}
+
+// Flags reports the negotiated GSS context flags.
+func (c *Context) Flags() uint32 {
+	if c == nil {
+		return 0
+	}
+	return c.flags
 }
 
 // MIC creates an RFC 4121 integrity token.
@@ -524,13 +601,34 @@ func contextKey(session protocol.EncryptionKey, subkey *protocol.EncryptionKey) 
 }
 
 func checksumFlags(checksum *protocol.Checksum) (uint32, error) {
+	flags, _, err := checksumData(checksum)
+	return flags, err
+}
+
+func checksumData(checksum *protocol.Checksum) (uint32, []byte, error) {
 	if checksum == nil || checksum.ChecksumType != 0x8003 || len(checksum.Checksum) < 20 {
-		return 0, fmt.Errorf("GSS authenticator: missing RFC 4121 checksum")
+		return 0, nil, fmt.Errorf("GSS authenticator: missing RFC 4121 checksum")
 	}
+	offset := 20
 	if len(checksum.Checksum) >= 24 && binary.LittleEndian.Uint32(checksum.Checksum[:4]) == 16 {
-		return binary.LittleEndian.Uint32(checksum.Checksum[20:24]), nil
+		offset = 24
 	}
-	return binary.LittleEndian.Uint32(checksum.Checksum[16:20]), nil
+	flags := binary.LittleEndian.Uint32(checksum.Checksum[offset-4 : offset])
+	if flags&GSSDelegFlag == 0 {
+		if len(checksum.Checksum) != offset {
+			return 0, nil, fmt.Errorf("GSS authenticator: unexpected delegation option")
+		}
+		return flags, nil, nil
+	}
+	if len(checksum.Checksum) < offset+4 {
+		return 0, nil, fmt.Errorf("GSS authenticator: truncated delegation option")
+	}
+	optionID := binary.LittleEndian.Uint16(checksum.Checksum[offset:])
+	optionLength := int(binary.LittleEndian.Uint16(checksum.Checksum[offset+2:]))
+	if optionID != 1 || optionLength == 0 || len(checksum.Checksum) != offset+4+optionLength {
+		return 0, nil, fmt.Errorf("GSS authenticator: invalid delegation option")
+	}
+	return flags, append([]byte(nil), checksum.Checksum[offset+4:offset+4+optionLength]...), nil
 }
 
 func sequenceValue(value *uint32) uint64 {

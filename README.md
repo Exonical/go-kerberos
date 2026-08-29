@@ -71,7 +71,9 @@ disposable integration test environments.
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
-  sequence enforcement.
+  sequence enforcement, and credential delegation with RFC 4120 KRB-CRED
+  forwarded-TGT credentials. Both encrypted (key usage 14) and legacy
+  unencrypted KRB-CRED forms are accepted.
 - **SPNEGO** (RFC 4178): Kerberos mechanism negotiation with the modern and
   Microsoft legacy Kerberos OIDs, mechListMIC exchange, and transparent
   Kerberos GSS Wrap/MIC access after establishment. Live MIT-backed gates cover
@@ -246,6 +248,13 @@ intentionally outside this slice. The NDR codec follows the NDR32 common and
 private headers, deferred pointers, RPC Unicode strings, group arrays, and
 conditional SID arrays specified by MS-PAC sections 2.5, 2.6.1, 2.9, and
 2.10.
+
+GSS credential delegation uses the RFC 4121 `0x8003` checksum delegation
+option and obtains a forwarded TGT with an addressless `KDCForwarded` TGS
+request. Go-to-Go tests cover KRB-CRED marshal/read and delegated credential
+exposure; the MIT integration suite covers a live `python3-gssapi`
+delegation exchange against the Go acceptor and verifies the delegated TGT can
+obtain another service ticket.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
