@@ -207,6 +207,30 @@ func TestPAASReqChecksumAndNonce(t *testing.T) {
 	}
 }
 
+func TestAnonymousPAASReqUnsignedCMS(t *testing.T) {
+	body := []byte{0x30, 0x00}
+	pa, client, err := BuildAnonymousPAASReq(body,
+		time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyPAASReqForKDC(pa.PADataValue, body)
+	if err != nil {
+		t.Fatalf("verify anonymous request: %v", err)
+	}
+	if verified.Signed || verified.Certificate != nil {
+		t.Fatal("anonymous request unexpectedly signed")
+	}
+	if len(verified.PublicValue) == 0 || client.Private == nil {
+		t.Fatal("anonymous request omitted DH value")
+	}
+	tampered := append([]byte(nil), pa.PADataValue...)
+	tampered[len(tampered)-1] ^= 1
+	if _, err := VerifyPAASReqForKDC(tampered, body); err == nil {
+		t.Fatal("tampered anonymous CMS accepted")
+	}
+}
+
 func TestBuildPAASRepRoundTrip(t *testing.T) {
 	clientCert, clientKey := testCertificate(t)
 	client, err := NewClient(clientCert, clientKey)

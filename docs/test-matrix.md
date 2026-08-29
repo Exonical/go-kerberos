@@ -23,7 +23,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
-| PKINIT (RFC 4556) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage | MIT pass |
+| PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
@@ -108,6 +108,13 @@ client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
 available. The implementation currently uses the RFC 3526 MODP group 14
 profile and does not implement group 2 negotiation or newer algorithm-agility
 KDF profiles.
+
+Anonymous PKINIT follows RFC 6112/8062: the client sends unsigned DH-only
+PKINIT, and the KDC accepts that form only with the anonymous request option.
+Anonymous replies include the PKINIT KX padata required by MIT clients,
+issue the canonical anonymous principal and anonymous ticket flag, and omit
+client addresses. The integration suite covers MIT `kinit -n` against the Go
+KDC and the Go anonymous client against a PKINIT-enabled MIT KDC.
 
 The client and server implement RFC 3244 password changes and set-password requests
 against MIT `kadmind` on the kpasswd service port (464 by default; the isolated

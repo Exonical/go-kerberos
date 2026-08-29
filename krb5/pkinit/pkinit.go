@@ -54,6 +54,7 @@ type VerifiedPAASReq struct {
 	Authenticator PKAuthenticator
 	PublicValue   []byte
 	Certificate   *x509.Certificate
+	Signed        bool
 }
 
 // Client is an ephemeral PKINIT DH exchange state.
@@ -63,6 +64,7 @@ type Client struct {
 	Private     *big.Int
 	Public      *big.Int
 	Nonce       uint32
+	Anonymous   bool
 }
 
 // NewClient creates an RFC 4556 group-14 DH exchange state.
@@ -73,18 +75,35 @@ func NewClient(cert *x509.Certificate, signer crypto.Signer) (*Client, error) {
 	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
 		return nil, errors.New("pkinit: only RSA signing keys are supported")
 	}
+	x, err := newDHPrivate()
+	if err != nil {
+		return nil, err
+	}
+	return &Client{Certificate: cert, Signer: signer, Private: x, Public: new(big.Int).Exp(group14G, x, group14P)}, nil
+}
+
+// NewAnonymousClient creates an unsigned RFC 6112 anonymous PKINIT DH state.
+func NewAnonymousClient() (*Client, error) {
+	x, err := newDHPrivate()
+	if err != nil {
+		return nil, err
+	}
+	return &Client{Private: x, Public: new(big.Int).Exp(group14G, x, group14P), Anonymous: true}, nil
+}
+
+func newDHPrivate() (*big.Int, error) {
 	x, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Sub(group14P, big.NewInt(2)))
 	if err != nil {
 		return nil, fmt.Errorf("pkinit: generate DH private value: %w", err)
 	}
 	x.Add(x, big.NewInt(2))
-	return &Client{Certificate: cert, Signer: signer, Private: x, Public: new(big.Int).Exp(group14G, x, group14P)}, nil
+	return x, nil
 }
 
 // BuildPAASReq constructs PA-PK-AS-REQ. bodyDER must be the exact DER bytes
 // of the AS-REQ KDC-REQ-BODY received by the KDC.
 func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (protocol.PAData, error) {
-	if c == nil || c.Certificate == nil || c.Signer == nil || c.Private == nil {
+	if c == nil || c.Private == nil || (!c.Anonymous && (c.Certificate == nil || c.Signer == nil)) {
 		return protocol.PAData{}, errors.New("pkinit: incomplete client state")
 	}
 	if len(bodyDER) == 0 {
@@ -92,9 +111,15 @@ func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (prot
 	}
 	sum := sha1.Sum(bodyDER)
 	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public))
-	cms, err := signCMS(pack, c.Certificate, c.Signer)
-	if err != nil {
-		return protocol.PAData{}, err
+	var cms []byte
+	var err error
+	if c.Anonymous {
+		cms = unsignedCMS(pack, asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1})
+	} else {
+		cms, err = signCMS(pack, c.Certificate, c.Signer)
+		if err != nil {
+			return protocol.PAData{}, err
+		}
 	}
 	// signedAuthPack is [0] IMPLICIT OCTET STRING.
 	value := derSeq(der(0x80, cms))
@@ -104,6 +129,17 @@ func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (prot
 // BuildPAASReq creates a fresh DH state and its PA-PK-AS-REQ padata.
 func BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32, cert *x509.Certificate, signer crypto.Signer) (protocol.PAData, *Client, error) {
 	c, err := NewClient(cert, signer)
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	pa, err := c.BuildPAASReq(bodyDER, now, nonce)
+	return pa, c, err
+}
+
+// BuildAnonymousPAASReq creates an unsigned RFC 6112 anonymous PKINIT
+// request using a fresh group-14 Diffie-Hellman state.
+func BuildAnonymousPAASReq(bodyDER []byte, now time.Time, nonce uint32) (protocol.PAData, *Client, error) {
+	c, err := NewAnonymousClient()
 	if err != nil {
 		return protocol.PAData{}, nil, err
 	}
@@ -128,7 +164,7 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if err := requireSingleTLV(data); err != nil {
 		return VerifiedPAASReq{}, err
 	}
-	content, cert, err := verifyCMSChoice(data, nil)
+	content, cert, signed, err := verifyCMSChoiceStatus(data, nil)
 	if err != nil {
 		return VerifiedPAASReq{}, err
 	}
@@ -140,7 +176,7 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if len(auth.PAChecksum) != len(sum) || subtle.ConstantTimeCompare(auth.PAChecksum, sum[:]) != 1 {
 		return VerifiedPAASReq{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
 	}
-	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, Certificate: cert}, nil
+	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, Certificate: cert, Signed: signed}, nil
 }
 
 // ValidateClientCertificate verifies a PKINIT client certificate chain,
@@ -498,9 +534,27 @@ func signCMSWithContentType(content []byte, contentType asn1.ObjectIdentifier,
 	return derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}), derExplicit(0, signed)), nil
 }
 
+func unsignedCMS(content []byte, contentType asn1.ObjectIdentifier) []byte {
+	signedData := derSeq(
+		derInt(3),
+		derSet(),
+		derSeq(derOID(contentType), derExplicit(0, derOctet(content))),
+		derSet(),
+	)
+	return derSeq(
+		derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}),
+		derExplicit(0, signedData),
+	)
+}
+
 func verifyCMSChoice(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, error) {
+	content, cert, _, err := verifyCMSChoiceStatus(data, anchors)
+	return content, cert, err
+}
+
+func verifyCMSChoiceStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, bool, error) {
 	if err := requireSingleTLV(data); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	var choice []byte
 	if len(data) > 0 && (data[0] == 0xa0 || data[0] == 0x80) {
@@ -508,55 +562,77 @@ func verifyCMSChoice(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certifi
 	} else {
 		fields, err := sequenceFields(data)
 		if err != nil || len(fields) == 0 || len(fields[0]) == 0 || (fields[0][0] != 0xa0 && fields[0][0] != 0x80) {
-			return nil, nil, errors.New("pkinit: PA-PK-AS-REP is not DH signed data")
+			return nil, nil, false, errors.New("pkinit: PA-PK-AS-REP is not DH signed data")
 		}
 		choice = fields[0]
 	}
 	choice, err := tlvContent(choice)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	if len(choice) > 0 && choice[0] == 0x04 {
 		choice, err = tlvContent(choice)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 	}
-	content, cert, err := verifyCMS(choice, anchors)
-	return content, cert, err
+	content, cert, signed, err := verifyCMSStatus(choice, anchors)
+	return content, cert, signed, err
 }
 
 func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, error) {
+	content, cert, _, err := verifyCMSStatus(data, anchors)
+	return content, cert, err
+}
+
+func verifyCMSStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, bool, error) {
 	if err := requireSingleTLV(data); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	// CMS ContentInfo wraps SignedData; accept the inner SignedData form too.
 	outer, outerErr := sequenceFields(data)
 	if outerErr == nil && len(outer) == 2 && len(outer[0]) > 0 && outer[0][0] == 0x06 {
-		_, data, outerErr = tlv(outer[1])
-		if outerErr != nil {
-			return nil, nil, outerErr
+		_, wrapped, unwrapErr := tlv(outer[1])
+		if unwrapErr != nil {
+			return nil, nil, false, unwrapErr
 		}
+		if len(wrapped) > 0 && wrapped[0] == 0x04 {
+			content, contentErr := tlvContent(wrapped)
+			if contentErr != nil {
+				return nil, nil, false, contentErr
+			}
+			if err := requireSingleTLV(content); err != nil {
+				return nil, nil, false, errors.New("pkinit: malformed CMS content")
+			}
+			return content, nil, false, nil
+		}
+		data = wrapped
 	}
 	fields, err := sequenceFields(data)
-	if err != nil || len(fields) < 5 {
-		return nil, nil, fmt.Errorf("pkinit: malformed CMS SignedData (fields=%d err=%v)", len(fields), err)
+	if err != nil || len(fields) < 4 {
+		return nil, nil, false, fmt.Errorf("pkinit: malformed CMS SignedData (fields=%d err=%v)", len(fields), err)
 	}
 	encap, err := sequenceFields(fields[2])
 	if err != nil || len(encap) < 2 {
-		return nil, nil, errors.New("pkinit: malformed CMS content")
+		return nil, nil, false, errors.New("pkinit: malformed CMS content")
 	}
 	_, econtent, err := tlv(encap[1])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	_, content, err := tlv(econtent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
+	}
+	if len(fields) == 4 && len(fields[3]) > 0 && fields[3][0] == 0x31 {
+		if _, err := collectionFields(fields[3]); err != nil {
+			return nil, nil, false, err
+		}
+		return content, nil, false, nil
 	}
 	certFields, err := collectionFields(fields[3])
 	if err != nil || len(certFields) == 0 {
-		return nil, nil, errors.New("pkinit: malformed CMS certificate set")
+		return nil, nil, false, errors.New("pkinit: malformed CMS certificate set")
 	}
 	certificates := make([]*x509.Certificate, 0, len(certFields))
 	for _, certDER := range certFields {
@@ -567,23 +643,26 @@ func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, 
 		certificates = append(certificates, cert)
 	}
 	if len(certificates) == 0 {
-		return nil, nil, errors.New("pkinit: missing KDC certificate")
+		return nil, nil, false, errors.New("pkinit: missing KDC certificate")
+	}
+	if len(fields) < 5 {
+		return nil, nil, false, errors.New("pkinit: missing CMS signer")
 	}
 	infos, err := collectionFields(fields[4])
 	if err != nil || len(infos) == 0 {
-		return nil, nil, errors.New("pkinit: missing CMS signer")
+		return nil, nil, false, errors.New("pkinit: missing CMS signer")
 	}
 	si, err := sequenceFields(infos[0])
 	if err != nil || len(si) < 6 {
-		return nil, nil, errors.New("pkinit: malformed CMS signer")
+		return nil, nil, false, errors.New("pkinit: malformed CMS signer")
 	}
 	issuerSerial, err := sequenceFields(si[1])
 	if err != nil || len(issuerSerial) != 2 {
-		return nil, nil, errors.New("pkinit: malformed CMS signer identifier")
+		return nil, nil, false, errors.New("pkinit: malformed CMS signer identifier")
 	}
 	serial, err := parseInteger(issuerSerial[1])
 	if err != nil {
-		return nil, nil, errors.New("pkinit: malformed CMS signer serial")
+		return nil, nil, false, errors.New("pkinit: malformed CMS signer serial")
 	}
 	var cert *x509.Certificate
 	for _, candidate := range certificates {
@@ -593,29 +672,29 @@ func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, 
 		}
 	}
 	if cert == nil {
-		return nil, nil, errors.New("pkinit: CMS signer certificate not found")
+		return nil, nil, false, errors.New("pkinit: CMS signer certificate not found")
 	}
 	attrsContent, err := tlvContent(si[3])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	attrs := derSetContent(attrsContent)
 	hashID, err := cmsDigestHash(si[2])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	contentDigest := hashBytes(hashID, content)
 	if !bytes.Contains(attrs, derOctet(contentDigest)) {
-		return nil, nil, errors.New("pkinit: CMS messageDigest mismatch")
+		return nil, nil, false, errors.New("pkinit: CMS messageDigest mismatch")
 	}
 	sig, err := tlvContent(si[5])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	sigHash := hashBytes(hashID, derSet(attrsContent))
 	rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
 	if !ok || rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) != nil {
-		return nil, nil, errors.New("pkinit: invalid CMS signature")
+		return nil, nil, false, errors.New("pkinit: invalid CMS signature")
 	}
 	if anchors != nil {
 		intermediates := x509.NewCertPool()
@@ -625,10 +704,10 @@ func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, 
 			}
 		}
 		if _, err := cert.Verify(x509.VerifyOptions{Roots: anchors, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
-			return nil, nil, errors.New("pkinit: KDC certificate is not trusted")
+			return nil, nil, false, errors.New("pkinit: KDC certificate is not trusted")
 		}
 	}
-	return content, cert, nil
+	return content, cert, true, nil
 }
 
 func requireSingleTLV(data []byte) error {

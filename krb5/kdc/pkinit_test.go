@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestServerPKINITASExchange(t *testing.T) {
@@ -38,6 +39,50 @@ func TestServerPKINITASExchange(t *testing.T) {
 	}
 	if !samePrincipal(credentials.Client, user) {
 		t.Fatalf("PKINIT client = %v, want %v", credentials.Client, user)
+	}
+}
+
+func TestServerAnonymousPKINITASExchange(t *testing.T) {
+	now := time.Unix(2000001005, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, _, _ := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	credentials, err := kclient.AnonymousASExchange(context.Background(), "TEST.REALM", roots)
+	if err != nil {
+		t.Fatalf("anonymous client exchange: %v", err)
+	}
+	if credentials.Client.Realm != "WELLKNOWN:ANONYMOUS" ||
+		credentials.Flags&types.TicketAnonymous == 0 {
+		t.Fatalf("anonymous credentials = %+v", credentials)
+	}
+}
+
+func TestServerAnonymousRequiresPKINIT(t *testing.T) {
+	now := time.Unix(2000001007, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTWellKnown,
+		Components: []string{"WELLKNOWN", "ANONYMOUS"},
+	}
+	service := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	request := asRequest(user, service, 12)
+	request.ReqBody.KDCOptions |= types.KDCRequestAnonymous
+	var kerberosError protocol.KRBError
+	if err := krb5asn1.Unmarshal(
+		server.HandleMessage(mustMarshal(t, request)), &kerberosError,
+	); err != nil {
+		t.Fatalf("anonymous request response: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrBadOption {
+		t.Fatalf("anonymous request error = %d, want %d",
+			kerberosError.ErrorCode, kdcErrBadOption)
 	}
 }
 

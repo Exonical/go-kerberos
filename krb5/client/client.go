@@ -1019,7 +1019,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 		ReqBody: protocol.KDCReqBody{
 			KDCOptions: options,
 			CName:      protocolPrincipal(clientPrincipal),
-			Realm:      clientPrincipal.Realm,
+			Realm:      service.Realm,
 			SName: &protocol.PrincipalName{
 				NameType:   int32(service.NameType),
 				NameString: append([]string(nil), service.Components...),
@@ -1092,7 +1092,12 @@ func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service pri
 	if reply.MsgType != 11 {
 		return nil, fmt.Errorf("AS exchange: unexpected message type %d", reply.MsgType)
 	}
-	if reply.CRealm != clientPrincipal.Realm ||
+	anonymousReply := clientPrincipal.NameType == principal.NTWellKnown &&
+		len(clientPrincipal.Components) == 2 &&
+		clientPrincipal.Components[0] == "WELLKNOWN" &&
+		clientPrincipal.Components[1] == "ANONYMOUS" &&
+		reply.CRealm == "WELLKNOWN:ANONYMOUS"
+	if (reply.CRealm != clientPrincipal.Realm && !anonymousReply) ||
 		(!samePrincipal(reply.CName, clientPrincipal) && !c.canonicalizeEnabled()) {
 		return nil, fmt.Errorf("AS exchange: AS-REP client principal mismatch")
 	}
@@ -1299,4 +1304,81 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		return nil, err
 	}
 	return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
+}
+
+// AnonymousASExchange obtains an anonymous initial ticket using RFC 8062
+// unsigned PKINIT. anchors must trust the KDC's PKINIT certificate.
+func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors *x509.CertPool) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: nil context")
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: empty realm")
+	}
+	anon := principal.Principal{
+		Realm: realm, NameType: principal.NTWellKnown,
+		Components: []string{"WELLKNOWN", "ANONYMOUS"},
+	}
+	service := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", realm},
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, err := c.newASReqForService(anon, service, now)
+	if err != nil {
+		return nil, err
+	}
+	request.ReqBody.KDCOptions |= types.KDCRequestAnonymous
+	response, err := c.roundTrip(ctx, realm, request)
+	if err != nil {
+		return nil, err
+	}
+	kerberosError, ok := decodeKRBError(response)
+	if !ok || kerberosError.Code != 25 {
+		if ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: expected PREAUTH_REQUIRED")
+	}
+	bodyDER, err := asn1.Marshal(request.ReqBody)
+	if err != nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS request body: %w", err)
+	}
+	pa, pkClient, err := pkinit.BuildAnonymousPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{pa}
+	response, err = c.roundTrip(ctx, realm, request)
+	if err != nil {
+		return nil, err
+	}
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(response, &reply); err != nil {
+		if kerberosError, ok := decodeKRBError(response); ok {
+			return nil, kerberosError
+		}
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange AS-REP: %w", err)
+	}
+	var pkReply []byte
+	for _, item := range reply.PAData {
+		if item.PADataType == pkinit.PADataASRep {
+			pkReply = item.PADataValue
+			break
+		}
+	}
+	if len(pkReply) == 0 {
+		return nil, fmt.Errorf("anonymous PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
+	}
+	replyKey, err := pkClient.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeASRepForService(response, anon, service, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
 }

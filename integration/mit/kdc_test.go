@@ -28,6 +28,8 @@ type goKDC struct {
 	config string
 	cache  string
 	db     *kdb.Database
+	server *kdc.Server
+	port   int
 	cancel context.CancelFunc
 	done   chan error
 }
@@ -159,6 +161,8 @@ func startGoKDCWithGroup(t *testing.T, policy *kdb.PolicyRecord, groupName strin
 		config: configPath,
 		cache:  filepath.Join(dir, "ccache"),
 		db:     db,
+		server: server,
+		port:   udpPort,
 		cancel: cancel,
 		done:   done,
 	}

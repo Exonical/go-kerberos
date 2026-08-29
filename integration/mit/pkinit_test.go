@@ -23,6 +23,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdc"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestGoClientPKINITAgainstMITKDC(t *testing.T) {
@@ -224,6 +225,176 @@ func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
 	if err != nil {
 		traceData, _ := os.ReadFile(trace)
 		t.Fatalf("MIT kinit against Go KDC: %v\noutput: %s\ntrace: %s", err, out, traceData)
+	}
+}
+
+func TestMITClientAnonymousPKINITAgainstGoKDC(t *testing.T) {
+	for _, name := range []string{"/usr/bin/openssl", "/usr/bin/kinit", "/usr/bin/klist"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Skipf("anonymous PKINIT harness skipped: missing %s", name)
+		}
+	}
+	dir := t.TempDir()
+	if err := generatePKINITFixtures(t, dir, goKDCRealm); err != nil {
+		t.Skipf("anonymous PKINIT certificate generation failed: %v", err)
+	}
+	realm := startGoKDC(t)
+	realmCert, err := os.ReadFile(filepath.Join(dir, "kdc.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcCert, err := x509.ParseCertificate(pemDecodePK(t, realmCert, "CERTIFICATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kdcKey, err := os.ReadFile(filepath.Join(dir, "kdc.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	realm.server.PKINITCertificate = kdcCert
+	realm.server.PKINITSigner = parsePKRSAKey(t, kdcKey)
+	conf := filepath.Join(dir, "anonymous-client.conf")
+	writePKFile(t, conf, fmt.Sprintf(`[libdefaults]
+ default_realm = %s
+ dns_lookup_kdc = false
+ dns_lookup_realm = false
+ pkinit_anchors = FILE:%s
+[realms]
+ %s = {
+  kdc = 127.0.0.1:%d
+ }
+`, goKDCRealm, filepath.Join(dir, "ca.crt"), goKDCRealm, realm.port))
+	cache := filepath.Join(dir, "anonymous.ccache")
+	trace := filepath.Join(dir, "trace")
+	out, err := runPK(append(os.Environ(), "KRB5_CONFIG="+conf, "KRB5_TRACE="+trace,
+		"KRB5CCNAME="+cache), "", "/usr/bin/kinit", "-n")
+	if err != nil {
+		traceData, _ := os.ReadFile(trace)
+		t.Fatalf("MIT anonymous kinit against Go KDC: %v\noutput: %s\ntrace: %s", err, out, traceData)
+	}
+	traceData, _ := os.ReadFile(trace)
+	traceText := string(traceData)
+	if !strings.Contains(strings.ToLower(traceText), "pkinit") {
+		t.Fatalf("MIT anonymous kinit trace did not use PKINIT:\n%s", traceText)
+	}
+	if strings.Contains(strings.ToLower(traceText), "encrypted timestamp") {
+		t.Fatalf("MIT anonymous kinit fell back to encrypted timestamp:\n%s", traceText)
+	}
+	listing := realm.run(t, "", "/usr/bin/klist", "-e", "-c", cache)
+	if !strings.Contains(strings.ToUpper(listing), "ANONYMOUS") {
+		t.Fatalf("MIT anonymous klist missing ANONYMOUS:\n%s", listing)
+	}
+}
+
+func TestGoClientAnonymousPKINITAgainstMITKDC(t *testing.T) {
+	for _, name := range []string{"/usr/bin/openssl", "/usr/sbin/kdb5_util", "/usr/sbin/kadmin.local", "/usr/sbin/krb5kdc"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Skipf("anonymous PKINIT harness skipped: missing %s", name)
+		}
+	}
+	dir := t.TempDir()
+	realm := "ANON.PKINIT.TEST"
+	port := freeTestPort(t)
+	if err := generatePKINITFixtures(t, dir, realm); err != nil {
+		t.Skipf("anonymous PKINIT certificate generation failed: %v", err)
+	}
+	conf := filepath.Join(dir, "krb5.conf")
+	kdcConf := filepath.Join(dir, "kdc.conf")
+	writePKFile(t, conf, fmt.Sprintf(`[libdefaults]
+ default_realm = %s
+ dns_lookup_kdc = false
+ dns_lookup_realm = false
+ rdns = false
+ pkinit_anchors = FILE:%s
+[realms]
+ %s = {
+  kdc = 127.0.0.1:%d
+ }
+`, realm, filepath.Join(dir, "ca.crt"), realm, port))
+	writePKFile(t, kdcConf, fmt.Sprintf(`[kdcdefaults]
+ kdc_ports = %d
+ kdc_tcp_ports = %d
+[realms]
+ %s = {
+  database_name = %s/principal
+  admin_database_name = %s/principal.kadm5
+  admin_database_lockfile = %s/principal.kadm5.lock
+  admin_keytab = %s/kadm5.keytab
+  acl_file = %s/kadm5.acl
+  key_stash_file = %s/.k5.%s
+  pkinit_identity = FILE:%s/kdc.crt,%s/kdc.key
+  pkinit_anchors = FILE:%s/ca.crt
+ }
+`, port, port, realm, dir, dir, dir, dir, dir, dir, realm, dir, dir, dir))
+	writePKFile(t, filepath.Join(dir, "kadm5.acl"), "*/*@"+realm+" *\n")
+	env := appendPKEnv(conf, kdcConf)
+	if _, err := runPK(env, "", "/usr/sbin/kdb5_util", "create", "-s", "-P", "master"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runPK(env, "", "/usr/sbin/kadmin.local", "-q",
+		"addprinc -randkey WELLKNOWN/ANONYMOUS"); err != nil {
+		t.Fatal(err)
+	}
+	kdc := exec.Command("/usr/sbin/krb5kdc", "-n")
+	kdc.Env = env
+	var kdcOutput strings.Builder
+	kdc.Stdout, kdc.Stderr = &kdcOutput, &kdcOutput
+	if err := kdc.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = kdc.Process.Kill(); _ = kdc.Wait() })
+	waitPKPort(t, port)
+	if out, err := runPK(append(env, "KRB5CCNAME="+filepath.Join(dir, "mit-anon.ccache")),
+		"", "/usr/bin/kinit", "-n"); err != nil {
+		t.Fatalf("MIT anonymous self-test: %v\noutput: %s\nKDC: %s", err, out, kdcOutput.String())
+	}
+	caDER, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(pemDecodePK(t, caDER, "CERTIFICATE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	cfgBytes, err := os.ReadFile(conf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(cfgBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goClient := &client.Client{Config: cfg, Now: func() time.Time { return time.Now().UTC() }}
+	creds, err := goClient.AnonymousASExchange(context.Background(), realm, roots)
+	if err != nil {
+		t.Fatalf("Go anonymous PKINIT against MIT KDC: %v\nKDC: %s", err, kdcOutput.String())
+	}
+	if creds.Client.Realm != "WELLKNOWN:ANONYMOUS" ||
+		creds.Flags&types.TicketAnonymous == 0 {
+		t.Fatalf("Go anonymous credentials = %+v", creds)
+	}
+	cache := filepath.Join(dir, "go-anon.ccache")
+	f, err := os.Create(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ccache.Write(f, &ccache.Cache{
+		DefaultPrincipal: creds.Client,
+		Credentials:      []ccache.Credential{creds.ToCCacheCredential()},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPK(append(env, "KRB5CCNAME="+cache), "",
+		"/usr/bin/klist", "-e", "-c", cache); err != nil {
+		t.Fatalf("klist anonymous MIT credentials: %v\noutput: %s", err, out)
+	} else if !strings.Contains(strings.ToUpper(out), "ANONYMOUS") {
+		t.Fatalf("klist anonymous MIT credentials missing ANONYMOUS:\n%s", out)
 	}
 }
 
