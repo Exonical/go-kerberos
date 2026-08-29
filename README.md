@@ -72,6 +72,10 @@ disposable integration test environments.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
   sequence enforcement.
+- **SPNEGO** (RFC 4178): Kerberos mechanism negotiation with the modern and
+  Microsoft legacy Kerberos OIDs, mechListMIC exchange, and transparent
+  Kerberos GSS Wrap/MIC access after establishment. Live MIT-backed gates cover
+  Go and MIT initiators and acceptors.
 - **MS-KKDCP**: HTTPS KDC Proxy Protocol client and `http.Handler` server,
   including strict DER wrapper and embedded TCP-length validation. Configure
   an HTTPS `kdc` entry and provide `client.Client.HTTPAnchors` (or a
