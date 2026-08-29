@@ -889,11 +889,21 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 }
 
 func (s *KCMServer) namespace(uid uint32) *kcmNamespace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shared == nil {
+		s.shared = &kcmNamespace{
+			caches:      make(map[string]*kcmServerCache),
+			uuids:       make(map[[16]byte]string),
+			defaultName: "default",
+		}
+	}
 	if !s.IsolatePeers {
 		return s.shared
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.namespaces == nil {
+		s.namespaces = make(map[uint32]*kcmNamespace)
+	}
 	ns := s.namespaces[uid]
 	if ns == nil {
 		ns = &kcmNamespace{
@@ -1241,7 +1251,6 @@ func (s *KCMServer) replace(ns *kcmNamespace, cache *kcmServerCache, rest []byte
 	count := binary.BigEndian.Uint32(rest[:4])
 	rest = rest[4:]
 	creds := make([][]byte, 0, count)
-	credUUIDs := make([][16]byte, 0, count)
 	for i := uint32(0); i < count; i++ {
 		if len(rest) < 4 {
 			return nil, kcmErrInternal
@@ -1256,13 +1265,16 @@ func (s *KCMServer) replace(ns *kcmNamespace, cache *kcmServerCache, rest []byte
 			return nil, kcmErrInternal
 		}
 		creds = append(creds, raw)
-		credUUIDs = append(credUUIDs, s.nextCredentialUUID(ns, cache.uuid))
 		rest = rest[n:]
 	}
 	if len(rest) != 0 {
 		return nil, kcmErrInternal
 	}
 	s.mu.Lock()
+	credUUIDs := make([][16]byte, 0, len(creds))
+	for range creds {
+		credUUIDs = append(credUUIDs, s.nextCredentialUUID(ns, cache.uuid))
+	}
 	cache.principal = &p
 	cache.offset = offset
 	cache.creds = creds

@@ -319,6 +319,110 @@ func TestKCMServerPeerNamespaces(t *testing.T) {
 	}
 }
 
+func TestKCMServerZeroValueIsSafe(t *testing.T) {
+	var server KCMServer
+	if _, code := server.dispatch(kcmRequest(kcmOpGetDefaultCache)); code != 0 {
+		t.Fatalf("zero-value default status = %d", code)
+	}
+	if _, code := server.dispatch(kcmRequest(kcmOpGetPrincipal, cstring("zero"))); code != kcmErrNoFile {
+		t.Fatalf("zero-value missing principal status = %d", code)
+	}
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := server.dispatch(kcmRequest(kcmOpInitialize,
+		append(cstring("zero"), principalBytes...))); code != 0 {
+		t.Fatalf("zero-value initialize status = %d", code)
+	}
+}
+
+func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
+	server := NewKCMServer("")
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialBytes, err := marshalCredentialBytes(cache.Credentials[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceRequest := func(name string) []byte {
+		args := append(cstring(name), make([]byte, 4)...)
+		args = append(args, principalBytes...)
+		var count [4]byte
+		binary.BigEndian.PutUint32(count[:], 1)
+		args = append(args, count[:]...)
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(credentialBytes)))
+		args = append(args, length[:]...)
+		args = append(args, credentialBytes...)
+		return kcmRequest(kcmOpReplace, args)
+	}
+
+	const replacements = 24
+	const generated = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, replacements+generated)
+	for i := 0; i < replacements; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, code := server.dispatchPeer(replaceRequest(fmt.Sprintf("replace-%d", i)), 0); code != 0 {
+				errs <- fmt.Errorf("replace-%d status %d", i, code)
+			}
+		}()
+	}
+	for i := 0; i < generated; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, code := server.dispatchPeer(kcmRequest(kcmOpGenNew), 0); code != 0 {
+				errs <- fmt.Errorf("generate status %d", code)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	cacheUUIDs, code := server.dispatch(kcmRequest(kcmOpGetCacheUUIDList))
+	if code != 0 || len(cacheUUIDs) != (replacements+generated)*kcmUUIDLen {
+		t.Fatalf("cache UUID list length=%d status=%d", len(cacheUUIDs), code)
+	}
+	seenCaches := make(map[[16]byte]bool)
+	for off := 0; off < len(cacheUUIDs); off += kcmUUIDLen {
+		var uuid [16]byte
+		copy(uuid[:], cacheUUIDs[off:off+kcmUUIDLen])
+		if seenCaches[uuid] {
+			t.Fatalf("duplicate cache UUID %x", uuid)
+		}
+		seenCaches[uuid] = true
+		if _, code := server.dispatch(kcmRequest(kcmOpGetCacheByUUID, uuid[:])); code != 0 {
+			t.Fatalf("cache UUID %x lookup status=%d", uuid, code)
+		}
+	}
+	seenCreds := make(map[[16]byte]bool)
+	for i := 0; i < replacements; i++ {
+		name := fmt.Sprintf("replace-%d", i)
+		uuids, code := server.dispatch(kcmRequest(kcmOpGetCredUUIDList, cstring(name)))
+		if code != 0 || len(uuids) != kcmUUIDLen {
+			t.Fatalf("%s credential UUID list length=%d status=%d", name, len(uuids), code)
+		}
+		var uuid [16]byte
+		copy(uuid[:], uuids)
+		if seenCreds[uuid] {
+			t.Fatalf("duplicate credential UUID %x", uuid)
+		}
+		seenCreds[uuid] = true
+	}
+}
+
 func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "kcm.sock")
