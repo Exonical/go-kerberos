@@ -333,6 +333,7 @@ func ReadName(name string) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer cache.Close()
 	return cache.Read()
 }
 
@@ -342,6 +343,7 @@ func WriteName(name string, cache *Cache) error {
 	if err != nil {
 		return err
 	}
+	defer resolved.Close()
 	return resolved.Write(cache)
 }
 
@@ -351,6 +353,7 @@ func Collection(name string) ([]*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resolved.Close()
 	return resolved.Collection()
 }
 

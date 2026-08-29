@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -113,5 +114,105 @@ func TestKCMWireFramingAndFlagMapping(t *testing.T) {
 	want := KCMMatchTimes | KCMMatchIsSKey | KCMMatchServerName | KCMMatchKeyType
 	if got := MapTCFlags(flags); got != want {
 		t.Fatalf("MapTCFlags = %#x, want %#x", got, want)
+	}
+}
+
+func TestKCMMatchCredentialRoundTrip(t *testing.T) {
+	value := testCache().Credentials[0]
+	value.Enctype = 18
+	value.Key = []byte{1, 2, 3, 4}
+	value.Ticket = []byte("ticket")
+	value.SecondTicket = []byte("second")
+	value.Addresses = []Address{{Type: 2, Data: []byte{127, 0, 0, 1}}}
+	value.AuthData = []AuthData{{Type: 128, Data: []byte("auth")}}
+	wire, err := marshalMatchCredential(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unmarshalMatchCredential(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, value) {
+		t.Fatalf("match credential = %#v, want %#v", got, value)
+	}
+}
+
+func TestKCMMatchingFlagsCompareFullServerAndAuthData(t *testing.T) {
+	value := testCache().Credentials[0]
+	tag := value
+	tag.Server.Components = append([]string(nil), value.Server.Components...)
+	tag.Server.Components = append(tag.Server.Components, "EXTRA")
+	tag.Server.Components[1] = "OTHER"
+	if credentialMatches(value, tag, kcmTCMatchSrvName) {
+		t.Fatal("server-name-only matched a different server component")
+	}
+	tag = value
+	tag.AuthData = append([]AuthData(nil), value.AuthData...)
+	tag.AuthData = append(tag.AuthData, AuthData{Type: 1, Data: []byte("different")})
+	if credentialMatches(value, tag, kcmTCMatchAuthData) {
+		t.Fatal("authdata matching ignored contents")
+	}
+}
+
+func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
+	server := NewKCMServer("")
+	name := "cache"
+	if _, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetPrincipal)}, cstring(name)...)); code != kcmErrNoFile {
+		t.Fatalf("missing principal status = %d", code)
+	}
+	if len(server.caches) != 0 {
+		t.Fatal("missing read created a cache")
+	}
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initRequest := append([]byte{2, 0, 0, byte(kcmOpInitialize)}, append(cstring(name), principalBytes...)...)
+	if _, code := server.dispatch(initRequest); code != 0 {
+		t.Fatalf("initialize status = %d", code)
+	}
+	badStore := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), 1, 2, 3)...)
+	if _, code := server.dispatch(badStore); code != kcmErrInternal {
+		t.Fatalf("malformed store status = %d", code)
+	}
+	for _, credential := range cache.Credentials[:1] {
+		raw, err := marshalCredentialBytes(credential)
+		if err != nil {
+			t.Fatal(err)
+		}
+		storeRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
+		if _, code := server.dispatch(storeRequest); code != 0 {
+			t.Fatalf("store status = %d", code)
+		}
+	}
+	other := cache.Credentials[0]
+	other.Server.Components = []string{"other"}
+	raw, err := marshalCredentialBytes(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
+	if _, code := server.dispatch(storeRequest); code != 0 {
+		t.Fatalf("second store status = %d", code)
+	}
+	uuids, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
+	if code != 0 || len(uuids) != 2*kcmUUIDLen {
+		t.Fatalf("UUID list = %x, status %d", uuids, code)
+	}
+	match, err := marshalMatchCredential(cache.Credentials[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeArgs := append(cstring(name), make([]byte, 4)...)
+	removeArgs = append(removeArgs, match...)
+	removeRequest := append([]byte{2, 0, 0, byte(kcmOpRemoveCred)}, removeArgs...)
+	if _, code := server.dispatch(removeRequest); code != 0 {
+		t.Fatalf("remove status = %d", code)
+	}
+	remaining, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
+	if code != 0 || !bytes.Equal(remaining, uuids[kcmUUIDLen:]) {
+		t.Fatalf("remaining UUID list = %x, want %x (status %d)", remaining, uuids[kcmUUIDLen:], code)
 	}
 }

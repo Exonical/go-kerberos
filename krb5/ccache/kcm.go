@@ -84,6 +84,18 @@ const (
 	KCMDontMatchRealm    uint32 = kcmTCDontMatchRealm
 )
 
+const (
+	scClientPrincipal uint32 = 0x0001
+	scServerPrincipal uint32 = 0x0002
+	scSessionKey      uint32 = 0x0004
+	scTicket          uint32 = 0x0008
+	scSecondTicket    uint32 = 0x0010
+	scAuthData        uint32 = 0x0020
+	scAddresses       uint32 = 0x0040
+	scKnown                  = scClientPrincipal | scServerPrincipal | scSessionKey |
+		scTicket | scSecondTicket | scAuthData | scAddresses
+)
+
 // MapTCFlags translates MIT krb5 credential-cache matching flags to the
 // Heimdal KCM wire flags.
 func MapTCFlags(flags uint32) uint32 {
@@ -162,6 +174,7 @@ func resolveKCMSocket(residual, socket string) (*Handle, error) {
 	if residual == "" {
 		name, err := h.kcm.defaultName()
 		if err != nil {
+			_ = h.Close()
 			return nil, err
 		}
 		h.kcm.name = name
@@ -329,22 +342,92 @@ func (h *kcmHandle) principal() (principal.Principal, error) {
 
 func marshalMatchCredential(value Credential) ([]byte, error) {
 	var b bytes.Buffer
-	// k5_marshal_mcred uses a version and a presence header, followed by
-	// only the fields selected by that header.  Client and server principals
-	// are the fields needed by all KCM implementations.
-	var version uint32 = 4
-	var header uint32 = 0x0003
-	if err := binary.Write(&b, binary.BigEndian, version); err != nil {
+	var header uint32
+	principalSet := func(p principal.Principal) bool {
+		return p.Realm != "" || p.NameType != 0 || len(p.Components) != 0
+	}
+	if principalSet(value.Client) {
+		header |= scClientPrincipal
+	}
+	if principalSet(value.Server) {
+		header |= scServerPrincipal
+	}
+	if value.Enctype != 0 {
+		header |= scSessionKey
+	}
+	if len(value.Ticket) != 0 {
+		header |= scTicket
+	}
+	if len(value.SecondTicket) != 0 {
+		header |= scSecondTicket
+	}
+	if len(value.AuthData) != 0 {
+		header |= scAuthData
+	}
+	if len(value.Addresses) != 0 {
+		header |= scAddresses
+	}
+	if err := binary.Write(&b, binary.BigEndian, uint32(4)); err != nil {
 		return nil, err
 	}
 	if err := binary.Write(&b, binary.BigEndian, header); err != nil {
 		return nil, err
 	}
-	if err := encodePrincipal(&b, value.Client); err != nil {
+	if header&scClientPrincipal != 0 {
+		if err := encodePrincipal(&b, value.Client); err != nil {
+			return nil, err
+		}
+	}
+	if header&scServerPrincipal != 0 {
+		if err := encodePrincipal(&b, value.Server); err != nil {
+			return nil, err
+		}
+	}
+	if header&scSessionKey != 0 {
+		if value.Enctype < 0 || value.Enctype > int32(^uint16(0)) {
+			return nil, errors.New("kcm: match enctype out of range")
+		}
+		if err := binary.Write(&b, binary.BigEndian, uint16(value.Enctype)); err != nil {
+			return nil, err
+		}
+		if err := writeCounted32(&b, value.Key); err != nil {
+			return nil, err
+		}
+	}
+	for _, timestamp := range []uint32{value.AuthTime, value.StartTime, value.EndTime, value.RenewTill} {
+		if err := binary.Write(&b, binary.BigEndian, timestamp); err != nil {
+			return nil, err
+		}
+	}
+	var isSKey byte
+	if value.IsSKey {
+		isSKey = 1
+	}
+	if err := b.WriteByte(isSKey); err != nil {
 		return nil, err
 	}
-	if err := encodePrincipal(&b, value.Server); err != nil {
+	if err := binary.Write(&b, binary.BigEndian, value.TicketFlags); err != nil {
 		return nil, err
+	}
+	if header&scAddresses != 0 {
+		if err := writeAddresses(&b, value.Addresses); err != nil {
+			return nil, err
+		}
+	}
+	if header&scAuthData != 0 {
+		if err := writeAuthData(&b, value.AuthData); err != nil {
+			return nil, err
+		}
+	}
+	if header&scTicket != 0 {
+		if err := writeCounted32(&b, value.Ticket); err != nil {
+			return nil, err
+		}
+	}
+	if header&scSecondTicket != 0 {
+		if err := writeCounted32(&b, value.SecondTicket); err != nil {
+			return nil, err
+		}
 	}
 	return b.Bytes(), nil
 }
@@ -640,6 +723,7 @@ type KCMServer struct {
 	defaultName string
 	next        uint64
 	listener    net.Listener
+	conns       map[net.Conn]struct{}
 }
 
 type kcmServerCache struct {
@@ -647,12 +731,13 @@ type kcmServerCache struct {
 	uuid      [16]byte
 	principal *principal.Principal
 	creds     [][]byte
+	credUUIDs [][16]byte
 	offset    int32
 }
 
 // NewKCMServer creates an in-memory KCM server at socket.
 func NewKCMServer(socket string) *KCMServer {
-	return &KCMServer{Socket: socket, caches: make(map[string]*kcmServerCache), uuids: make(map[[16]byte]string), defaultName: "default"}
+	return &KCMServer{Socket: socket, caches: make(map[string]*kcmServerCache), uuids: make(map[[16]byte]string), conns: make(map[net.Conn]struct{}), defaultName: "default"}
 }
 
 // Serve listens and serves KCM requests until the listener fails.
@@ -694,6 +779,12 @@ func (s *KCMServer) ServeListener(listener net.Listener) error {
 		if err != nil {
 			return err
 		}
+		s.mu.Lock()
+		if s.conns == nil {
+			s.conns = make(map[net.Conn]struct{})
+		}
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
 		go s.serveConn(conn)
 	}
 }
@@ -702,15 +793,30 @@ func (s *KCMServer) ServeListener(listener net.Listener) error {
 func (s *KCMServer) Close() error {
 	s.mu.Lock()
 	listener := s.listener
-	s.mu.Unlock()
-	if listener != nil {
-		return listener.Close()
+	conns := make([]net.Conn, 0, len(s.conns))
+	for conn := range s.conns {
+		conns = append(conns, conn)
 	}
-	return nil
+	s.mu.Unlock()
+	var firstErr error
+	if listener != nil {
+		firstErr = listener.Close()
+	}
+	for _, conn := range conns {
+		if err := conn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (s *KCMServer) serveConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
+	}()
 	for {
 		request, err := readRequestFrame(conn)
 		if err != nil {
@@ -790,9 +896,18 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 	if err != nil {
 		return nil, kcmErrInternal
 	}
+	readOnly := op == kcmOpGetPrincipal || op == kcmOpGetCredList ||
+		op == kcmOpGetCredUUIDList || op == kcmOpGetCredByUUID ||
+		op == kcmOpRetrieve || op == kcmOpRemoveCred || op == kcmOpGetKDCOffset
 	s.mu.Lock()
-	cache := s.ensure(name)
+	cache := s.caches[name]
+	if cache == nil && !readOnly {
+		cache = s.ensure(name)
+	}
 	s.mu.Unlock()
+	if cache == nil {
+		return nil, kcmErrNoFile
+	}
 	switch op {
 	case kcmOpInitialize:
 		p, used, err := unmarshalPrincipalBytes(rest)
@@ -802,6 +917,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		s.mu.Lock()
 		cache.principal = &p
 		cache.creds = nil
+		cache.credUUIDs = nil
 		cache.offset = 0
 		s.mu.Unlock()
 		return nil, 0
@@ -827,8 +943,12 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		}
 		return value, 0
 	case kcmOpStore:
+		if _, err := unmarshalCredentialBytes(rest); err != nil {
+			return nil, kcmErrInternal
+		}
 		s.mu.Lock()
 		cache.creds = append(cache.creds, append([]byte(nil), rest...))
+		cache.credUUIDs = append(cache.credUUIDs, s.nextCredentialUUID(cache.uuid))
 		s.mu.Unlock()
 		return nil, 0
 	case kcmOpGetCredList:
@@ -845,20 +965,23 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		value := make([]byte, 0, len(cache.creds)*kcmUUIDLen)
-		for i := range cache.creds {
-			value = append(value, serverCredUUID(cache.uuid, i)...)
+		for _, uuid := range cache.credUUIDs {
+			value = append(value, uuid[:]...)
 		}
 		return value, 0
 	case kcmOpGetCredByUUID:
 		if len(rest) != kcmUUIDLen {
 			return nil, kcmErrInternal
 		}
-		index, ok := parseCredUUID(cache.uuid, rest)
-		if !ok {
-			return nil, kcmErrEnd
-		}
 		s.mu.Lock()
-		if index >= len(cache.creds) {
+		index := -1
+		for i, uuid := range cache.credUUIDs {
+			if bytes.Equal(uuid[:], rest) {
+				index = i
+				break
+			}
+		}
+		if index < 0 || index >= len(cache.creds) {
 			s.mu.Unlock()
 			return nil, kcmErrEnd
 		}
@@ -901,6 +1024,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 			cred, err := unmarshalCredentialBytes(cache.creds[i])
 			if err == nil && credentialMatches(cred, tag, flags) {
 				cache.creds = append(cache.creds[:i], cache.creds[i+1:]...)
+				cache.credUUIDs = append(cache.credUUIDs[:i], cache.credUUIDs[i+1:]...)
 				return nil, 0
 			}
 		}
@@ -938,21 +1062,87 @@ func unmarshalMatchCredential(data []byte) (Credential, error) {
 	}
 	version := binary.BigEndian.Uint32(data[:4])
 	header := binary.BigEndian.Uint32(data[4:8])
-	if version != 4 || header&0x3 != 0x3 {
+	if version != 4 || header&^scKnown != 0 {
 		return Credential{}, errors.New("kcm: malformed match credential")
 	}
-	off := 8
-	client, used, err := unmarshalPrincipalBytes(data[off:])
+	d := ccacheDecoder{data: data, off: 8}
+	var value Credential
+	var err error
+	if header&scClientPrincipal != 0 {
+		value.Client, err = d.principal()
+		if err != nil {
+			return Credential{}, err
+		}
+	}
+	if header&scServerPrincipal != 0 {
+		value.Server, err = d.principal()
+		if err != nil {
+			return Credential{}, err
+		}
+	}
+	if header&scSessionKey != 0 {
+		enctype, err := d.u16()
+		if err != nil {
+			return Credential{}, err
+		}
+		key, err := d.counted32()
+		if err != nil {
+			return Credential{}, err
+		}
+		value.Enctype = int32(enctype)
+		value.Key = append([]byte(nil), key...)
+	}
+	var times [4]uint32
+	for i := range times {
+		times[i], err = d.u32()
+		if err != nil {
+			return Credential{}, err
+		}
+	}
+	value.AuthTime, value.StartTime, value.EndTime, value.RenewTill =
+		times[0], times[1], times[2], times[3]
+	isSKey, err := d.u8()
 	if err != nil {
 		return Credential{}, err
 	}
-	off += used
-	server, used, err := unmarshalPrincipalBytes(data[off:])
+	if isSKey > 1 {
+		return Credential{}, errors.New("kcm: invalid match is_skey")
+	}
+	value.IsSKey = isSKey != 0
+	value.TicketFlags, err = d.u32()
 	if err != nil {
 		return Credential{}, err
 	}
-	off += used
-	return Credential{Client: client, Server: server}, nil
+	if header&scAddresses != 0 {
+		value.Addresses, err = d.addresses()
+		if err != nil {
+			return Credential{}, err
+		}
+	}
+	if header&scAuthData != 0 {
+		value.AuthData, err = d.authData()
+		if err != nil {
+			return Credential{}, err
+		}
+	}
+	if header&scTicket != 0 {
+		value.Ticket, err = d.counted32()
+		if err != nil {
+			return Credential{}, err
+		}
+		value.Ticket = append([]byte(nil), value.Ticket...)
+	}
+	if header&scSecondTicket != 0 {
+		value.SecondTicket, err = d.counted32()
+		if err != nil {
+			return Credential{}, err
+		}
+		value.SecondTicket = append([]byte(nil), value.SecondTicket...)
+	}
+	if d.remaining() != 0 {
+		return Credential{}, errors.New("kcm: trailing match credential data")
+	}
+	return value, nil
 }
 
 func splitCString(value []byte) (string, []byte, error) {
@@ -993,6 +1183,7 @@ func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) 
 	count := binary.BigEndian.Uint32(rest[:4])
 	rest = rest[4:]
 	creds := make([][]byte, 0, count)
+	credUUIDs := make([][16]byte, 0, count)
 	for i := uint32(0); i < count; i++ {
 		if len(rest) < 4 {
 			return nil, kcmErrInternal
@@ -1002,7 +1193,12 @@ func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) 
 		if n < 0 || n > len(rest) {
 			return nil, kcmErrInternal
 		}
-		creds = append(creds, append([]byte(nil), rest[:n]...))
+		raw := append([]byte(nil), rest[:n]...)
+		if _, err := unmarshalCredentialBytes(raw); err != nil {
+			return nil, kcmErrInternal
+		}
+		creds = append(creds, raw)
+		credUUIDs = append(credUUIDs, s.nextCredentialUUID(cache.uuid))
 		rest = rest[n:]
 	}
 	if len(rest) != 0 {
@@ -1012,26 +1208,17 @@ func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) 
 	cache.principal = &p
 	cache.offset = offset
 	cache.creds = creds
+	cache.credUUIDs = credUUIDs
 	s.mu.Unlock()
 	return nil, 0
 }
 
-func serverCredUUID(cache [16]byte, index int) []byte {
+func (s *KCMServer) nextCredentialUUID(cache [16]byte) [16]byte {
+	s.next++
 	var value [16]byte
-	copy(value[:], cache[:])
-	binary.BigEndian.PutUint32(value[12:], uint32(index+1))
-	return value[:]
-}
-
-func parseCredUUID(cache [16]byte, value []byte) (int, bool) {
-	if len(value) != 16 || !bytes.Equal(value[:12], cache[:12]) {
-		return 0, false
-	}
-	index := binary.BigEndian.Uint32(value[12:])
-	if index == 0 {
-		return 0, false
-	}
-	return int(index - 1), true
+	copy(value[:8], cache[:8])
+	binary.BigEndian.PutUint64(value[8:], s.next)
+	return value
 }
 
 func credentialMatches(value, tag Credential, flags uint32) bool {
@@ -1053,8 +1240,10 @@ func credentialMatches(value, tag Credential, flags uint32) bool {
 		if len(value.Server.Components) != len(tag.Server.Components) {
 			return false
 		}
-		if len(value.Server.Components) > 0 && value.Server.Components[0] != tag.Server.Components[0] {
-			return false
+		for i := range value.Server.Components {
+			if value.Server.Components[i] != tag.Server.Components[i] {
+				return false
+			}
 		}
 	} else if value.Server.Realm != tag.Server.Realm || len(value.Server.Components) != len(tag.Server.Components) {
 		return false
@@ -1089,8 +1278,16 @@ func credentialMatches(value, tag Credential, flags uint32) bool {
 	if flags&kcmTCMatchSecond != 0 && !bytes.Equal(value.SecondTicket, tag.SecondTicket) {
 		return false
 	}
-	if flags&kcmTCMatchAuthData != 0 && len(value.AuthData) != len(tag.AuthData) {
-		return false
+	if flags&kcmTCMatchAuthData != 0 {
+		if len(value.AuthData) != len(tag.AuthData) {
+			return false
+		}
+		for i := range value.AuthData {
+			if value.AuthData[i].Type != tag.AuthData[i].Type ||
+				!bytes.Equal(value.AuthData[i].Data, tag.AuthData[i].Data) {
+				return false
+			}
+		}
 	}
 	return true
 }
