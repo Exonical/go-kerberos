@@ -58,6 +58,7 @@ func startGoKDCWithGroup(t *testing.T, policy *kdb.PolicyRecord, groupName strin
 	db := kdb.NewDatabase(goKDCRealm)
 	for _, item := range []struct{ name, password string }{
 		{"alice", "alice-password"},
+		{"bob", "bob-password"},
 		{"krbtgt/" + goKDCRealm, "krbtgt-password"},
 		{"host/service.test", "host-password"},
 		{"HTTP/backend.test", "backend-password"},
@@ -200,6 +201,19 @@ func (k *goKDC) run(t *testing.T, input, command string, args ...string) string 
 }
 
 func (k *goKDC) runResult(input, command string, args ...string) (string, error) {
+	return k.runResultWithCache(k.cache, input, command, args...)
+}
+
+func (k *goKDC) runWithCache(t *testing.T, cache, input, command string, args ...string) string {
+	t.Helper()
+	output, err := k.runResultWithCache(cache, input, command, args...)
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", command, args, err, output)
+	}
+	return output
+}
+
+func (k *goKDC) runResultWithCache(cache, input, command string, args ...string) (string, error) {
 	cmd := exec.Command(command, args...)
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, value := range os.Environ() {
@@ -208,12 +222,29 @@ func (k *goKDC) runResult(input, command string, args ...string) (string, error)
 		}
 		env = append(env, value)
 	}
-	cmd.Env = append(env, "KRB5_CONFIG="+k.config, "KRB5CCNAME=FILE:"+k.cache, "KRB5_TRACE=/dev/stderr")
+	cmd.Env = append(env, "KRB5_CONFIG="+k.config, "KRB5CCNAME=FILE:"+cache, "KRB5_TRACE=/dev/stderr")
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func TestMITClientU2UAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	aliceCache := filepath.Join(filepath.Dir(k.cache), "alice.ccache")
+	bobCache := filepath.Join(filepath.Dir(k.cache), "bob.ccache")
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-c", "FILE:"+aliceCache, "alice")
+	k.runWithCache(t, bobCache, "bob-password\n", "/usr/bin/kinit", "-c", "FILE:"+bobCache, "bob")
+	output := k.runWithCache(t, bobCache, "", "/usr/bin/kvno",
+		"--u2u", "FILE:"+aliceCache, "alice")
+	if !strings.Contains(output, "kvno = 0") {
+		t.Fatalf("MIT kvno U2U output does not show KVNO zero:\n%s", output)
+	}
+	listing := k.runWithCache(t, bobCache, "", "/usr/bin/klist", "-e", "-c", "FILE:"+bobCache)
+	if !strings.Contains(listing, "alice@"+goKDCRealm) {
+		t.Fatalf("MIT klist does not show the U2U ticket for alice:\n%s", listing)
+	}
 }
 
 func TestMITClientAgainstGoKDC(t *testing.T) {

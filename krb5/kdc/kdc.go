@@ -1994,9 +1994,12 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	ticketEncryptionKey := serviceKey
 	ticketKVNO := serviceKey.KVNO
+	var ticketKVNOPtr = &ticketKVNO
 	if u2uTicketKey != nil {
 		ticketEncryptionKey = *u2uTicketKey
 		ticketKVNO = 0
+		// MIT's optional-zero KVNO encoder omits a zero value on U2U tickets.
+		ticketKVNOPtr = nil
 	}
 	ticketCipher, err := encryptWithKey(ticketEncryptionKey, 2, marshalDER(ticketPart))
 	if err != nil {
@@ -2004,7 +2007,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	ticket := protocol.Ticket{
 		TktVNO: 5, Realm: serviceName.Realm, SName: *protocolPrincipal(serviceName),
-		EncPart: protocol.EncryptedData{EType: ticketEncryptionKey.Enctype, KVNO: &ticketKVNO, Cipher: ticketCipher},
+		EncPart: protocol.EncryptedData{EType: ticketEncryptionKey.Enctype, KVNO: ticketKVNOPtr, Cipher: ticketCipher},
 	}
 	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
 		ticket.SName = headerTicket.SName
