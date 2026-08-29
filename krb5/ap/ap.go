@@ -2,6 +2,7 @@ package ap
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -223,6 +224,9 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrIntegrity)
 	}
+	if ticketPart.Flags&types.TicketInvalid != 0 {
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketInvalid)
+	}
 	now = now.UTC()
 	if !ticketValid(ticketPart, now) {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketExpired)
@@ -256,8 +260,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	if !withinSkew(authenticator.Ctime.Time, now, skew) {
 		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
 	}
-	replayKey := fmt.Sprintf("%s|%d|%s|%d|%d", authenticator.CRealm, authenticator.CName.NameType,
-		joinPrincipalComponents(authenticator.CName.NameString), authenticator.Ctime.Time.Unix(), authenticator.Cusec)
+	replayKey := fmt.Sprintf("%x", sha256.Sum256(request.Authenticator.Cipher))
 	replayCache.Lock()
 	_, replayed := replayCache.entries[replayKey]
 	if !replayed {

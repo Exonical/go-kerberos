@@ -15,6 +15,8 @@ var (
 	ErrClockSkew = stderrors.New("kerberos clock skew")
 	// ErrTicketExpired identifies an expired ticket.
 	ErrTicketExpired = stderrors.New("kerberos ticket expired")
+	// ErrTicketInvalid identifies a ticket carrying TKT_FLG_INVALID.
+	ErrTicketInvalid = stderrors.New("kerberos ticket invalid")
 	// ErrUnsupportedEType identifies an unsupported encryption type.
 	ErrUnsupportedEType = stderrors.New("unsupported kerberos encryption type")
 )

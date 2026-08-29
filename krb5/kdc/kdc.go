@@ -1725,8 +1725,18 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		if code, valid := s.ticketValidity(secondPart); !valid {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 		}
-		if secondPart.CRealm != serviceName.Realm ||
-			!sameProtocolPrincipal(secondPart.CName, *protocolPrincipal(serviceName)) {
+		secondClient := principalFromProtocol(secondPart.CName, secondPart.CRealm)
+		secondRecord, secondFound, err := s.DB.Lookup(secondClient)
+		if err != nil {
+			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+		}
+		if !secondFound {
+			secondRecord, secondFound, _, err = s.lookupAlias(secondClient)
+			if err != nil {
+				return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+			}
+		}
+		if !secondFound || !samePrincipalIdentity(secondRecord.Name, serviceRecord.Name) {
 			return s.tgsErrorResponse(armor, kdcErrServerNoMatch, request.ReqBody.SName)
 		}
 		if _, err := crypto.NewRegistry().Get(secondPart.Key.KeyType); err != nil ||
@@ -1767,6 +1777,19 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyUsage = 9
 	}
 	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, pacVerifyKey, u2uTicketKey)
+}
+
+func samePrincipalIdentity(left, right principal.Principal) bool {
+	if left.Realm != right.Realm || left.NameType != right.NameType ||
+		len(left.Components) != len(right.Components) {
+		return false
+	}
+	for i := range left.Components {
+		if left.Components[i] != right.Components[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bool {
