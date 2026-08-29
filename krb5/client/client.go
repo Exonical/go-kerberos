@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/kkdcp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -29,10 +30,15 @@ import (
 
 // Client performs Kerberos client exchanges.
 type Client struct {
-	Config   *config.Config
-	Dialer   transport.Dialer
-	Now      func() time.Time
-	Exchange func(ctx context.Context, realm string, payload []byte) ([]byte, error)
+	Config *config.Config
+	Dialer transport.Dialer
+	// KKDCP optionally configures HTTPS KDC Proxy requests. When nil, an
+	// internal client uses HTTPAnchors and Dialer for HTTPS endpoints.
+	KKDCP *kkdcp.Client
+	// HTTPAnchors supplies CA roots for HTTPS KDC Proxy endpoints.
+	HTTPAnchors *x509.CertPool
+	Now         func() time.Time
+	Exchange    func(ctx context.Context, realm string, payload []byte) ([]byte, error)
 	// SPAKEGroups controls the PA-SPAKE groups offered by ASExchange. When
 	// empty, only MIT's default edwards25519 group is offered.
 	SPAKEGroups []int32
@@ -892,6 +898,9 @@ func (c *Client) exchangePayload(ctx context.Context, realm string, request any,
 	if !ok {
 		return nil, fmt.Errorf("TGS exchange: no KDC configured for realm %q", realm)
 	}
+	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("TGS exchange KDC address: %w", err)
@@ -1050,6 +1059,9 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 	endpoint, ok := configuredKDC(c.Config, realm)
 	if !ok {
 		return nil, fmt.Errorf("AS exchange: no KDC configured for realm %q", realm)
+	}
+	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
 	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
@@ -1219,6 +1231,13 @@ func configuredKDC(cfg *config.Config, realm string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (c *Client) kkdcpClient() *kkdcp.Client {
+	if c.KKDCP != nil {
+		return c.KKDCP
+	}
+	return &kkdcp.Client{RootCAs: c.HTTPAnchors, Dialer: c.Dialer}
 }
 
 func unixTime(value types.KerberosTime) uint32 {
