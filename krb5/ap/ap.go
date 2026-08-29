@@ -182,11 +182,40 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 	if err != nil {
 		return nil, err
 	}
-	etype, err := crypto.NewRegistry().Get(entry.Enctype)
+	return verifyAPReqWithTicketKey(request, protocol.EncryptionKey{
+		KeyType: entry.Enctype, KeyValue: entry.Key,
+	}, now, skew)
+}
+
+// VerifyAPReqWithSessionKey verifies a user-to-user AP-REQ using the peer's
+// TGT session key. The request must set APUseSessionKey, as required by
+// RFC 4120 section 5.5.1.
+func VerifyAPReqWithSessionKey(key protocol.EncryptionKey, der []byte, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+	if key.KeyType == 0 || len(key.KeyValue) == 0 {
+		return nil, fmt.Errorf("verify AP-REQ with session key: incomplete key")
+	}
+	var request protocol.APReq
+	if err := asn1.Unmarshal(der, &request); err != nil {
+		return nil, fmt.Errorf("verify AP-REQ with session key: %w", err)
+	}
+	if request.PVNO != 5 || request.MsgType != 14 {
+		return nil, fmt.Errorf("verify AP-REQ with session key: unexpected message")
+	}
+	if request.APOptions&types.APUseSessionKey == 0 {
+		return nil, fmt.Errorf("verify AP-REQ with session key: APUseSessionKey not set")
+	}
+	if request.Ticket.EncPart.EType != key.KeyType {
+		return nil, fmt.Errorf("verify AP-REQ with session key: %w", krberrors.ErrIntegrity)
+	}
+	return verifyAPReqWithTicketKey(request, key, now, skew)
+}
+
+func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.EncryptionKey, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+	etype, err := crypto.NewRegistry().Get(ticketKey.KeyType)
 	if err != nil {
 		return nil, err
 	}
-	ticketPlain, err := etype.Decrypt(entry.Key, ticketUsage, request.Ticket.EncPart.Cipher)
+	ticketPlain, err := etype.Decrypt(ticketKey.KeyValue, ticketUsage, request.Ticket.EncPart.Cipher)
 	if err != nil {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", err)
 	}

@@ -50,15 +50,19 @@ type Client struct {
 
 // Credentials contains the initial credentials returned by an AS exchange.
 type Credentials struct {
-	Client    principal.Principal
-	Server    principal.Principal
-	Key       protocol.EncryptionKey
-	Flags     types.TicketFlags
-	AuthTime  types.KerberosTime
-	StartTime *types.KerberosTime
-	EndTime   types.KerberosTime
-	RenewTill *types.KerberosTime
-	Ticket    []byte
+	Client principal.Principal
+	Server principal.Principal
+	Key    protocol.EncryptionKey
+	Flags  types.TicketFlags
+	// IsSKey reports that the ticket is encrypted in the second ticket's
+	// session key, as used by user-to-user authentication.
+	IsSKey       bool
+	SecondTicket []byte
+	AuthTime     types.KerberosTime
+	StartTime    *types.KerberosTime
+	EndTime      types.KerberosTime
+	RenewTill    *types.KerberosTime
+	Ticket       []byte
 }
 
 // OTPProvider supplies the token value and optional PIN for an OTP challenge.
@@ -68,16 +72,18 @@ type OTPProvider func(otp.Challenge) (value string, pin string, err error)
 // ToCCacheCredential converts credentials to a FILE ccache credential.
 func (c Credentials) ToCCacheCredential() ccache.Credential {
 	return ccache.Credential{
-		Client:      c.Client,
-		Server:      c.Server,
-		Enctype:     c.Key.KeyType,
-		Key:         append([]byte(nil), c.Key.KeyValue...),
-		TicketFlags: uint32(c.Flags),
-		AuthTime:    unixTime(c.AuthTime),
-		StartTime:   unixOptional(c.StartTime),
-		EndTime:     unixTime(c.EndTime),
-		RenewTill:   unixOptional(c.RenewTill),
-		Ticket:      append([]byte(nil), c.Ticket...),
+		Client:       c.Client,
+		Server:       c.Server,
+		Enctype:      c.Key.KeyType,
+		Key:          append([]byte(nil), c.Key.KeyValue...),
+		TicketFlags:  uint32(c.Flags),
+		IsSKey:       c.IsSKey,
+		AuthTime:     unixTime(c.AuthTime),
+		StartTime:    unixOptional(c.StartTime),
+		EndTime:      unixTime(c.EndTime),
+		RenewTill:    unixOptional(c.RenewTill),
+		Ticket:       append([]byte(nil), c.Ticket...),
+		SecondTicket: append([]byte(nil), c.SecondTicket...),
 	}
 }
 
@@ -723,6 +729,73 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 		currentTGT = result
 		realm = nextRealm
 	}
+}
+
+// TGSExchangeU2U obtains a service ticket encrypted in the session key of the
+// supplied second ticket, as specified by RFC 4120 section 3.3.
+func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTicket []byte, service principal.Principal) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("TGS U2U exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("TGS U2U exchange: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("TGS U2U exchange: %w", err)
+	}
+	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
+		return nil, fmt.Errorf("TGS U2U exchange: incomplete TGT")
+	}
+	if len(secondTicket) == 0 {
+		return nil, fmt.Errorf("TGS U2U exchange: missing second ticket")
+	}
+	if len(service.Components) == 0 {
+		return nil, fmt.Errorf("TGS U2U exchange: invalid service principal")
+	}
+	realm, _ := ServiceRealm(c.Config, service)
+	if realm == "" {
+		realm = tgt.Server.Realm
+	}
+	if realm == "" {
+		realm = tgt.Client.Realm
+	}
+	if realm == "" {
+		return nil, fmt.Errorf("TGS U2U exchange: missing service realm")
+	}
+	service = serviceWithRealm(service, realm)
+	var second protocol.Ticket
+	if err := asn1.Unmarshal(secondTicket, &second); err != nil {
+		return nil, fmt.Errorf("TGS U2U exchange second ticket: %w", err)
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	request, nonce, err := c.newTGSReqWithBody(tgt, service, realm, now, false, func(body *protocol.KDCReqBody) {
+		body.KDCOptions |= types.KDCEncTktInSkey
+		body.AdditionalTickets = []protocol.Ticket{second}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(request.ReqBody.AdditionalTickets) != 1 {
+		return nil, fmt.Errorf("TGS U2U exchange second ticket: invalid ticket")
+	}
+	response, err := c.exchangePayload(ctx, realm, request, "TGS U2U exchange request")
+	if err != nil {
+		return nil, err
+	}
+	if kerberosError, ok := decodeKRBError(response); ok {
+		return nil, kerberosError
+	}
+	result, _, err := c.decodeTGSRepForExchange(response, tgt.Client, service, service,
+		true, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+	if err != nil {
+		return nil, err
+	}
+	result.IsSKey = true
+	result.SecondTicket = append([]byte(nil), secondTicket...)
+	return result, nil
 }
 
 // TGSExchangeFAST obtains a service ticket using an RFC 6113 implicit TGS

@@ -673,6 +673,71 @@ func TestTGSExchangeRejectsReferralLoopAndHopCap(t *testing.T) {
 	}
 }
 
+func TestTGSExchangeU2UAddsSecondTicketAndMarksCredentials(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	tgt := &Credentials{
+		Client: principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"bob"}},
+		Server: principal.Principal{Realm: testRealm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", testRealm}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		Ticket: mustMarshal(t, protocol.Ticket{
+			TktVNO: 5, Realm: testRealm,
+			SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+		}),
+	}
+	secondTicket := mustMarshal(t, protocol.Ticket{
+		TktVNO: 5, Realm: testRealm,
+		SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+		EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{2}},
+	})
+	service := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.TGSReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ReqBody.KDCOptions&types.KDCEncTktInSkey == 0 ||
+			len(request.ReqBody.AdditionalTickets) != 1 {
+			t.Fatalf("U2U request = %#v", request.ReqBody)
+		}
+		partDER := mustMarshal(t, protocol.EncTGSRepPart{
+			Key:      protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+			Nonce:    request.ReqBody.Nonce,
+			AuthTime: kerberosTime(now),
+			EndTime:  kerberosTime(now.Add(time.Hour)),
+			SRealm:   service.Realm,
+			SName:    protocol.PrincipalName{NameType: int32(service.NameType), NameString: service.Components},
+		})
+		cipher, err := profile.Encrypt(key, 8, partDER)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mustMarshal(t, protocol.TGSRep{
+			PVNO: 5, MsgType: 13, CRealm: testRealm,
+			CName: protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"bob"}},
+			Ticket: protocol.Ticket{
+				TktVNO: 5, Realm: testRealm,
+				SName:   protocol.PrincipalName{NameType: int32(service.NameType), NameString: service.Components},
+				EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{2}},
+			},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
+		}), nil
+	}
+	credentials, err := (&Client{Now: func() time.Time { return now }, Exchange: exchange}).
+		TGSExchangeU2U(context.Background(), tgt, secondTicket, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !credentials.IsSKey || !bytes.Equal(credentials.SecondTicket, secondTicket) {
+		t.Fatalf("U2U credentials = %#v", credentials)
+	}
+}
+
 func makeTGSReply(t *testing.T, profile crypto.EType, decryptKey []byte, nonce uint32, now time.Time, sessionKey []byte, realm string, server principal.Principal) []byte {
 	t.Helper()
 	partDER := mustMarshal(t, protocol.EncTGSRepPart{
