@@ -24,7 +24,7 @@ when absent.
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
-| PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | MIT OTP plugin unavailable in the pinned runtime; live gate not claimed | MIT OTP plugin unavailable; live gate not claimed |
+| PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
@@ -232,11 +232,13 @@ encrypted directly with the FAST armor key using key usage 45, matching
 MIT krb5 1.22.2; no additional CF2/KDF is used for this request path.
 
 The in-process Go KDC/client OTP exchange is covered by
-`TestServerOTPFASTASExchange`. The MIT 1.19 runtime available in the
-integration environment does not ship the OTP preauthentication plugin
-(`/usr/lib/x86_64-linux-gnu/krb5/plugins/preauth/otp.so`), so MIT-client and
-MIT-KDC OTP live gates are not claimed. They require an MIT installation with
-the OTP plugin and, for the MIT KDC direction, a configured RADIUS backend.
+`TestServerOTPFASTASExchange`. Live interoperability is covered in both
+directions: `TestGoClientOTPAgainstMITKDC` uses the MIT OTP module with an
+in-process UDP RADIUS acceptor, while `TestMITClientOTPAgainstGoKDC` uses
+MIT `kinit` with a FAST armor ccache and the Go KDC hooks. These tests
+require the Ubuntu `krb5-otp` package (the test remains conditional when
+the plugin is unavailable). The Go KDC includes a FAST cookie in the
+initial OTP challenge, as required by MIT's retry processing.
 
 ## Testing layers
 

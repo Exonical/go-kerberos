@@ -29,6 +29,7 @@ type fieldTag struct {
 	number   int
 	optional bool
 	choice   bool
+	implicit bool
 }
 
 // Marshal encodes a Kerberos ASN.1 value using canonical DER.
@@ -271,7 +272,15 @@ func encodeStruct(value reflect.Value, depth int) ([]byte, error) {
 			return nil, fmt.Errorf("field %s: %w", field.Name, err)
 		}
 		if hasTag {
-			encoded = encodeTLV(0xa0|byte(tag.number), encoded)
+			if tag.implicit {
+				innerTag, innerContent, innerEnd, err := readTLV(encoded)
+				if err != nil || innerEnd != len(encoded) {
+					return nil, fmt.Errorf("invalid implicit field encoding")
+				}
+				encoded = encodeTLV(0x80|byte(tag.number)|(innerTag&0x20), innerContent)
+			} else {
+				encoded = encodeTLV(0xa0|byte(tag.number), encoded)
+			}
 		}
 		content = append(content, encoded...)
 	}
@@ -458,10 +467,58 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		}
 		expectedTag := byte(0xa0 | tag.number)
 		if nextTag != expectedTag {
-			if tag.optional && nextTag > expectedTag {
+			if tag.implicit && (nextTag == 0x80|byte(tag.number) ||
+				nextTag == expectedTag) {
+				implicitTag := tagForImplicitField(destination.Field(i))
+				if implicitTag == 0 {
+					return fmt.Errorf("field %s cannot use implicit tagging", field.Name)
+				}
+				_, implicitContent, implicitEnd, err := readTLV(content[position : position+end])
+				if err != nil || implicitEnd != end {
+					return fmt.Errorf("invalid implicit field")
+				}
+				if implicitTag == tagInteger {
+					if err := decodeImplicitInteger(implicitContent, destination.Field(i)); err != nil {
+						return fmt.Errorf("field %s: %w", field.Name, err)
+					}
+					position += end
+					continue
+				}
+				implicit := encodeTLV(implicitTag, implicitContent)
+				if err := decodeValue(implicit, destination.Field(i), depth+1); err != nil {
+					return fmt.Errorf("field %s: %w", field.Name, err)
+				}
+				position += end
+				continue
+			}
+			if tag.optional && (nextTag > expectedTag ||
+				(tag.implicit && contextTagNumber(nextTag) > tag.number)) {
 				continue
 			}
 			return fmt.Errorf("unexpected or out-of-order field tag 0x%x, want 0x%x", nextTag, expectedTag)
+		}
+		if tag.implicit {
+			implicitTag := tagForImplicitField(destination.Field(i))
+			if implicitTag == 0 {
+				return fmt.Errorf("field %s cannot use implicit tagging", field.Name)
+			}
+			_, implicitContent, implicitEnd, err := readTLV(content[position : position+end])
+			if err != nil || implicitEnd != end {
+				return fmt.Errorf("invalid implicit field")
+			}
+			if implicitTag == tagInteger {
+				if err := decodeImplicitInteger(implicitContent, destination.Field(i)); err != nil {
+					return fmt.Errorf("field %s: %w", field.Name, err)
+				}
+				position += end
+				continue
+			}
+			implicit := encodeTLV(implicitTag, implicitContent)
+			if err := decodeValue(implicit, destination.Field(i), depth+1); err != nil {
+				return fmt.Errorf("field %s: %w", field.Name, err)
+			}
+			position += end
+			continue
 		}
 		_, inner, innerEnd, err := readTLV(content[position : position+end])
 		if err != nil {
@@ -479,6 +536,10 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		return fmt.Errorf("unknown trailing field")
 	}
 	return nil
+}
+
+func contextTagNumber(tag byte) int {
+	return int(tag & 0x1f)
 }
 
 func readTLV(data []byte) (tag byte, content []byte, end int, err error) {
@@ -651,12 +712,72 @@ func parseFieldTag(field reflect.StructField) (fieldTag, bool, error) {
 			result.optional = true
 		case part == "choice":
 			result.choice = true
+		case part == "implicit":
+			result.implicit = true
 		default:
 			return fieldTag{}, false, fmt.Errorf("unknown krb5 field option %q", part)
 		}
 		position = end + 1
 	}
 	return result, true, nil
+}
+
+func tagForImplicitField(value reflect.Value) byte {
+	typ := value.Type()
+	if typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	return tagForImplicitType(typ)
+}
+
+func tagForImplicitType(typ reflect.Type) byte {
+	if typ == reflect.TypeOf(types.UTF8String("")) {
+		return tagUTF8String
+	}
+	if typ == reflect.TypeOf(types.KerberosTime{}) || typ == reflect.TypeOf(time.Time{}) {
+		return tagGeneralizedTime
+	}
+	switch typ.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return tagInteger
+	case reflect.String:
+		return tagGeneralString
+	case reflect.Slice:
+		if typ.Elem().Kind() == reflect.Uint8 {
+			return tagOctetString
+		}
+		return tagSequence
+	case reflect.Struct:
+		return tagSequence
+	default:
+		return 0
+	}
+}
+
+func decodeImplicitInteger(data []byte, destination reflect.Value) error {
+	for len(data) > 1 && ((data[0] == 0 && data[1]&0x80 == 0) ||
+		(data[0] == 0xff && data[1]&0x80 != 0)) {
+		data = data[1:]
+	}
+	value, err := decodeInteger(data)
+	if err != nil {
+		return err
+	}
+	if destination.Kind() == reflect.Pointer {
+		if destination.IsNil() {
+			destination.Set(reflect.New(destination.Type().Elem()))
+		}
+		destination = destination.Elem()
+	}
+	if destination.Kind() < reflect.Int || destination.Kind() > reflect.Int64 {
+		return fmt.Errorf("implicit INTEGER destination is not signed")
+	}
+	if destination.OverflowInt(value) {
+		return fmt.Errorf("INTEGER overflows %s", destination.Type())
+	}
+	destination.SetInt(value)
+	return nil
 }
 
 func choiceField(value reflect.Value) (int, int, bool) {

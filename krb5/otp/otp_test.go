@@ -63,7 +63,7 @@ func TestChallengeDERGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "303fa0080406010203040506a2333031302fa003020100a1080c0676656e646f72a303020106a403020101a5070405746f6b656ea6060c0473686131a803020106"
+	const want = "302d8006010203040506a2233021800100810676656e646f728301068401018505746f6b656e860473686131880106"
 	if got := hex.EncodeToString(encoded); got != want {
 		t.Fatalf("challenge DER = %s, want %s", got, want)
 	}
@@ -82,7 +82,7 @@ func TestRequestDERGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "302aa003020101a10404020908a20d300ba003020111a2040402aabba5080406313233343536a6040c023432"
+	const want = "302080010181020908a20ba003020111a2040402aabb850631323334353686023432"
 	if got := hex.EncodeToString(encoded); got != want {
 		t.Fatalf("request DER = %s, want %s", got, want)
 	}

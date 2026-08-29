@@ -465,6 +465,13 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		methodData := protocol.MethodData{{PADataType: otp.PADataChallenge,
 			PADataValue: marshalDER(otp.Challenge{Nonce: nonce, TokenInfo: tokenInfo})}}
+		cookie := make([]byte, 16)
+		if _, err := io.ReadFull(crypto.RandomSource, cookie); err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+		methodData = append(methodData, protocol.PAData{
+			PADataType: fast.PAFXCookie, PADataValue: cookie,
+		})
 		return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName,
 			marshalDER(methodData), request.ReqBody.Nonce, armor)
 	}
