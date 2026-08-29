@@ -174,7 +174,7 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 	if _, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetPrincipal)}, cstring(name)...)); code != kcmErrNoFile {
 		t.Fatalf("missing principal status = %d", code)
 	}
-	if len(server.caches) != 0 {
+	if len(server.shared.caches) != 0 {
 		t.Fatal("missing read created a cache")
 	}
 	cache := testCache()

@@ -722,10 +722,6 @@ type KCMServer struct {
 	// existing callers.
 	IsolatePeers bool
 	mu           sync.Mutex
-	caches       map[string]*kcmServerCache
-	uuids        map[[16]byte]string
-	defaultName  string
-	next         uint64
 	shared       *kcmNamespace
 	namespaces   map[uint32]*kcmNamespace
 	peerUID      func(net.Conn) (uint32, error)
@@ -757,8 +753,7 @@ func NewKCMServer(socket string) *KCMServer {
 		defaultName: "default",
 	}
 	return &KCMServer{
-		Socket: socket, caches: shared.caches, uuids: shared.uuids,
-		defaultName: shared.defaultName, shared: shared,
+		Socket: socket, shared: shared,
 		namespaces: make(map[uint32]*kcmNamespace),
 		peerUID:    kcmPeerUID, conns: make(map[net.Conn]struct{}),
 	}
