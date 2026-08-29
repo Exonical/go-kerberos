@@ -116,7 +116,7 @@ func TestMITKKDCPClientAgainstGoProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(traceData, []byte("https://")) {
+	if !bytes.Contains(traceData, []byte("Sending HTTPS request")) {
 		t.Fatalf("MIT trace does not show HTTPS KDC proxy transport:\n%s", traceData)
 	}
 }
@@ -125,6 +125,7 @@ func mitHTTPSProxySupport() bool {
 	paths := []string{
 		"/usr/lib/x86_64-linux-gnu/krb5/plugins/libkrb5/k5tls.so",
 		"/usr/lib/x86_64-linux-gnu/krb5/plugins/libkrb5/k5tls.so.0",
+		"/usr/lib/x86_64-linux-gnu/krb5/plugins/tls/k5tls.so",
 	}
 	for _, path := range paths {
 		if _, err := os.Stat(path); err == nil {

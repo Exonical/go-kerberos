@@ -32,14 +32,13 @@ when absent.
 | MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Full-resync dump transfer is implemented in `krb5/kprop`; live full-resync daemon gates require disposable MIT daemon orchestration and are tracked separately |
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
-| MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT HTTPS client gate is skipped when the installed MIT runtime lacks its `k5tls` plugin |
+| MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
 
-The Go-to-MIT KKDCP gate passes using a disposable TLS proxy and a real MIT
-KDC. The reverse MIT-client gate is implemented, but the supplied Ubuntu MIT
-1.19.2 runtime does not ship the `k5tls` plugin (`k5tls.so`), so that test
-skips rather than claiming HTTPS interoperability. MIT 1.22.2's source
-contains the HTTPS transport and TLS plugin path used as the behavioral
-reference.
+The Go-to-MIT and MIT-to-Go KKDCP gates pass using a disposable TLS proxy and
+a real MIT KDC. The reverse gate skips when the installed MIT runtime lacks
+the `k5tls` plugin; Ubuntu provides it through the optional `krb5-k5tls`
+package. MIT 1.22.2's source contains the HTTPS transport and TLS plugin path
+used as the behavioral reference.
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
