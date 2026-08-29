@@ -106,6 +106,8 @@ disposable integration test environments.
 ### Formats and configuration
 - MIT **FILE keytab** (v2) reader/writer, byte-compatible with `ktutil`.
 - MIT **FILE ccache** (v4) reader/writer, byte-compatible with `klist`.
+- MIT **DIR** ccache collections (primary switching and subsidiary caches) and
+  process-local **MEMORY** ccaches with collection resolution.
 - **krb5.conf** parsing, DNS SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover.
 

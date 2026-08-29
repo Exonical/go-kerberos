@@ -14,7 +14,8 @@ when absent.
 | AES128 SHA256 | RED | RED | RED |
 | AES256 SHA384 | RED | RED | RED |
 | keytab | RED | RED | RED |
-| FILE ccache | RED | RED | RED |
+| FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
+| DIR and MEMORY ccache types | Go resolver, DIR primary/collection and MEMORY concurrency tests | MIT `kinit` DIR collection read by Go | Go DIR collection read by MIT `klist`/`kvno` |
 | AS exchange | RED | RED | RED |
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
