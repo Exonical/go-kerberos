@@ -116,7 +116,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		return nil, err
 	}
 	if kerberosError, ok := decodeKRBError(response); ok {
-		if kerberosError.Code != 25 {
+		if kerberosError.Code != 25 && kerberosError.Code != 91 {
 			return nil, kerberosError
 		}
 		methodData, err := preauth.ParseMethodData(kerberosError.ErrorData())

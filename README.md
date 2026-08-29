@@ -58,8 +58,11 @@ disposable integration test environments.
   load-before-ack handling.
 - **PA-SPAKE**: the password AS path and Go KDC support padata type 151,
   Edwards25519 group 1, MIT transcript/key derivation, SF-NONE, and
-  stateless authenticated challenge cookies. P-256/P-384/P-521 groups are
-  intentionally not advertised.
+  stateless authenticated challenge cookies. The KDC can advertise the
+  mechanism in its initial preauthentication hints, and the client handles
+  MIT's `KDC_ERR_MORE_PREAUTH_DATA_REQUIRED` challenge round. P-256/P-384/
+  P-521 groups are intentionally not advertised. Live MIT client-to-Go KDC
+  and Go client-to-MIT KDC gates cover the SPAKE exchange.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,

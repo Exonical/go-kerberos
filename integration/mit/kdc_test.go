@@ -32,10 +32,18 @@ type goKDC struct {
 }
 
 func startGoKDC(t *testing.T) *goKDC {
-	return startGoKDCWithPolicy(t, nil)
+	return startGoKDCWithOptions(t, nil, false)
 }
 
 func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
+	return startGoKDCWithOptions(t, policy, false)
+}
+
+func startGoSPAKEKDC(t *testing.T) *goKDC {
+	return startGoKDCWithOptions(t, nil, true)
+}
+
+func startGoKDCWithOptions(t *testing.T, policy *kdb.PolicyRecord, enableSPAKE bool) *goKDC {
 	t.Helper()
 	db := kdb.NewDatabase(goKDCRealm)
 	for _, item := range []struct{ name, password string }{
@@ -78,6 +86,7 @@ func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
 		ClockSkew:        5 * time.Minute,
 		MaxTicketLife:    10 * time.Hour,
 		MaxRenewableLife: 24 * time.Hour,
+		EnableSPAKE:      enableSPAKE,
 	}
 	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
@@ -110,13 +119,19 @@ func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
     dns_lookup_kdc = false
     dns_lookup_realm = false
     rdns = false
+%s
 
 [realms]
     %s = {
         kdc = 127.0.0.1:%d
         kdc = tcp/127.0.0.1:%d
     }
-`, goKDCRealm, goKDCRealm, udpPort, tcpPort)
+`, goKDCRealm, func() string {
+		if enableSPAKE {
+			return "    spake_preauth_groups = edwards25519\n"
+		}
+		return ""
+	}(), goKDCRealm, udpPort, tcpPort)
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		udpConn.Close()
 		tcpListener.Close()
@@ -220,6 +235,24 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	t.Logf("MIT klist -e output:\n%s", full)
 	if !strings.Contains(full, "host/service.test@"+goKDCRealm) {
 		t.Fatalf("klist -e does not show service ticket:\n%s", full)
+	}
+}
+
+func TestMITClientSPAKEAgainstGoKDC(t *testing.T) {
+	k := startGoSPAKEKDC(t)
+	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")
+	if err != nil {
+		t.Fatalf("MIT SPAKE kinit failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "Sending SPAKE response") {
+		t.Fatalf("MIT trace does not show SPAKE response:\n%s", output)
+	}
+	if strings.Contains(output, "Sending encrypted timestamp") {
+		t.Fatalf("MIT trace fell back to encrypted timestamp:\n%s", output)
+	}
+	klist := k.run(t, "", "/usr/bin/klist")
+	if !strings.Contains(klist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
+		t.Fatalf("SPAKE kinit did not obtain a TGT:\n%s", klist)
 	}
 }
 

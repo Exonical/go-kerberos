@@ -46,6 +46,7 @@ const (
 	kdcErrSPrincipal       = 7
 	kdcErrPreauthFailed    = 24
 	kdcErrPreauthRequired  = 25
+	kdcErrMorePreauth      = 91
 	kdcErrGeneric          = 60
 	kdcErrBadOption        = 13
 	kdcErrPolicy           = 12
@@ -108,6 +109,10 @@ type Server struct {
 	// MaxUDPWorkers bounds concurrent UDP request handlers. Zero uses a
 	// Go-side default of 1024; MIT processes datagrams serially.
 	MaxUDPWorkers int
+	// EnableSPAKE advertises PA-SPAKE in the initial PREAUTH_REQUIRED
+	// method data. MIT sends an empty PA-SPAKE hint unless an optimistic
+	// challenge is configured; the default is disabled.
+	EnableSPAKE bool
 
 	replayMu       sync.Mutex
 	replays        map[string]time.Time
@@ -404,6 +409,21 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(14, request.ReqBody.SName)
 	}
+	if s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
+		pkinitPA == nil && !s.DisablePreauth {
+		methodData := protocol.MethodData{
+			{PADataType: paSPAKE},
+		}
+		if clientKey.Enctype != 0 {
+			methodData = append(methodData, protocol.PAData{PADataType: 19, PADataValue: marshalDER(protocol.ETypeInfo2{{
+				EType: etypeID, Salt: stringPointer(principalSalt(clientKey, clientName)),
+			}})})
+		}
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+	}
 	if supportsSPAKEGroup(spakePA, spake.GroupEdwards25519) &&
 		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
@@ -444,7 +464,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
-		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+		return s.errorResponseWithData(kdcErrMorePreauth, request.ReqBody.SName, marshalDER(methodData))
 	}
 	if spakePA != nil {
 		msg, err := spake.Decode(spakePA.PADataValue)
