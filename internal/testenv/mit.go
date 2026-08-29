@@ -51,28 +51,34 @@ type Realm struct {
 
 // Start creates and starts an MIT realm entirely below t.TempDir.
 func Start(t *testing.T) *Realm {
-	return start(t, "", false, false)
+	return start(t, "", false, "")
 }
 
 // StartWithSPAKE creates and starts an MIT realm with SPAKE enabled for the
 // client and KDC.
 func StartWithSPAKE(t *testing.T) *Realm {
-	return start(t, "", false, true)
+	return start(t, "", false, "edwards25519")
+}
+
+// StartWithSPAKEGroup creates and starts an MIT realm with the requested
+// SPAKE group enabled for the client and KDC.
+func StartWithSPAKEGroup(t *testing.T, group string) *Realm {
+	return start(t, "", false, group)
 }
 
 // StartWithMasterEType creates and starts an MIT realm with the requested
 // database master-key enctype.
 func StartWithMasterEType(t *testing.T, enctype string) *Realm {
-	return start(t, enctype, false, false)
+	return start(t, enctype, false, "")
 }
 
 // StartWithIPROP creates and starts an MIT realm with incremental propagation
 // enabled on kadmind.
 func StartWithIPROP(t *testing.T) *Realm {
-	return start(t, "", true, false)
+	return start(t, "", true, "")
 }
 
-func start(t *testing.T, masterEType string, iprop, spake bool) *Realm {
+func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -126,8 +132,8 @@ func start(t *testing.T, masterEType string, iprop, spake bool) *Realm {
   kpasswd_port = %d
  }
 `, RealmName, func() string {
-		if spake {
-			return " spake_preauth_groups = edwards25519\n"
+		if spakeGroup != "" {
+			return " spake_preauth_groups = " + spakeGroup + "\n"
 		}
 		return ""
 	}(), RealmName, port, adminPort, kpasswdPort))
@@ -147,8 +153,8 @@ func start(t *testing.T, masterEType string, iprop, spake bool) *Realm {
 %s
  }
 `, port, port, RealmName, func() string {
-		if spake {
-			return "  spake_preauth_groups = edwards25519\n"
+		if spakeGroup != "" {
+			return "  spake_preauth_groups = " + spakeGroup + "\n"
 		}
 		return ""
 	}(), dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig))

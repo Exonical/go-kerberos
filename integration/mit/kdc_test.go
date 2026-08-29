@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdc"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -40,10 +41,17 @@ func startGoKDCWithPolicy(t *testing.T, policy *kdb.PolicyRecord) *goKDC {
 }
 
 func startGoSPAKEKDC(t *testing.T) *goKDC {
-	return startGoKDCWithOptions(t, nil, true)
+	return startGoKDCWithGroup(t, nil, "edwards25519", spake.GroupEdwards25519)
 }
 
 func startGoKDCWithOptions(t *testing.T, policy *kdb.PolicyRecord, enableSPAKE bool) *goKDC {
+	if enableSPAKE {
+		return startGoKDCWithGroup(t, policy, "edwards25519", spake.GroupEdwards25519)
+	}
+	return startGoKDCWithGroup(t, policy, "", 0)
+}
+
+func startGoKDCWithGroup(t *testing.T, policy *kdb.PolicyRecord, groupName string, group int32) *goKDC {
 	t.Helper()
 	db := kdb.NewDatabase(goKDCRealm)
 	for _, item := range []struct{ name, password string }{
@@ -86,7 +94,8 @@ func startGoKDCWithOptions(t *testing.T, policy *kdb.PolicyRecord, enableSPAKE b
 		ClockSkew:        5 * time.Minute,
 		MaxTicketLife:    10 * time.Hour,
 		MaxRenewableLife: 24 * time.Hour,
-		EnableSPAKE:      enableSPAKE,
+		EnableSPAKE:      groupName != "",
+		SPAKEGroups:      []int32{group},
 	}
 	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
@@ -128,12 +137,12 @@ func startGoKDCWithOptions(t *testing.T, policy *kdb.PolicyRecord, enableSPAKE b
         kdc = tcp/127.0.0.1:%d
     }
 	`, goKDCRealm, func() string {
-		if enableSPAKE {
-			return "    spake_preauth_groups = edwards25519\n"
+		if groupName != "" {
+			return "    spake_preauth_groups = " + groupName + "\n"
 		}
 		return ""
 	}(), func() string {
-		if enableSPAKE {
+		if groupName != "" {
 			return "    preferred_preauth_types = 151\n"
 		}
 		return ""
@@ -259,6 +268,24 @@ func TestMITClientSPAKEAgainstGoKDC(t *testing.T) {
 	klist := k.run(t, "", "/usr/bin/klist")
 	if !strings.Contains(klist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
 		t.Fatalf("SPAKE kinit did not obtain a TGT:\n%s", klist)
+	}
+}
+
+func TestMITClientP256SPAKEAgainstGoKDC(t *testing.T) {
+	k := startGoKDCWithGroup(t, nil, "P-256", spake.GroupP256)
+	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")
+	if err != nil {
+		t.Fatalf("MIT P-256 SPAKE kinit failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "Sending SPAKE response") {
+		t.Fatalf("MIT trace does not show P-256 SPAKE response:\n%s", output)
+	}
+	if strings.Contains(output, "Sending encrypted timestamp") {
+		t.Fatalf("MIT trace fell back to encrypted timestamp:\n%s", output)
+	}
+	klist := k.run(t, "", "/usr/bin/klist")
+	if !strings.Contains(klist, "krbtgt/"+goKDCRealm+"@"+goKDCRealm) {
+		t.Fatalf("P-256 SPAKE kinit did not obtain a TGT:\n%s", klist)
 	}
 }
 

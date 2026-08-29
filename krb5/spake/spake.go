@@ -1,4 +1,4 @@
-// Package spake implements the Edwards25519 PA-SPAKE mechanism.
+// Package spake implements the PA-SPAKE mechanism.
 package spake
 
 import (
@@ -16,6 +16,9 @@ import (
 
 const (
 	GroupEdwards25519 int32  = 1
+	GroupP256         int32  = 2
+	GroupP384         int32  = 3
+	GroupP521         int32  = 4
 	FactorNone        int32  = 1
 	KeyUsage          uint32 = 65
 )
@@ -44,10 +47,27 @@ func mustPoint(data []byte) *edwards25519.Point {
 }
 
 func checkGroup(group int32) error {
-	if group != GroupEdwards25519 {
+	if group == GroupEdwards25519 {
+		return nil
+	}
+	_, ok := nistGroupDefs[group]
+	if !ok {
 		return fmt.Errorf("SPAKE group %d is unsupported", group)
 	}
 	return nil
+}
+
+// GroupInfo returns the group's name, scalar width, element width, and hash
+// width.
+func GroupInfo(group int32) (name string, multLen, elemLen, hashLen int, err error) {
+	if group == GroupEdwards25519 {
+		return "edwards25519", 32, 32, sha256.Size, nil
+	}
+	def, ok := nistGroupDefs[group]
+	if !ok {
+		return "", 0, 0, 0, fmt.Errorf("SPAKE group %d is unsupported", group)
+	}
+	return def.name, def.multLen, def.elemLen, def.hashLen, nil
 }
 
 // DeriveW derives the SPAKE multiplier from the initial reply key.
@@ -58,7 +78,10 @@ func DeriveW(etype crypto.EType, initialKey []byte, group int32) ([]byte, error)
 	input := make([]byte, len("SPAKEsecret")+4)
 	copy(input, "SPAKEsecret")
 	binary.BigEndian.PutUint32(input[len("SPAKEsecret"):], uint32(group))
-	return prfPlus(etype, initialKey, input, 32)
+	if group == GroupEdwards25519 {
+		return prfPlus(etype, initialKey, input, 32)
+	}
+	return prfPlus(etype, initialKey, input, nistGroupDefs[group].multLen)
 }
 
 func prfPlus(etype crypto.EType, key, input []byte, size int) ([]byte, error) {
@@ -96,6 +119,9 @@ func KeygenWithPrivate(group int32, w, private []byte, useM bool) ([]byte, error
 	if err := checkGroup(group); err != nil {
 		return nil, err
 	}
+	if group != GroupEdwards25519 {
+		return nistKeygen(nistGroupDefs[group], w, private, useM)
+	}
 	s, err := scalar(private)
 	if err != nil {
 		return nil, err
@@ -109,9 +135,21 @@ func Keygen(group int32, w []byte, useM bool) (private, public []byte, err error
 	if err = checkGroup(group); err != nil {
 		return nil, nil, err
 	}
-	private = make([]byte, 32)
+	privateLen := 32
+	if group != GroupEdwards25519 {
+		privateLen = nistGroupDefs[group].multLen
+	}
+	private = make([]byte, privateLen)
 	if _, err = io.ReadFull(crypto.RandomSource, private); err != nil {
 		return nil, nil, err
+	}
+	if group != GroupEdwards25519 {
+		public, err = nistKeygen(nistGroupDefs[group], w, private, useM)
+		if err != nil {
+			return nil, nil, err
+		}
+		private, err = nistScalar(nistGroupDefs[group], private)
+		return private, public, err
 	}
 	s, err := scalar(private)
 	if err != nil {
@@ -146,6 +184,9 @@ func Result(group int32, w, private, peer []byte, useM bool) ([]byte, error) {
 	if err := checkGroup(group); err != nil {
 		return nil, err
 	}
+	if group != GroupEdwards25519 {
+		return nistResult(nistGroupDefs[group], w, private, peer, useM)
+	}
 	our, err := scalar(private)
 	if err != nil {
 		return nil, err
@@ -174,10 +215,29 @@ func Result(group int32, w, private, peer []byte, useM bool) ([]byte, error) {
 
 // Transcript updates the SHA-256 transcript hash as specified by PA-SPAKE.
 func Transcript(previous, data1, data2 []byte) []byte {
-	if len(previous) == 0 {
-		previous = make([]byte, sha256.Size)
+	return TranscriptForGroup(GroupEdwards25519, previous, data1, data2)
+}
+
+// TranscriptForGroup updates the transcript hash using the group's hash.
+func TranscriptForGroup(group int32, previous, data1, data2 []byte) []byte {
+	if group == GroupEdwards25519 {
+		if len(previous) == 0 {
+			previous = make([]byte, sha256.Size)
+		}
+		h := sha256.New()
+		_, _ = h.Write(previous)
+		_, _ = h.Write(data1)
+		_, _ = h.Write(data2)
+		return h.Sum(nil)
 	}
-	h := sha256.New()
+	def, ok := nistGroupDefs[group]
+	if !ok {
+		return nil
+	}
+	if len(previous) == 0 {
+		previous = make([]byte, def.hashLen)
+	}
+	h := def.newHash()
 	_, _ = h.Write(previous)
 	_, _ = h.Write(data1)
 	_, _ = h.Write(data2)
@@ -207,8 +267,23 @@ func DeriveKey(etype crypto.EType, initialKey, w, result, transcript, derReq []b
 	seedInput = append(seedInput, derReq...)
 	seedInput = append(seedInput, nBytes[:]...)
 	seedInput = append(seedInput, 1)
-	digest := sha256.Sum256(seedInput)
-	seed := digest[:etype.KeySize()]
+	var seed []byte
+	if group == GroupEdwards25519 {
+		digest := sha256.Sum256(seedInput)
+		seed = digest[:]
+	} else {
+		def, ok := nistGroupDefs[group]
+		if !ok {
+			return nil, fmt.Errorf("SPAKE group %d is unsupported", group)
+		}
+		digest := def.newHash()
+		_, _ = digest.Write(seedInput)
+		seed = digest.Sum(nil)
+	}
+	if len(seed) < etype.KeySize() {
+		return nil, fmt.Errorf("SPAKE hash output is shorter than key")
+	}
+	seed = seed[:etype.KeySize()]
 	hkey := append([]byte(nil), seed...)
 	return crypto.CF2(etype, initialKey, hkey, []byte("SPAKE"), []byte("keyderiv"))
 }

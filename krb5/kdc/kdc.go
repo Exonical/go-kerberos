@@ -114,6 +114,10 @@ type Server struct {
 	// method data. MIT sends an empty PA-SPAKE hint unless an optimistic
 	// challenge is configured; the default is disabled.
 	EnableSPAKE bool
+	// SPAKEGroups lists the groups permitted for PA-SPAKE. An empty list
+	// preserves MIT's default KDC configuration: SPAKE is disabled until
+	// explicitly enabled, and when enabled only edwards25519 is permitted.
+	SPAKEGroups []int32
 
 	replayMu       sync.Mutex
 	replays        map[string]time.Time
@@ -426,11 +430,12 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
-	if supportsSPAKEGroup(spakePA, spake.GroupEdwards25519) &&
+	selectedSPAKEGroup := s.selectSPAKEGroup(spakePA)
+	if selectedSPAKEGroup != 0 &&
 		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
 			{PADataType: paSPAKE, PADataValue: marshalDER(protocol.PASPAKE{
-				Support: &protocol.SPAKESupport{Groups: []int32{spake.GroupEdwards25519}},
+				Support: &protocol.SPAKESupport{Groups: s.spakeGroups()},
 			})},
 		}
 		if clientKey.Enctype != 0 {
@@ -444,21 +449,21 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		w, err := spake.DeriveW(etype, clientKey.Key, spake.GroupEdwards25519)
+		w, err := spake.DeriveW(etype, clientKey.Key, selectedSPAKEGroup)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		private, public, err := spake.Keygen(spake.GroupEdwards25519, w, true)
+		private, public, err := spake.Keygen(selectedSPAKEGroup, w, true)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		challenge, err := spake.EncodeChallenge(spake.GroupEdwards25519, public)
+		challenge, err := spake.EncodeChallenge(selectedSPAKEGroup, public)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		methodData[0].PADataValue = challenge
-		cookie, err := s.makeSPAKECookie(spake.GroupEdwards25519, private,
-			spake.Transcript(nil, spakePA.PADataValue, challenge))
+		cookie, err := s.makeSPAKECookie(selectedSPAKEGroup, private,
+			spake.TranscriptForGroup(selectedSPAKEGroup, nil, spakePA.PADataValue, challenge))
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
@@ -472,7 +477,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		msg, err := spake.Decode(spakePA.PADataValue)
 		cookiePA := findPA(request.PAData, paFXCookie)
 		group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
-		if err != nil || msg.Response == nil || !okCookie || group != spake.GroupEdwards25519 {
+		if err != nil || msg.Response == nil || !okCookie || !s.permitsSPAKEGroup(group) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		etype, err := crypto.NewRegistry().Get(etypeID)
@@ -483,7 +488,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		transcript = spake.Transcript(transcript, msg.Response.PubKey, nil)
+		transcript = spake.TranscriptForGroup(group, transcript, msg.Response.PubKey, nil)
 		result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -1951,6 +1956,40 @@ func supportsSPAKEGroup(pa *protocol.PAData, group int32) bool {
 	return false
 }
 
+func (s *Server) spakeGroups() []int32 {
+	if len(s.SPAKEGroups) == 0 {
+		return []int32{spake.GroupEdwards25519}
+	}
+	return append([]int32(nil), s.SPAKEGroups...)
+}
+
+func (s *Server) permitsSPAKEGroup(group int32) bool {
+	for _, permitted := range s.spakeGroups() {
+		if permitted == group {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) selectSPAKEGroup(pa *protocol.PAData) int32 {
+	if !isSPAKESupport(pa) {
+		return 0
+	}
+	var msg protocol.PASPAKE
+	if err := asn1.Unmarshal(pa.PADataValue, &msg); err != nil || msg.Support == nil {
+		return 0
+	}
+	for _, offered := range msg.Support.Groups {
+		if s.permitsSPAKEGroup(offered) {
+			if _, _, _, _, err := spake.GroupInfo(offered); err == nil {
+				return offered
+			}
+		}
+	}
+	return 0
+}
+
 func (s *Server) spakeKey() ([]byte, error) {
 	s.spakeCookieMu.Lock()
 	defer s.spakeCookieMu.Unlock()
@@ -1965,10 +2004,11 @@ func (s *Server) spakeKey() ([]byte, error) {
 }
 
 func (s *Server) makeSPAKECookie(group int32, private, transcript []byte) ([]byte, error) {
-	if len(private) != 32 || len(transcript) == 0 {
+	_, privateLen, _, _, err := spake.GroupInfo(group)
+	if err != nil || len(private) != privateLen || len(transcript) == 0 {
 		return nil, fmt.Errorf("invalid SPAKE cookie state")
 	}
-	data := make([]byte, 0, 2+2+8+4+4+32+4+len(transcript))
+	data := make([]byte, 0, 2+2+8+4+4+privateLen+4+len(transcript))
 	var b2 [2]byte
 	binary.BigEndian.PutUint16(b2[:], 1)
 	data = append(data, b2[:]...)
@@ -1996,7 +2036,7 @@ func (s *Server) makeSPAKECookie(group int32, private, transcript []byte) ([]byt
 }
 
 func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, bool) {
-	if pa == nil || len(pa.PADataValue) < 2+2+8+4+4+32+4+sha256.Size {
+	if pa == nil || len(pa.PADataValue) < 2+2+8+4+4+4+sha256.Size {
 		return 0, nil, nil, false
 	}
 	data := pa.PADataValue
@@ -2015,7 +2055,7 @@ func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, b
 	pos += 2
 	stage := binary.BigEndian.Uint16(data[pos:])
 	pos += 2
-	if version != 1 || stage != 0 || pos+4 > macStart {
+	if version != 1 || stage != 0 || pos+8 > macStart {
 		return 0, nil, nil, false
 	}
 	issuedAt := int64(binary.BigEndian.Uint64(data[pos:]))
@@ -2025,9 +2065,13 @@ func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, b
 	}
 	group := int32(binary.BigEndian.Uint32(data[pos:]))
 	pos += 4
+	_, expectedPrivateLen, _, _, err := spake.GroupInfo(group)
+	if err != nil || pos+4 > macStart {
+		return 0, nil, nil, false
+	}
 	privateLen := int(binary.BigEndian.Uint32(data[pos:]))
 	pos += 4
-	if privateLen != 32 || pos+privateLen+4 > macStart {
+	if privateLen != expectedPrivateLen || pos+privateLen+4 > macStart {
 		return 0, nil, nil, false
 	}
 	private := append([]byte(nil), data[pos:pos+privateLen]...)

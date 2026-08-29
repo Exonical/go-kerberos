@@ -22,6 +22,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -1272,6 +1273,22 @@ func TestASEncryptedTimestampWithSPAKEAdvertisement(t *testing.T) {
 	part := asReplyPart(t, response)
 	if part.Key.KeyType == 0 || len(part.Key.KeyValue) == 0 {
 		t.Fatalf("encrypted-timestamp AS reply has no session key: %#v", part.Key)
+	}
+}
+
+func TestASP256SPAKE(t *testing.T) {
+	now := time.Unix(2000000125, 0).UTC()
+	server, c := testServer(t, now)
+	server.EnableSPAKE = true
+	server.SPAKEGroups = []int32{spake.GroupP256}
+	c.SPAKEGroups = []int32{spake.GroupP256}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	credentials, err := c.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("P-256 SPAKE AS exchange: %v", err)
+	}
+	if credentials == nil || credentials.Key.KeyType == 0 || len(credentials.Key.KeyValue) == 0 {
+		t.Fatalf("P-256 SPAKE AS reply has no session key: %#v", credentials)
 	}
 }
 

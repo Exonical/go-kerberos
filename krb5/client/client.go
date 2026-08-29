@@ -32,6 +32,9 @@ type Client struct {
 	Dialer   transport.Dialer
 	Now      func() time.Time
 	Exchange func(ctx context.Context, realm string, payload []byte) ([]byte, error)
+	// SPAKEGroups controls the PA-SPAKE groups offered by ASExchange. When
+	// empty, only MIT's default edwards25519 group is offered.
+	SPAKEGroups []int32
 	// Canonicalize requests KDC canonicalization and permits the KDC to
 	// return a canonical client principal in an AS-REP.
 	Canonicalize bool
@@ -106,7 +109,11 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 	if err != nil {
 		return nil, fmt.Errorf("AS exchange string-to-key: %w", err)
 	}
-	support, err := spake.EncodeSupport([]int32{spake.GroupEdwards25519})
+	groups := c.SPAKEGroups
+	if len(groups) == 0 {
+		groups = []int32{spake.GroupEdwards25519}
+	}
+	support, err := spake.EncodeSupport(groups)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +165,20 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			if !supportsFactor {
 				return nil, fmt.Errorf("AS exchange SPAKE: challenge has no supported factor")
 			}
+			groups := c.SPAKEGroups
+			if len(groups) == 0 {
+				groups = []int32{spake.GroupEdwards25519}
+			}
+			offered := false
+			for _, group := range groups {
+				if group == msg.Challenge.Group {
+					offered = true
+					break
+				}
+			}
+			if !offered {
+				return nil, fmt.Errorf("AS exchange SPAKE: challenge group %d was not offered", msg.Challenge.Group)
+			}
 			challengeDER := challengePA.PADataValue
 			w, err := spake.DeriveW(etype, key, msg.Challenge.Group)
 			if err != nil {
@@ -171,8 +192,8 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			if err != nil {
 				return nil, err
 			}
-			transcript := spake.Transcript(nil, support, challengeDER)
-			transcript = spake.Transcript(transcript, public, nil)
+			transcript := spake.TranscriptForGroup(msg.Challenge.Group, nil, support, challengeDER)
+			transcript = spake.TranscriptForGroup(msg.Challenge.Group, transcript, public, nil)
 			bodyDER, err := asn1.Marshal(request.ReqBody)
 			if err != nil {
 				return nil, err

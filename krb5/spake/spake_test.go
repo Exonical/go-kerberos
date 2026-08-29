@@ -182,6 +182,15 @@ func TestDERChoices(t *testing.T) {
 	if got := hex.EncodeToString(challenge); got != "a11d301ba003020101a1090407542076616c7565a20930073005a003020101" {
 		t.Fatalf("challenge DER = %s", got)
 	}
+	p256Challenge, err := EncodeChallenge(GroupP256, mustHex(t,
+		"024F62078CEB53840D02612195494D0D0D88DE21FEEB81187C71CBF3D01E71788D"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(p256Challenge); got !=
+		"a1373035a003020102a1230421024f62078ceb53840d02612195494d0d0d88de21feeb81187c71cbf3d01e71788da20930073005a003020101" {
+		t.Fatalf("P-256 challenge DER = %s", got)
+	}
 	encData, err := asn1.Marshal(protocol.PASPAKE{EncData: &protocol.EncryptedData{
 		EType: 0, KVNO: uint32Pointer(5), Cipher: []byte("krbASN.1 test message"),
 	}})
@@ -202,5 +211,128 @@ func TestRejectsUnsupportedGroupAndPoint(t *testing.T) {
 	}
 	if _, err := Result(GroupEdwards25519, make([]byte, 32), make([]byte, 32), make([]byte, 32), false); err == nil {
 		t.Fatal("invalid point accepted")
+	}
+	for _, group := range []int32{GroupP256, GroupP384, GroupP521} {
+		_, multLen, elemLen, _, err := GroupInfo(group)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Result(group, make([]byte, multLen), make([]byte, multLen), make([]byte, elemLen-1), false); err == nil {
+			t.Fatalf("group %d accepted wrong-length point", group)
+		}
+		if _, err := Result(group, make([]byte, multLen), make([]byte, multLen), []byte{0}, false); err == nil {
+			t.Fatalf("group %d accepted identity point", group)
+		}
+		invalid := make([]byte, elemLen)
+		invalid[0] = 2
+		for i := 1; i < len(invalid); i++ {
+			invalid[i] = 0xff
+		}
+		if _, err := Result(group, make([]byte, multLen), make([]byte, multLen), invalid, false); err == nil {
+			t.Fatalf("group %d accepted invalid compressed point", group)
+		}
+	}
+}
+
+func TestMITNISTVectors(t *testing.T) {
+	const body = "3075A00703050000000000A1143012A003020101A10B30091B07726165627572" +
+		"6EA2101B0E415448454E412E4D49542E454455A3233021A003020102A11A3018" +
+		"1B066B72627467741B0E415448454E412E4D49542E454455A511180F31393730" +
+		"303130313030303030305AA703020100A8053003020112"
+	vectors := []struct {
+		name                                                                string
+		group                                                               int32
+		w, x, y, pubX, pubY, result, support, challenge, transcript, k0, k1 string
+	}{
+		{"P-256", GroupP256,
+			"EB2984AF18703F94DD5288B8596CD36988D0D4E83BFB2B44DE14D0E95E2090BD",
+			"935DDD725129FB7C6288E1A5CC45782198A6416D1775336D71EACD0549A3E80E",
+			"E07405EB215663ABC1F254B8ADC0DA7A16FEBAA011AF923D79FDEF7C42930B33",
+			"024F62078CEB53840D02612195494D0D0D88DE21FEEB81187C71CBF3D01E71788D",
+			"021D07DC31266FC7CFD904CE2632111A169B7EC730E5F74A7E79700F86638E13C8",
+			"0268489D7A9983F2FDE69C6E6A1307E9D252259264F5F2DFC32F58CCA19671E79B",
+			"A0093007A0053003020102",
+			"A1373035A003020102A1230421024F62078CEB53840D02612195494D0D0D88DE21FEEB81187C71CBF3D01E71788DA20930073005A003020101",
+			"20AD3C1A9A90FC037D1963A1C4BFB15AB4484D7B6CF07B12D24984F14652DE60",
+			"7D3B906F7BE49932DB22CD3463F032D06C9C078BE4B1D076D201FC6E61EF531E",
+			"17D74E36F8993841FBB7FEB12FA4F011243D3AE4D2ACE55B39379294BBC4DB2C"},
+		{"P-384", GroupP384,
+			"0304CFC55151C6BBE889653DB96DBFE0BA4ACAFC024C1E8840CB3A486F6D80C16E1B8974016AA4B7FA43042A9B3825B1",
+			"F323CA74D344749096FD35D0ADF20806E521460637176E84D977E9933C49D76FCFC6E62585940927468FF53D864A7A50",
+			"5B7C709ACB175A5AFB82860DEABCA8D0B341FACDFF0AC0F1A425799AA905D7507E1EA9C573581A81467437419466E472",
+			"02A1524603EF14F184696F854229D3397507A66C63F841BA748451056BE07879AC298912387B1C5CDFF6381C264701BE57",
+			"020D5ADFDB92BC377041CF5837412574C5D13E0F4739208A4F0C859A0A302BC6A533440A245B9D97A0D34AF5016A20053D",
+			"0264AA8C61DA9600DFB0BEB5E46550D63740E4EF29E73F1A30D543EB43C25499037AD16538586552761B093CF0E37C703A",
+			"A0093007A0053003020103",
+			"A1473045A003020103A133043102A1524603EF14F184696F854229D3397507A66C63F841BA748451056BE07879AC298912387B1C5CDFF6381C264701BE57A20930073005A003020101",
+			"5AC0D99EF9E5A73998797FE64F074673E3952DEC4C7D1AACCE8B75F64D2B0276A901CB8539B4E8ED69E4DB0CE805B47B",
+			"B917D37C16DD1D8567FBE379F64E1EE36CA3FD127AA4E60F97E4AFA3D9E56D91",
+			"93D40079DAB229B9C79366829F4E7E7282E6A4B943AC7BAC69922D516673F49A"},
+		{"P-521", GroupP521,
+			"DE3A095A2B2386EFF3EB15B735398DA1CAF95BC8425665D82370AFF58B0471F34A57BCCDDF1EBF0A2965B58A93EE5B45E85D1A5435D1C8C83662999722D542831F9A",
+			"017C38701A14B490B6081DFC83524562BE7FBB42E0B20426465E3E37952D30BCAB0ED857010255D44936A1515607964A870C7C879B741D878F9F9CDF5A865306F3F5",
+			"003E2E2950656FA231E959ACDD984D125E7FA59CEC98126CBC8F3888447911EBCD49428A1C22D5FDB76A19FBEB1D9EDFA3DA6CF55B158B53031D05D51433ADE9B2B4",
+			"02017D3DE19A3EC53D0174905665EF37947D142535102CD9809C0DFBD0DFE007353D54CF406CE2A59950F2BB540DF6FBE75F8BBBEF811C9BA06CC275ADBD96756696EC",
+			"02004D142D87477841F6BA053C8F651F3395AD264B7405CA5911FB9A55ABD454FEF658A5F9ED97D1EFAC68764E9092FA15B9E0050880D78E95FD03ABF59317916822B5",
+			"03007C303F62F09282CC849490805BD4457A6793A832CBEB55DF427DB6A31E99B055D5DC99756D24D47B70AD8B6015B0FB8742A718462ED423B90FA3FE631AC13FA916",
+			"A0093007A0053003020104",
+			"A1593057A003020104A145044302017D3DE19A3EC53D0174905665EF37947D142535102CD9809C0DFBD0DFE007353D54CF406CE2A59950F2BB540DF6FBE75F8BBBEF811C9BA06CC275ADBD96756696ECA20930073005A003020101",
+			"8D6A89AE4D80CC4E47B6F4E48EA3E57919CC69598D0D3DC7C8BD49B6F1DB1409CA0312944CD964E213ABA98537041102237CFF5B331E5347A0673869B412302E",
+			"1EB3D10BEE8FAB483ADCD3EB38F3EBF1F4FEB8DB96ECC035F563CF2E1115D276",
+			"482B92781CE57F49176E4C94153CC622FE247A7DBE931D1478315F856F085890"},
+	}
+	initial := mustHex(t, "01B897121D933AB44B47EB5494DB15E50EB74530DBDAE9B634D65020FF5D88C1")
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vector := range vectors {
+		t.Run(vector.name, func(t *testing.T) {
+			group := vector.group
+			w, err := DeriveW(etype, initial, group)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := hex.EncodeToString(w); got != hex.EncodeToString(mustHex(t, vector.w)) {
+				t.Fatalf("w = %s", got)
+			}
+			x, y := mustHex(t, vector.x), mustHex(t, vector.y)
+			tPub, err := KeygenWithPrivate(group, w, x, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sPub, err := KeygenWithPrivate(group, w, y, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hex.EncodeToString(tPub) != hex.EncodeToString(mustHex(t, vector.pubX)) ||
+				hex.EncodeToString(sPub) != hex.EncodeToString(mustHex(t, vector.pubY)) {
+				t.Fatalf("public values = %x, %x", tPub, sPub)
+			}
+			result, err := Result(group, w, x, sPub, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hex.EncodeToString(result) != hex.EncodeToString(mustHex(t, vector.result)) {
+				t.Fatalf("result = %x", result)
+			}
+			support := mustHex(t, vector.support)
+			challenge := mustHex(t, vector.challenge)
+			transcript := TranscriptForGroup(group, nil, support, challenge)
+			transcript = TranscriptForGroup(group, transcript, sPub, nil)
+			if hex.EncodeToString(transcript) != hex.EncodeToString(mustHex(t, vector.transcript)) {
+				t.Fatalf("transcript = %x", transcript)
+			}
+			bodyDER := mustHex(t, body)
+			for n, expected := range []string{vector.k0, vector.k1} {
+				key, err := DeriveKey(etype, initial, w, result, transcript, bodyDER, group, uint32(n))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if hex.EncodeToString(key) != hex.EncodeToString(mustHex(t, expected)) {
+					t.Fatalf("K'[%d] = %x", n, key)
+				}
+			}
+		})
 	}
 }

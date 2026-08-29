@@ -10,7 +10,8 @@ disposable integration test environments.
 
 ### Client
 - **AS exchange** with PA-ENC-TIMESTAMP preauthentication (password-based
-  `kinit` equivalent), MIT-compatible PA-SPAKE (Edwards25519 group 1), and
+  `kinit` equivalent), MIT-compatible PA-SPAKE (Edwards25519, P-256, P-384,
+  and P-521), and
   RFC 6113 **FAST** armored exchanges.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
@@ -57,12 +58,15 @@ disposable integration test environments.
   implemented in `krb5/kprop`, including chained AES KRB-PRIV transfer and
   load-before-ack handling.
 - **PA-SPAKE**: the password AS path and Go KDC support padata type 151,
-  Edwards25519 group 1, MIT transcript/key derivation, SF-NONE, and
+  Edwards25519 group 1 plus NIST P-256 (group 2), P-384 (group 3), and P-521
+  (group 4), with MIT transcript/key derivation, SF-NONE, and
   stateless authenticated challenge cookies. The KDC can advertise the
   mechanism in its initial preauthentication hints, and the client handles
-  MIT's `KDC_ERR_MORE_PREAUTH_DATA_REQUIRED` challenge round. P-256/P-384/
-  P-521 groups are intentionally not advertised. Live MIT client-to-Go KDC
-  and Go client-to-MIT KDC gates cover the SPAKE exchange.
+  MIT's `KDC_ERR_MORE_PREAUTH_DATA_REQUIRED` challenge round. Edwards25519
+  remains the default for both client and KDC; groups can be configured for
+  FIPS deployments. Live MIT client-to-Go KDC and Go client-to-MIT KDC gates
+  cover both Edwards25519 and P-256; P-384/P-521 are covered by MIT vector
+  goldens.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
