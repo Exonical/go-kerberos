@@ -43,3 +43,13 @@ func TestUPNDNSInfoBasicGolden(t *testing.T) {
 		t.Fatalf("basic UPN_DNS_INFO = %#v, %v", got, err)
 	}
 }
+
+func TestUPNDNSInfoExtendedRequiresSID(t *testing.T) {
+	_, err := (UPNDNSInfoData{
+		UPN: "alice@example.com", DNSDomainName: "example.com",
+		SAMName: "alice", Flags: UPNDNSInfoHasSAMNameAndSID,
+	}).MarshalBinary()
+	if err == nil || err.Error() != "PAC: extended UPN_DNS_INFO requires a SID" {
+		t.Fatal("extended UPN_DNS_INFO accepted without SID")
+	}
+}
