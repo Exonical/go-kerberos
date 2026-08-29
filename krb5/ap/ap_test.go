@@ -159,6 +159,62 @@ func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 	}
 }
 
+func TestVerifyAPReqReplayIdentityIncludesAuthenticatorCiphertext(t *testing.T) {
+	resetReplayCache()
+	defer resetReplayCache()
+	now := time.Date(2025, 5, 6, 7, 8, 9, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	otherService := principal.Principal{
+		Realm: apRealm, NameType: principal.NTSrvHst,
+		Components: []string{"host", "other.test"},
+	}
+	kt.Entries = append(kt.Entries, keytab.Entry{
+		Principal: otherService, KVNO: 1, Enctype: apEtype,
+		Key: append([]byte(nil), kt.Entries[0].Key...),
+	})
+	other := *creds
+	other.Server = otherService
+	ticket := decodeTicket(t, other.Ticket)
+	ticket.SName = protocol.PrincipalName{
+		NameType: int32(otherService.NameType), NameString: otherService.Components,
+	}
+	other.Ticket = mustMarshalAP(t, ticket)
+	_, first, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := BuildAPReq(&other, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, first, now, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, second, now, 5*time.Minute); err != nil {
+		t.Fatalf("different service AP-REQ rejected as replay: %v", err)
+	}
+	if _, err := VerifyAPReq(kt, first, now, 5*time.Minute); err == nil {
+		t.Fatal("exact AP-REQ replay unexpectedly accepted")
+	}
+}
+
+func TestVerifyAPReqRejectsInvalidTicket(t *testing.T) {
+	now := time.Date(2025, 5, 10, 7, 8, 9, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	ticket := decodeTicket(t, creds.Ticket)
+	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part.Flags |= types.TicketInvalid
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	creds.Ticket = mustMarshalAP(t, ticket)
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketInvalid) {
+		t.Fatalf("VerifyAPReq error = %v, want ErrTicketInvalid", err)
+	}
+}
+
 func TestVerifyAPReqExpiresReplayEntries(t *testing.T) {
 	resetReplayCache()
 	defer resetReplayCache()

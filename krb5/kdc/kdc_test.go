@@ -107,6 +107,24 @@ func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
 	if !samePrincipal(verified.Client, bob) || !samePrincipal(verified.Server, alice) {
 		t.Fatalf("verified U2U AP-REQ = %#v", verified)
 	}
+	if err := db.AddAlias("alice-alias", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	alias := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice-alias"},
+	}
+	aliasCredentials, err := kclient.TGSExchangeU2U(context.Background(), bobTGT, aliceTGT.Ticket, alias)
+	if err != nil {
+		t.Fatalf("TGSExchangeU2U through alias: %v", err)
+	}
+	if !samePrincipal(aliasCredentials.Server, alias) {
+		t.Fatalf("U2U alias server = %v, want %v", aliasCredentials.Server, alias)
+	}
+	if _, err := kclient.TGSExchangeU2U(context.Background(), bobTGT, bobTGT.Ticket, alice); err == nil ||
+		!hasKRBCode(err, kdcErrServerNoMatch) {
+		t.Fatalf("U2U mismatched client error = %v, want KDC_ERR_SERVER_NOMATCH", err)
+	}
 }
 
 func TestServerUserToUserRejectsInvalidSecondTickets(t *testing.T) {
