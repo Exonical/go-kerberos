@@ -934,12 +934,13 @@ func (s *Server) pacPrivsvrKey() (kdb.Key, bool) {
 func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service principal.Principal,
 	headerKey, serviceKey kdb.Key, serviceTicket bool, replaceClient bool) error {
 	return s.issuePACWithOptions(ticketPart, client, service, headerKey, serviceKey,
-		serviceTicket, replaceClient, nil, nil)
+		serviceTicket, replaceClient, nil, nil, nil)
 }
 
 func (s *Server) issuePACWithOptions(ticketPart *protocol.EncTicketPart, client, service principal.Principal,
 	headerKey, serviceKey kdb.Key, serviceTicket bool, replaceClient bool,
-	replacedReplyKey *kdb.Key, delegationEvidence *principal.Principal) error {
+	replacedReplyKey *kdb.Key, delegationEvidence *principal.Principal,
+	pacVerifyKey *kdb.Key) error {
 	if !s.EnablePAC {
 		return nil
 	}
@@ -958,11 +959,15 @@ func (s *Server) issuePACWithOptions(ticketPart *protocol.EncTicketPart, client,
 	if err != nil {
 		return err
 	}
-	headerEType, err := crypto.NewRegistry().Get(headerKey.Enctype)
+	verifyKey := headerKey
+	if pacVerifyKey != nil {
+		verifyKey = *pacVerifyKey
+	}
+	headerEType, err := crypto.NewRegistry().Get(verifyKey.Enctype)
 	if err != nil {
 		return err
 	}
-	headerPACKey := pac.Key{EType: headerEType, Key: headerKey.Key}
+	headerPACKey := pac.Key{EType: headerEType, Key: verifyKey.Key}
 	serviceEType, err := crypto.NewRegistry().Get(serviceKey.Enctype)
 	if err != nil {
 		return err
@@ -1154,7 +1159,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
 	if err := s.issuePACWithOptions(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false,
-		replyEncryptionKey, nil); err != nil {
+		replyEncryptionKey, nil, nil); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketPlain := marshalDER(ticketPart)
@@ -1601,6 +1606,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	var issuedClient *principal.Principal
 	var delegationEvidence *principal.Principal
+	var pacVerifyKey *kdb.Key
 	if s4uUser != nil {
 		if serviceName.String() != requester.String() || options&types.KDCCNameInAddlTkt != 0 {
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
@@ -1668,6 +1674,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		issuedClient = &client
 		evidenceServer := principalFromProtocol(evidence.SName, evidence.Realm)
 		delegationEvidence = &evidenceServer
+		pacVerifyKey = &evidenceKey
 		ticketPart.Flags = evidencePart.Flags
 		if len(evidencePart.AuthorizationData) > 0 {
 			ticketPart.AuthorizationData = evidencePart.AuthorizationData
@@ -1691,7 +1698,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, pacVerifyKey)
 }
 
 func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bool {
@@ -1816,7 +1823,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, pacVerifyKey *kdb.Key) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -1914,7 +1921,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	ticketPart.Flags = flags
 	if err := s.issuePACWithOptions(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
 		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
-		issuedClient != nil, nil, delegationEvidence); err != nil {
+		issuedClient != nil, nil, delegationEvidence, pacVerifyKey); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))

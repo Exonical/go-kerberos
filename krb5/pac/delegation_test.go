@@ -54,6 +54,28 @@ func TestDelegationInfoMITGoldens(t *testing.T) {
 	}
 }
 
+func TestDelegationInfoZeroTransitedServices(t *testing.T) {
+	want := DelegationInfo{ProxyTarget: "host/service.test"}
+	wire, err := want.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseDelegationInfo(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProxyTarget != want.ProxyTarget || len(got.TransitedServices) != 0 {
+		t.Fatalf("decoded = %#v, want %#v", got, want)
+	}
+	encoded, err := got.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, wire) {
+		t.Fatalf("re-encoded zero-service delegation info differs:\n%x\n%x", encoded, wire)
+	}
+}
+
 func removeSpaces(value string) string {
 	out := make([]byte, 0, len(value))
 	for i := 0; i < len(value); i++ {

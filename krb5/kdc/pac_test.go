@@ -202,7 +202,7 @@ func TestPACCredentialsHookUsesReplacedReplyKey(t *testing.T) {
 	}
 	part := protocol.EncTicketPart{AuthTime: types.KerberosTime{Time: now, Present: true}}
 	replyKey := key
-	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, &replyKey, nil); err != nil {
+	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, &replyKey, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -230,7 +230,7 @@ func TestPACCredentialsHookUsesReplacedReplyKey(t *testing.T) {
 	originalAuthData := append(protocol.AuthorizationData(nil), part.AuthorizationData...)
 
 	part = protocol.EncTicketPart{AuthTime: types.KerberosTime{Time: now, Present: true}}
-	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, nil); err != nil {
+	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -269,7 +269,7 @@ func TestPACDelegationInfoUpdateAndCarryOver(t *testing.T) {
 	key := record.Keys[crypto.EnctypeAES256SHA1]
 	evidence := principal.Principal{Realm: "TEST.REALM", Components: []string{"host", "evidence.test"}}
 	part := protocol.EncTicketPart{AuthTime: types.KerberosTime{Time: now, Present: true}}
-	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, &evidence); err != nil {
+	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, &evidence, nil); err != nil {
 		t.Fatal(err)
 	}
 	p, err := pac.FromAuthorizationData(part.AuthorizationData)
@@ -291,7 +291,7 @@ func TestPACDelegationInfoUpdateAndCarryOver(t *testing.T) {
 	firstAuthData := append(protocol.AuthorizationData(nil), part.AuthorizationData...)
 
 	nextEvidence := principal.Principal{Realm: "TEST.REALM", Components: []string{"host", "next.test"}}
-	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, &nextEvidence); err != nil {
+	if err := server.issuePACWithOptions(&part, client, service, key, key, false, false, nil, &nextEvidence, nil); err != nil {
 		t.Fatal(err)
 	}
 	p, err = pac.FromAuthorizationData(part.AuthorizationData)

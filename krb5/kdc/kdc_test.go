@@ -20,6 +20,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/otp"
+	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -510,6 +511,7 @@ func TestServerPrincipalAliases(t *testing.T) {
 func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	now := time.Unix(2000001800, 0).UTC()
 	server, kclient := testServer(t, now)
+	server.EnablePAC = true
 	current := now
 	server.Now = func() time.Time { return current }
 	kclient.Now = func() time.Time { return current }
@@ -618,6 +620,43 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	}
 	if !samePrincipal(proxy.Client, user) || !samePrincipal(proxy.Server, backend) {
 		t.Fatalf("S4U2Proxy credentials = %#v", proxy)
+	}
+	var proxyTicket protocol.Ticket
+	if err := asn1.Unmarshal(proxy.Ticket, &proxyTicket); err != nil {
+		t.Fatal(err)
+	}
+	backendRecord, ok, err := server.DB.Lookup(backend)
+	if err != nil || !ok {
+		t.Fatal("missing backend record")
+	}
+	backendKey, ok := selectKVNO(backendRecord, proxyTicket.EncPart.EType, proxyTicket.EncPart.KVNO)
+	if !ok {
+		t.Fatal("missing backend ticket key")
+	}
+	backendEType, err := crypto.NewRegistry().Get(backendKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyPlain, err := backendEType.Decrypt(backendKey.Key, 2, proxyTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proxyPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(proxyPlain, &proxyPart); err != nil {
+		t.Fatal(err)
+	}
+	privKey, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pac.FromTicket(proxyPart,
+		pac.Key{EType: backendEType, Key: backendKey.Key},
+		&pac.Key{EType: privEType, Key: privKey.Key}); err != nil {
+		t.Fatalf("S4U2Proxy PAC verification: %v", err)
 	}
 	disallowed := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "other.test"}}
 	if err := db.AddPrincipal("host/other.test", "other-password", 1); err != nil {
