@@ -50,6 +50,7 @@ var kerberosOldOID = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01
 type Initiator struct {
 	creds         *client.Credentials
 	tgt           *client.Credentials
+	forwarded     *client.Credentials
 	delegationKDC *client.Client
 	flags         uint32
 	state         *ap.APReq
@@ -82,7 +83,8 @@ func NewInitiator(creds *client.Credentials, flags uint32) (*Initiator, error) {
 
 // NewInitiatorWithDelegation creates an initiator which requests credential
 // delegation using tgt. SetDelegationClient must be called before creating
-// the initial token unless the caller supplies a forwarded credential itself.
+// the initial token, unless SetForwardedCredential supplies the forwarded
+// credential directly.
 func NewInitiatorWithDelegation(creds, tgt *client.Credentials, flags uint32) (*Initiator, error) {
 	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
 		return nil, fmt.Errorf("GSS initiator: incomplete delegation TGT")
@@ -113,6 +115,22 @@ func (i *Initiator) SetDelegationClient(kclient *client.Client) {
 	}
 }
 
+// SetForwardedCredential supplies a pre-obtained forwarded TGT for delegation.
+// When set, the initiator does not perform a forwarded-TGT exchange.
+func (i *Initiator) SetForwardedCredential(cred *client.Credentials) error {
+	if i == nil {
+		return fmt.Errorf("GSS delegation: nil initiator")
+	}
+	if cred == nil || len(cred.Ticket) == 0 || len(cred.Key.KeyValue) == 0 {
+		return fmt.Errorf("GSS delegation: incomplete forwarded credential")
+	}
+	if cred.Flags&types.TicketForwarded == 0 {
+		return fmt.Errorf("GSS delegation: credential is not forwarded")
+	}
+	i.forwarded = cred
+	return nil
+}
+
 // NewAcceptor creates an acceptor backed by a service keytab.
 func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 	return &Acceptor{keytab: kt}
@@ -120,12 +138,25 @@ func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 
 // InitialToken creates the RFC 2743 initial context token.
 func (i *Initiator) InitialToken(now time.Time) ([]byte, error) {
-	return i.initialToken(now, false, nil)
+	return i.InitialTokenContext(context.Background(), now)
+}
+
+// InitialTokenContext creates the RFC 2743 initial context token using ctx
+// for any KDC exchange needed to obtain delegated credentials.
+func (i *Initiator) InitialTokenContext(ctx context.Context, now time.Time) ([]byte, error) {
+	return i.initialToken(ctx, now, false, nil)
 }
 
 // InitialTokenWithChannelBindings creates an initial token bound to the
 // supplied initiator and acceptor IPv4 address bytes.
 func (i *Initiator) InitialTokenWithChannelBindings(now time.Time, initiatorAddress, acceptorAddress []byte) ([]byte, error) {
+	return i.InitialTokenWithChannelBindingsContext(context.Background(), now, initiatorAddress, acceptorAddress)
+}
+
+// InitialTokenWithChannelBindingsContext creates a channel-bound initial
+// token using ctx for any KDC exchange needed to obtain delegated
+// credentials.
+func (i *Initiator) InitialTokenWithChannelBindingsContext(ctx context.Context, now time.Time, initiatorAddress, acceptorAddress []byte) ([]byte, error) {
 	var binding bytes.Buffer
 	var addressType [4]byte
 	binary.LittleEndian.PutUint32(addressType[:], 2)
@@ -142,12 +173,18 @@ func (i *Initiator) InitialTokenWithChannelBindings(now time.Time, initiatorAddr
 	var zero [4]byte
 	binding.Write(zero[:])
 	sum := md5.Sum(binding.Bytes())
-	return i.initialToken(now, false, sum[:])
+	return i.initialToken(ctx, now, false, sum[:])
 }
 
-func (i *Initiator) initialToken(now time.Time, legacy bool, channelBindings []byte) ([]byte, error) {
+func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool, channelBindings []byte) ([]byte, error) {
 	if i == nil || i.creds == nil {
 		return nil, fmt.Errorf("GSS initiator: incomplete context")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("GSS initial token: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("GSS initial token: %w", err)
 	}
 	checksumData := make([]byte, 24)
 	binary.LittleEndian.PutUint32(checksumData, 16)
@@ -159,12 +196,19 @@ func (i *Initiator) initialToken(now time.Time, legacy bool, channelBindings []b
 	}
 	binary.LittleEndian.PutUint32(checksumData[20:], i.flags)
 	if i.flags&GSSDelegFlag != 0 {
-		if i.tgt == nil || i.delegationKDC == nil {
-			return nil, fmt.Errorf("GSS delegation: no KDC client or TGT")
+		forwarded := i.forwarded
+		if forwarded == nil {
+			if i.tgt == nil || i.delegationKDC == nil {
+				return nil, fmt.Errorf("GSS delegation: no KDC client or TGT")
+			}
+			var err error
+			forwarded, err = i.delegationKDC.TGSExchangeForwarded(ctx, i.tgt)
+			if err != nil {
+				return nil, fmt.Errorf("GSS delegation forwarded TGT: %w", err)
+			}
 		}
-		forwarded, err := i.delegationKDC.TGSExchangeForwarded(context.Background(), i.tgt)
-		if err != nil {
-			return nil, fmt.Errorf("GSS delegation forwarded TGT: %w", err)
+		if forwarded == nil {
+			return nil, fmt.Errorf("GSS delegation: no KDC client or TGT")
 		}
 		delegated, err := MarshalKRBCred([]*client.Credentials{forwarded}, &i.creds.Key, krbCredEncPartUsage)
 		if err != nil {

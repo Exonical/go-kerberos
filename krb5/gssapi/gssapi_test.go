@@ -143,12 +143,66 @@ func TestDelegatedCredentialsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	acceptor := NewAcceptor(kt)
-	context, _, _, err := acceptor.accept(token, now)
+	acceptedContext, _, _, err := acceptor.accept(token, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if context == nil || len(context.DelegatedCredentials) != 1 {
-		t.Fatalf("delegated credentials = %#v", context)
+	if acceptedContext == nil || len(acceptedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("delegated credentials = %#v", acceptedContext)
+	}
+
+	preobtained, err := kclient.TGSExchangeForwarded(context.Background(), &tgt)
+	if err != nil {
+		t.Fatalf("pre-obtain forwarded TGT: %v", err)
+	}
+	preobtainedInitiator, err := NewInitiatorWithDelegation(creds, &tgt, GSSDelegFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := preobtainedInitiator.SetForwardedCredential(preobtained); err != nil {
+		t.Fatalf("SetForwardedCredential: %v", err)
+	}
+	preobtainedToken, err := preobtainedInitiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("pre-obtained InitialToken: %v", err)
+	}
+	if preobtainedContext, _, _, err := acceptor.accept(preobtainedToken, now); err != nil ||
+		preobtainedContext == nil || len(preobtainedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("pre-obtained delegated credentials = %#v, %v", preobtainedContext, err)
+	}
+}
+
+func TestDelegationInitialTokenContextCancellation(t *testing.T) {
+	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	tgt := *creds
+	tgt.Server = principal.Principal{
+		Realm: creds.Client.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", creds.Client.Realm},
+	}
+	calls := 0
+	kclient := &client.Client{
+		Exchange: func(context.Context, string, []byte) ([]byte, error) {
+			calls++
+			return nil, errors.New("unexpected KDC exchange")
+		},
+	}
+	initiator, err := NewInitiatorWithDelegationClient(creds, &tgt, kclient, GSSDelegFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.SetForwardedCredential(creds); err == nil {
+		t.Fatal("non-forwarded credential unexpectedly accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := initiator.InitialTokenContext(ctx, time.Unix(1700000000, 0).UTC()); err == nil {
+		t.Fatal("canceled delegation context unexpectedly succeeded")
+	}
+	if calls != 0 {
+		t.Fatalf("KDC exchange calls = %d, want 0", calls)
+	}
+	if _, err := kclient.TGSExchangeForwarded(ctx, &tgt); err == nil {
+		t.Fatal("canceled forwarded exchange unexpectedly succeeded")
 	}
 }
 

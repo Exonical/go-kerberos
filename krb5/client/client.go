@@ -808,6 +808,9 @@ func (c *Client) TGSExchangeForwarded(ctx context.Context, tgt *Credentials) (*C
 	if ctx == nil {
 		return nil, fmt.Errorf("forwarded TGS exchange: nil context")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("forwarded TGS exchange: %w", err)
+	}
 	if tgt == nil || len(tgt.Ticket) == 0 || len(tgt.Key.KeyValue) == 0 {
 		return nil, fmt.Errorf("forwarded TGS exchange: incomplete TGT")
 	}
