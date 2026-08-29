@@ -61,6 +61,13 @@ func TestServerAnonymousPKINITASExchange(t *testing.T) {
 		credentials.Flags&types.TicketAnonymous == 0 {
 		t.Fatalf("anonymous credentials = %+v", credentials)
 	}
+	service := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"host", "service.test"},
+	}
+	if _, err := kclient.TGSExchange(context.Background(), credentials, service); err != nil {
+		t.Fatalf("anonymous TGS exchange: %v", err)
+	}
 }
 
 func TestServerAnonymousRequiresPKINIT(t *testing.T) {

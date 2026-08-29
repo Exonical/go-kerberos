@@ -229,7 +229,7 @@ func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
 }
 
 func TestMITClientAnonymousPKINITAgainstGoKDC(t *testing.T) {
-	for _, name := range []string{"/usr/bin/openssl", "/usr/bin/kinit", "/usr/bin/klist"} {
+	for _, name := range []string{"/usr/bin/openssl", "/usr/bin/kinit", "/usr/bin/klist", "/usr/bin/kvno"} {
 		if _, err := os.Stat(name); err != nil {
 			t.Skipf("anonymous PKINIT harness skipped: missing %s", name)
 		}
@@ -283,6 +283,14 @@ func TestMITClientAnonymousPKINITAgainstGoKDC(t *testing.T) {
 	listing := realm.run(t, "", "/usr/bin/klist", "-e", "-c", cache)
 	if !strings.Contains(strings.ToUpper(listing), "ANONYMOUS") {
 		t.Fatalf("MIT anonymous klist missing ANONYMOUS:\n%s", listing)
+	}
+	if output, err := runPK(append(os.Environ(),
+		"KRB5_CONFIG="+conf, "KRB5CCNAME="+cache,
+	), "", "/usr/bin/kvno", "host/service.test"); err != nil ||
+		!strings.Contains(
+			output, "host/service.test@"+goKDCRealm,
+		) {
+		t.Fatalf("MIT anonymous kvno missing service ticket:\n%s", output)
 	}
 }
 

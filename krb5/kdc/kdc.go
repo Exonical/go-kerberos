@@ -833,6 +833,16 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	if renewTill != nil {
 		flags |= types.TicketRenewable
 	}
+	var contributionKey []byte
+	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 &&
+		replyEncryptionKey != nil {
+		contributionKey = append([]byte(nil), sessionValue...)
+		sessionValue, err = crypto.CF2(etype, contributionKey, replyEncryptionKey.Key,
+			[]byte("PKINIT"), []byte("KEYEXCHANGE"))
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+	}
 	ticketPart := protocol.EncTicketPart{
 		Flags:    flags,
 		Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
@@ -853,12 +863,6 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	}
 	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 &&
 		replyEncryptionKey != nil {
-		contributionKey := append([]byte(nil), sessionValue...)
-		sessionValue, err = crypto.CF2(etype, contributionKey, replyEncryptionKey.Key,
-			[]byte("PKINIT"), []byte("KEYEXCHANGE"))
-		if err != nil {
-			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
-		}
 		encodedKey := marshalDER(protocol.EncryptionKey{
 			KeyType: etypeID, KeyValue: contributionKey,
 		})

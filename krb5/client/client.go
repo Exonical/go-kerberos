@@ -1384,7 +1384,26 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err := verifyAnonymousReplyKX(reply, replyKey); err != nil {
 		return nil, err
 	}
-	return c.decodeASRepForService(response, anon, service, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
+	credentials, err := c.decodeASRepForService(
+		response, anon, service, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireAnonymousTicketFlag(credentials); err != nil {
+		return nil, err
+	}
+	return credentials, nil
+}
+
+func requireAnonymousTicketFlag(credentials *Credentials) error {
+	if credentials == nil || credentials.Flags&types.TicketAnonymous == 0 {
+		return fmt.Errorf(
+			"anonymous PKINIT: AS-REP lacks anonymous ticket flag: %w",
+			krberrors.ErrIntegrity,
+		)
+	}
+	return nil
 }
 
 const (
