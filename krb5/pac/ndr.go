@@ -44,9 +44,12 @@ type LogonInfo struct {
 	SidCount                                            uint32
 	ExtraSIDs                                           []SIDAndAttributes
 	ResourceGroupDomainSID                              *SID
-	ResourceGroupCount                                  uint32
-	ResourceGroupIDs                                    []GroupMembership
-	Reserved1                                           [2]uint32
+	// ResourceGroupCount is retained for decoded compatibility. MarshalBinary
+	// derives the wire count from ResourceGroupIDs when the resource-group
+	// flag is set.
+	ResourceGroupCount uint32
+	ResourceGroupIDs   []GroupMembership
+	Reserved1          [2]uint32
 }
 
 type ndrWriter struct {
@@ -134,9 +137,6 @@ func (w *ndrWriter) sid(value *SID) error {
 		return err
 	}
 	w.align(4)
-	if err := w.put(uint32(len(value.SubAuthorities))); err != nil {
-		return err
-	}
 	if err := w.put(uint32(len(value.SubAuthorities))); err != nil {
 		return err
 	}
@@ -294,11 +294,8 @@ func (l LogonInfo) MarshalBinary() ([]byte, error) {
 	if err := w.sidPointer(resourceDomain); err != nil {
 		return nil, err
 	}
-	resourceCount := l.ResourceGroupCount
-	if l.UserFlags&LogonInfoResourceGroups == 0 {
-		resourceCount = 0
-	}
-	if l.UserFlags&LogonInfoResourceGroups != 0 && resourceCount == 0 {
+	resourceCount := uint32(0)
+	if l.UserFlags&LogonInfoResourceGroups != 0 {
 		resourceCount = uint32(len(l.ResourceGroupIDs))
 	}
 	if err := w.put(resourceCount); err != nil {
@@ -426,12 +423,8 @@ func (r *ndrReader) sid(present bool) (*SID, error) {
 	if err := r.align(4); err != nil {
 		return nil, err
 	}
-	max, err := r.u32()
-	if err != nil {
-		return nil, err
-	}
 	count, err := r.u32()
-	if err != nil || count > max || count > 15 {
+	if err != nil || count > 15 {
 		return nil, fmt.Errorf("PAC: invalid NDR SID")
 	}
 	body, err := r.bytes(8)
@@ -677,7 +670,16 @@ func ParseLogonInfo(data []byte) (LogonInfo, error) {
 		return LogonInfo{}, fmt.Errorf("PAC: resource group count mismatch")
 	}
 	if r.off != len(r.data) {
-		return LogonInfo{}, fmt.Errorf("PAC: trailing NDR data")
+		remaining := r.data[r.off:]
+		padding := (-r.off) & 7
+		if len(remaining) != padding {
+			return LogonInfo{}, fmt.Errorf("PAC: trailing NDR data")
+		}
+		for _, value := range remaining {
+			if value != 0 {
+				return LogonInfo{}, fmt.Errorf("PAC: non-zero NDR trailing data")
+			}
+		}
 	}
 	return l, nil
 }

@@ -60,11 +60,12 @@ func (u UPNDNSInfoData) MarshalBinary() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if u.SID != nil {
-			sid, err = u.SID.MarshalBinary()
-			if err != nil {
-				return nil, err
-			}
+		if u.SID == nil {
+			return nil, fmt.Errorf("PAC: extended UPN_DNS_INFO requires a SID")
+		}
+		sid, err = u.SID.MarshalBinary()
+		if err != nil {
+			return nil, err
 		}
 	}
 	headerLen := 12
