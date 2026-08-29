@@ -304,7 +304,7 @@ func decodeValue(data []byte, destination reflect.Value, depth int) error {
 		}
 		return decodeBare(innerTag, innerContent, destination, depth+1)
 	}
-	if tagNumber, field, ok := choiceField(destination); ok {
+	if tagNumber, field, ok := choiceFieldForTag(destination, tag); ok {
 		if tag != 0xa0|byte(tagNumber) {
 			return fmt.Errorf("unexpected choice tag 0x%x", tag)
 		}
@@ -665,10 +665,48 @@ func choiceField(value reflect.Value) (int, int, bool) {
 		if err != nil || !hasTag || !tag.choice {
 			continue
 		}
+		// A CHOICE has exactly one selected alternative.  Pointer
+		// alternatives make that selection explicit and also allow the
+		// decoder to allocate the selected value.
+		fieldValue := value.Field(i)
+		if fieldValue.Kind() == reflect.Pointer && fieldValue.IsNil() {
+			continue
+		}
 		if found >= 0 {
 			return 0, 0, false
 		}
 		found, tagNumber = i, tag.number
+	}
+	if found < 0 {
+		return 0, 0, false
+	}
+	return tagNumber, found, true
+}
+
+func choiceFieldForTag(value reflect.Value, tag byte) (int, int, bool) {
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			value.Set(reflect.New(value.Type().Elem()))
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Kind() != reflect.Struct {
+		return 0, 0, false
+	}
+	found, tagNumber := -1, 0
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Type().Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+		parsed, hasTag, err := parseFieldTag(field)
+		if err != nil || !hasTag || !parsed.choice || tag != 0xa0|byte(parsed.number) {
+			continue
+		}
+		if found >= 0 {
+			return 0, 0, false
+		}
+		found, tagNumber = i, parsed.number
 	}
 	if found < 0 {
 		return 0, 0, false

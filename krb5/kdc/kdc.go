@@ -6,6 +6,7 @@ import (
 	stdcrypto "crypto"
 	"crypto/hmac"
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/transport"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -38,6 +40,8 @@ const (
 	defaultUDPWorkers      = 1024
 	paTGSReq               = 1
 	paEncTimestamp         = 2
+	paFXCookie             = 133
+	paSPAKE                = 151
 	kdcErrCPrincipal       = 6
 	kdcErrSPrincipal       = 7
 	kdcErrPreauthFailed    = 24
@@ -105,13 +109,15 @@ type Server struct {
 	// Go-side default of 1024; MIT processes datagrams serially.
 	MaxUDPWorkers int
 
-	replayMu    sync.Mutex
-	replays     map[string]time.Time
-	lookasideMu sync.Mutex
-	lookaside   *lookasideCache
-	tcpMu       sync.Mutex
-	tcpConns    map[*tcpConnection]struct{}
-	tcpOrder    uint64
+	replayMu       sync.Mutex
+	replays        map[string]time.Time
+	lookasideMu    sync.Mutex
+	lookaside      *lookasideCache
+	tcpMu          sync.Mutex
+	tcpConns       map[*tcpConnection]struct{}
+	tcpOrder       uint64
+	spakeCookieKey []byte
+	spakeCookieMu  sync.Mutex
 }
 
 type tcpConnection struct {
@@ -383,6 +389,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
 	timestampPA := findPA(request.PAData, paEncTimestamp)
+	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
 	var etypeID int32
 	var clientKey, serviceKey kdb.Key
@@ -396,6 +403,98 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	if !ok {
 		return s.errorResponse(14, request.ReqBody.SName)
+	}
+	if supportsSPAKEGroup(spakePA, spake.GroupEdwards25519) &&
+		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
+		methodData := protocol.MethodData{
+			{PADataType: paSPAKE, PADataValue: marshalDER(protocol.PASPAKE{
+				Support: &protocol.SPAKESupport{Groups: []int32{spake.GroupEdwards25519}},
+			})},
+		}
+		if clientKey.Enctype != 0 {
+			methodData = append(methodData, protocol.PAData{PADataType: 19, PADataValue: marshalDER(protocol.ETypeInfo2{{
+				EType: etypeID, Salt: stringPointer(principalSalt(clientKey, clientName)),
+			}})})
+		}
+		// The challenge's masked value is generated from w, not from zero;
+		// derive it using the selected long-term key.
+		etype, err := crypto.NewRegistry().Get(etypeID)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		w, err := spake.DeriveW(etype, clientKey.Key, spake.GroupEdwards25519)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		private, public, err := spake.Keygen(spake.GroupEdwards25519, w, true)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		challenge, err := spake.EncodeChallenge(spake.GroupEdwards25519, public)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		methodData[0].PADataValue = challenge
+		cookie, err := s.makeSPAKECookie(spake.GroupEdwards25519, private,
+			spake.Transcript(nil, spakePA.PADataValue, challenge))
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		methodData = append(methodData, protocol.PAData{PADataType: paFXCookie, PADataValue: cookie})
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+	}
+	if spakePA != nil {
+		msg, err := spake.Decode(spakePA.PADataValue)
+		cookiePA := findPA(request.PAData, paFXCookie)
+		group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
+		if err != nil || msg.Response == nil || !okCookie || group != spake.GroupEdwards25519 {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		etype, err := crypto.NewRegistry().Get(etypeID)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		w, err := spake.DeriveW(etype, clientKey.Key, group)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		transcript = spake.Transcript(transcript, msg.Response.PubKey, nil)
+		result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		bodyDER, err := asn1.Marshal(request.ReqBody)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		k1, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 1)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		if msg.Response.Factor.EType != etypeID {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
+		var factor protocol.SPAKESecondFactor
+		if err != nil || asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if s.passwordExpired(clientRecord) {
+			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+		}
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 	}
 	if pkinitPA != nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil || s.PKINITClientCAs == nil {
@@ -1793,6 +1892,100 @@ func findPA(data protocol.MethodData, kind int32) *protocol.PAData {
 		}
 	}
 	return nil
+}
+
+func isSPAKESupport(pa *protocol.PAData) bool {
+	if pa == nil || pa.PADataType != paSPAKE {
+		return false
+	}
+	var msg protocol.PASPAKE
+	return asn1.Unmarshal(pa.PADataValue, &msg) == nil && msg.Support != nil
+}
+
+func supportsSPAKEGroup(pa *protocol.PAData, group int32) bool {
+	if !isSPAKESupport(pa) {
+		return false
+	}
+	var msg protocol.PASPAKE
+	if err := asn1.Unmarshal(pa.PADataValue, &msg); err != nil || msg.Support == nil {
+		return false
+	}
+	for _, offered := range msg.Support.Groups {
+		if offered == group {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) spakeKey() []byte {
+	s.spakeCookieMu.Lock()
+	defer s.spakeCookieMu.Unlock()
+	if len(s.spakeCookieKey) == 0 {
+		s.spakeCookieKey = make([]byte, 32)
+		_, _ = io.ReadFull(crypto.RandomSource, s.spakeCookieKey)
+	}
+	return append([]byte(nil), s.spakeCookieKey...)
+}
+
+func (s *Server) makeSPAKECookie(group int32, private, transcript []byte) ([]byte, error) {
+	if len(private) != 32 || len(transcript) == 0 {
+		return nil, fmt.Errorf("invalid SPAKE cookie state")
+	}
+	data := make([]byte, 0, 2+2+4+4+32+4+len(transcript))
+	var b2 [2]byte
+	binary.BigEndian.PutUint16(b2[:], 1)
+	data = append(data, b2[:]...)
+	binary.BigEndian.PutUint16(b2[:], 0)
+	data = append(data, b2[:]...)
+	var b4 [4]byte
+	binary.BigEndian.PutUint32(b4[:], uint32(group))
+	data = append(data, b4[:]...)
+	binary.BigEndian.PutUint32(b4[:], uint32(len(private)))
+	data = append(data, b4[:]...)
+	data = append(data, private...)
+	binary.BigEndian.PutUint32(b4[:], uint32(len(transcript)))
+	data = append(data, b4[:]...)
+	data = append(data, transcript...)
+	mac := hmac.New(sha256.New, s.spakeKey())
+	_, _ = mac.Write(data)
+	return append(data, mac.Sum(nil)...), nil
+}
+
+func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, bool) {
+	if pa == nil || len(pa.PADataValue) < 2+2+4+4+32+4+sha256.Size {
+		return 0, nil, nil, false
+	}
+	data := pa.PADataValue
+	macStart := len(data) - sha256.Size
+	mac := hmac.New(sha256.New, s.spakeKey())
+	_, _ = mac.Write(data[:macStart])
+	if !hmac.Equal(mac.Sum(nil), data[macStart:]) {
+		return 0, nil, nil, false
+	}
+	pos := 0
+	version := binary.BigEndian.Uint16(data[pos:])
+	pos += 2
+	stage := binary.BigEndian.Uint16(data[pos:])
+	pos += 2
+	if version != 1 || stage != 0 || pos+4 > macStart {
+		return 0, nil, nil, false
+	}
+	group := int32(binary.BigEndian.Uint32(data[pos:]))
+	pos += 4
+	privateLen := int(binary.BigEndian.Uint32(data[pos:]))
+	pos += 4
+	if privateLen != 32 || pos+privateLen+4 > macStart {
+		return 0, nil, nil, false
+	}
+	private := append([]byte(nil), data[pos:pos+privateLen]...)
+	pos += privateLen
+	transcriptLen := int(binary.BigEndian.Uint32(data[pos:]))
+	pos += 4
+	if transcriptLen == 0 || pos+transcriptLen != macStart {
+		return 0, nil, nil, false
+	}
+	return group, private, append([]byte(nil), data[pos:pos+transcriptLen]...), true
 }
 
 func principalFromProtocol(value protocol.PrincipalName, realm string) principal.Principal {

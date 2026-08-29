@@ -10,7 +10,8 @@ disposable integration test environments.
 
 ### Client
 - **AS exchange** with PA-ENC-TIMESTAMP preauthentication (password-based
-  `kinit` equivalent), including RFC 6113 **FAST** armored exchanges.
+  `kinit` equivalent), MIT-compatible PA-SPAKE (Edwards25519 group 1), and
+  RFC 6113 **FAST** armored exchanges.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
 - **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and
@@ -55,6 +56,10 @@ disposable integration test environments.
   CI/runtime package is installed. The MIT kprop full-resync dump protocol is
   implemented in `krb5/kprop`, including chained AES KRB-PRIV transfer and
   load-before-ack handling.
+- **PA-SPAKE**: the password AS path and Go KDC support padata type 151,
+  Edwards25519 group 1, MIT transcript/key derivation, SF-NONE, and
+  stateless authenticated challenge cookies. P-256/P-384/P-521 groups are
+  intentionally not advertised.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
   authentication, subkeys, sequence numbers, and a replay cache.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
