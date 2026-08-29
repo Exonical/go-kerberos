@@ -19,6 +19,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -949,6 +950,72 @@ func TestServerFASTASExchange(t *testing.T) {
 	}
 }
 
+func TestServerOTPFASTASExchange(t *testing.T) {
+	now := time.Unix(2000000060, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	server.OTPValidator = func(name principal.Principal, value string) error {
+		if name.Components[0] != "alice" || value != "123456" {
+			return errors.New("invalid OTP")
+		}
+		return nil
+	}
+	server.OTPTokenInfo = func(principal.Principal) []otp.TokenInfo {
+		length, format := int32(6), otp.FormatHexadecimal
+		vendor := types.UTF8String("test")
+		return []otp.TokenInfo{{Vendor: &vendor, Length: &length, Format: &format}}
+	}
+	credentials, err := kclient.ASExchangeFASTOTP(context.Background(), user, armorTGT,
+		func(challenge otp.Challenge) (string, string, error) {
+			if len(challenge.TokenInfo) != 1 || challenge.TokenInfo[0].Vendor == nil ||
+				string(*challenge.TokenInfo[0].Vendor) != "test" {
+				t.Fatalf("unexpected OTP challenge: %#v", challenge)
+			}
+			return "123456", "", nil
+		})
+	if err != nil {
+		t.Fatalf("OTP FAST ASExchange: %v", err)
+	}
+	if !samePrincipal(credentials.Client, user) || credentials.Server.Components[0] != "krbtgt" {
+		t.Fatalf("OTP credentials = %#v", credentials)
+	}
+}
+
+func TestServerOTPRequiresFAST(t *testing.T) {
+	now := time.Unix(2000000061, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.OTPValidator = func(principal.Principal, string) error { return nil }
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	_, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err == nil || !hasKRBCode(err, 24) {
+		t.Fatalf("non-FAST OTP exchange error = %v, want KDC_ERR_PREAUTH_FAILED", err)
+	}
+}
+
+func TestServerOTPWrongValueRecordsFailure(t *testing.T) {
+	now := time.Unix(2000000062, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	server.OTPValidator = func(principal.Principal, string) error { return errors.New("invalid OTP") }
+	_, err = kclient.ASExchangeFASTOTP(context.Background(), user, armorTGT,
+		func(otp.Challenge) (string, string, error) { return "wrong", "", nil })
+	if err == nil || !hasKRBCode(err, 24) {
+		t.Fatalf("wrong OTP error = %v, want KDC_ERR_PREAUTH_FAILED", err)
+	}
+	record, ok, lookupErr := server.DB.Lookup(user)
+	if lookupErr != nil || !ok || record.FailAuthCount != 1 {
+		t.Fatalf("OTP failure record = %#v, ok=%v, err=%v", record, ok, lookupErr)
+	}
+}
+
 func TestServerFASTTGSExchange(t *testing.T) {
 	now := time.Unix(2000000055, 0).UTC()
 	_, kclient := testServer(t, now)
@@ -1289,6 +1356,23 @@ func TestASP256SPAKE(t *testing.T) {
 	}
 	if credentials == nil || credentials.Key.KeyType == 0 || len(credentials.Key.KeyValue) == 0 {
 		t.Fatalf("P-256 SPAKE AS reply has no session key: %#v", credentials)
+	}
+}
+
+func TestASUnsupportedSPAKESupportFallsBackToTimestamp(t *testing.T) {
+	now := time.Unix(2000000135, 0).UTC()
+	server, c := testServer(t, now)
+	server.EnableSPAKE = true
+	server.SPAKEGroups = []int32{spake.GroupP256}
+	c.SPAKEGroups = []int32{spake.GroupEdwards25519}
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	credentials, err := c.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("unsupported SPAKE support AS exchange: %v", err)
+	}
+	if credentials == nil || credentials.Key.KeyType == 0 || len(credentials.Key.KeyValue) == 0 {
+		t.Fatalf("timestamp fallback AS reply has no session key: %#v", credentials)
 	}
 }
 

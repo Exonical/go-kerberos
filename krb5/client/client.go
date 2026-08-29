@@ -18,6 +18,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/kkdcp"
+	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -29,10 +31,15 @@ import (
 
 // Client performs Kerberos client exchanges.
 type Client struct {
-	Config   *config.Config
-	Dialer   transport.Dialer
-	Now      func() time.Time
-	Exchange func(ctx context.Context, realm string, payload []byte) ([]byte, error)
+	Config *config.Config
+	Dialer transport.Dialer
+	// KKDCP optionally configures HTTPS KDC Proxy requests. When nil, an
+	// internal client uses HTTPAnchors and Dialer for HTTPS endpoints.
+	KKDCP *kkdcp.Client
+	// HTTPAnchors supplies CA roots for HTTPS KDC Proxy endpoints.
+	HTTPAnchors *x509.CertPool
+	Now         func() time.Time
+	Exchange    func(ctx context.Context, realm string, payload []byte) ([]byte, error)
 	// SPAKEGroups controls the PA-SPAKE groups offered by ASExchange. When
 	// empty, only MIT's default edwards25519 group is offered.
 	SPAKEGroups []int32
@@ -53,6 +60,10 @@ type Credentials struct {
 	RenewTill *types.KerberosTime
 	Ticket    []byte
 }
+
+// OTPProvider supplies the token value and optional PIN for an OTP challenge.
+// The challenge contains the token metadata selected by the KDC.
+type OTPProvider func(otp.Challenge) (value string, pin string, err error)
 
 // ToCCacheCredential converts credentials to a FILE ccache credential.
 func (c Credentials) ToCCacheCredential() ccache.Credential {
@@ -430,6 +441,109 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, etypeID, clientKey, armor, now)
 	}
 	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, armor, now)
+}
+
+// ASExchangeFASTOTP obtains initial credentials with RFC 6560 OTP
+// preauthentication inside RFC 6113 FAST. MIT uses the FAST armor key
+// directly both to protect the OTP nonce (usage 45) and as the AS reply key.
+func (c *Client) ASExchangeFASTOTP(ctx context.Context, clientPrincipal principal.Principal,
+	armorTGT *Credentials, provider OTPProvider) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil context")
+	}
+	if armorTGT == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil armor TGT")
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil OTP provider")
+	}
+	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
+		return nil, fmt.Errorf("OTP FAST AS exchange: invalid client principal")
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		return nil, err
+	}
+	request, err := c.newASReq(clientPrincipal, now)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = nil
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{fastData}
+	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	kerberosError, ok := decodeKRBError(response)
+	if !ok {
+		return nil, fmt.Errorf("OTP FAST AS exchange: expected PREAUTH_REQUIRED")
+	}
+	if kerberosError.Code != 25 {
+		return nil, kerberosError
+	}
+	fastReply, err := armor.UnwrapReply(errorMethodData(kerberosError), nil, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange preauthentication: %w", err)
+	}
+	challengePA := preauth.FindPAData(fastReply.PAData, otp.PADataChallenge)
+	if challengePA == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: missing PA-OTP-CHALLENGE")
+	}
+	challenge, err := otp.DecodeChallenge(challengePA.PADataValue)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS challenge: %w", err)
+	}
+	value, pin, err := provider(challenge)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS provider: %w", err)
+	}
+	if len(challenge.TokenInfo) == 0 {
+		return nil, fmt.Errorf("OTP FAST AS challenge: no token information")
+	}
+	ti := challenge.TokenInfo[0]
+	otpRequest := otp.Request{
+		Flags: ti.Flags & otp.FlagNextOTP, OTPValue: []byte(value),
+		Format: ti.Format, TokenID: append([]byte(nil), ti.TokenID...),
+		AlgID: ti.AlgID, Vendor: ti.Vendor,
+	}
+	if pin != "" {
+		pinValue := types.UTF8String(pin)
+		otpRequest.PIN = &pinValue
+	}
+	otpRequest.EncData, err = otp.EncryptNonce(armor.EType, armor.Key, challenge.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS request: %w", err)
+	}
+	otpDER, err := otp.EncodeRequest(otpRequest)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS request: %w", err)
+	}
+	fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{
+		{PADataType: otp.PADataRequest, PADataValue: otpDER},
+	})
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{fastData}
+	response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce,
+		armor.EType.ID(), armor.Key, armor, now)
 }
 
 func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principal, nonce uint32, etypeID int32, key []byte, armor *fast.Armor, now time.Time) (*Credentials, error) {
@@ -892,6 +1006,9 @@ func (c *Client) exchangePayload(ctx context.Context, realm string, request any,
 	if !ok {
 		return nil, fmt.Errorf("TGS exchange: no KDC configured for realm %q", realm)
 	}
+	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("TGS exchange KDC address: %w", err)
@@ -1050,6 +1167,9 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 	endpoint, ok := configuredKDC(c.Config, realm)
 	if !ok {
 		return nil, fmt.Errorf("AS exchange: no KDC configured for realm %q", realm)
+	}
+	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
 	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
@@ -1221,6 +1341,13 @@ func configuredKDC(cfg *config.Config, realm string) (string, bool) {
 	return "", false
 }
 
+func (c *Client) kkdcpClient() *kkdcp.Client {
+	if c.KKDCP != nil {
+		return c.KKDCP
+	}
+	return &kkdcp.Client{RootCAs: c.HTTPAnchors, Dialer: c.Dialer}
+}
+
 func unixTime(value types.KerberosTime) uint32 {
 	if !value.Present || value.Time.Unix() < 0 {
 		return 0
@@ -1265,6 +1392,7 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if err != nil {
 		return nil, err
 	}
+	var requestDER []byte
 	if kerberosError, ok := decodeKRBError(response); ok {
 		if kerberosError.Code != 25 {
 			return nil, kerberosError
@@ -1273,11 +1401,20 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		if err != nil {
 			return nil, fmt.Errorf("PKINIT AS request body: %w", err)
 		}
-		pa, err := pk.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce)
+		serverPrincipal := principal.Principal{
+			Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", clientPrincipal.Realm},
+		}
+		pa, err := pk.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
+			clientPrincipal, serverPrincipal)
 		if err != nil {
 			return nil, err
 		}
 		request.PAData = protocol.MethodData{pa}
+		requestDER, err = asn1.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("PKINIT AS request: %w", err)
+		}
 		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 		if err != nil {
 			return nil, err
@@ -1300,7 +1437,11 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if len(pkReply) == 0 {
 		return nil, fmt.Errorf("PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
 	}
-	replyKey, err := pk.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	replyKey, err := pk.VerifyPAASRepWithContext(pkReply, anchors, reply.EncPart.EType,
+		request.ReqBody.Nonce, clientPrincipal, principal.Principal{
+			Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", clientPrincipal.Realm},
+		}, requestDER)
 	if err != nil {
 		return nil, err
 	}
@@ -1351,11 +1492,24 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err != nil {
 		return nil, fmt.Errorf("anonymous PKINIT AS request body: %w", err)
 	}
-	pa, pkClient, err := pkinit.BuildAnonymousPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	serverPrincipal := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", realm},
+	}
+	pkClient, err := pkinit.NewAnonymousClient()
+	if err != nil {
+		return nil, err
+	}
+	pa, err := pkClient.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
+		anon, serverPrincipal)
 	if err != nil {
 		return nil, err
 	}
 	request.PAData = protocol.MethodData{pa}
+	requestDER, err := asn1.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS request: %w", err)
+	}
 	response, err = c.roundTrip(ctx, realm, request)
 	if err != nil {
 		return nil, err
@@ -1377,7 +1531,11 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if len(pkReply) == 0 {
 		return nil, fmt.Errorf("anonymous PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
 	}
-	replyKey, err := pkClient.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	replyKey, err := pkClient.VerifyPAASRepWithContext(pkReply, anchors, reply.EncPart.EType,
+		request.ReqBody.Nonce, principal.Principal{
+			Realm: "WELLKNOWN:ANONYMOUS", NameType: principal.NTWellKnown,
+			Components: []string{"WELLKNOWN", "ANONYMOUS"},
+		}, serverPrincipal, requestDER)
 	if err != nil {
 		return nil, err
 	}

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/otp"
+	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -98,6 +101,17 @@ type Server struct {
 	// Hook KRBError codes in the protocol range are returned unchanged; other
 	// errors default to KDC_ERR_POLICY or KRB_ERR_GENERIC as appropriate.
 	Authorize func(client, service principal.Principal, asExchange bool) error
+	// OTPValidator enables RFC 6560 preauthentication for the named
+	// principals. OTP is accepted only inside FAST.
+	OTPValidator func(principal.Principal, string) error
+	// OTPTokenInfo supplies the token metadata advertised in the challenge.
+	// A nil hook uses an unspecified token format.
+	OTPTokenInfo func(principal.Principal) []otp.TokenInfo
+	// EnablePAC enables opt-in MS-PAC issuance and TGS re-signing.
+	EnablePAC bool
+	// GeneratePAC supplies opaque logon-info bytes for newly issued PACs.
+	// The package deliberately does not interpret the Microsoft NDR payload.
+	GeneratePAC func(client, service principal.Principal) ([]byte, error)
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -376,6 +390,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	anonymousRequest := request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0
 	clientName := principalFromProtocol(*request.ReqBody.CName, request.ReqBody.Realm)
+	requestClientName := clientName
 	if anonymousRequest && !isAnonymousPrincipal(clientName) {
 		return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
 	}
@@ -415,9 +430,11 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
+	otpPA := findPA(request.PAData, otp.PADataRequest)
+	otpEnabled := s.OTPValidator != nil
 	var etypeID int32
 	var clientKey, serviceKey kdb.Key
-	if pkinitPA != nil || anonymousRequest {
+	if pkinitPA != nil || anonymousRequest || otpEnabled {
 		etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
 	} else {
 		etypeID, clientKey, serviceKey, ok = s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
@@ -437,6 +454,64 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+	}
+	if otpEnabled && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
+		spakePA == nil && otpPA == nil && !s.DisablePreauth {
+		if armor == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		nonce, err := otp.NewNonce(s.now(), armor.etype.KeySize())
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+		tokenInfo := []otp.TokenInfo{{Length: int32Pointer(-1), Format: int32Pointer(-1), IterationCount: int32Pointer(-1)}}
+		if s.OTPTokenInfo != nil {
+			tokenInfo = s.OTPTokenInfo(clientName)
+		}
+		if len(tokenInfo) == 0 {
+			tokenInfo = []otp.TokenInfo{{Length: int32Pointer(-1), Format: int32Pointer(-1), IterationCount: int32Pointer(-1)}}
+		}
+		methodData := protocol.MethodData{{PADataType: otp.PADataChallenge,
+			PADataValue: marshalDER(otp.Challenge{Nonce: nonce, TokenInfo: tokenInfo})}}
+		cookie := make([]byte, 16)
+		if _, err := io.ReadFull(crypto.RandomSource, cookie); err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+		methodData = append(methodData, protocol.PAData{
+			PADataType: fast.PAFXCookie, PADataValue: cookie,
+		})
+		return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName,
+			marshalDER(methodData), request.ReqBody.Nonce, armor)
+	}
+	if otpPA != nil {
+		if armor == nil || s.OTPValidator == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		otpRequest, err := otp.DecodeRequest(otpPA.PADataValue)
+		if err != nil || otpRequest.EncData.EType != armor.etype.ID() {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		nonce, err := otp.DecryptNonce(armor.etype, armor.key, otpRequest.EncData)
+		if err != nil || otp.ValidateNonce(nonce, armor.etype.KeySize(), s.now(), s.skew()) != nil {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if err := s.OTPValidator(clientName, string(otpRequest.OTPValue)); err != nil {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil)
+	}
+	if otpEnabled && armor == nil && !anonymousRequest {
+		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
@@ -499,64 +574,74 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	if spakePA != nil {
 		msg, err := spake.Decode(spakePA.PADataValue)
-		cookiePA := findPA(request.PAData, paFXCookie)
-		group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
-		if err != nil || msg.Response == nil || !okCookie || !s.permitsSPAKEGroup(group) {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		etype, err := crypto.NewRegistry().Get(etypeID)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		w, err := spake.DeriveW(etype, clientKey.Key, group)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		transcript = spake.TranscriptForGroup(group, transcript, msg.Response.PubKey, nil)
-		result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		bodyDER, err := asn1.Marshal(request.ReqBody)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		k1, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 1)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		if msg.Response.Factor.EType != etypeID {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
-		var factor protocol.SPAKESecondFactor
-		if err != nil {
-			s.recordPreauthFailure(clientName, &clientRecord)
-			if armor != nil {
-				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+		// A support message with no permitted group is not an attempted
+		// SPAKE response.  MIT ignores it and continues through the ordinary
+		// encrypted-timestamp preauthentication path.
+		if msg.Response == nil {
+			spakePA = nil
+		} else {
+			cookiePA := findPA(request.PAData, paFXCookie)
+			group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
+			if !okCookie || !s.permitsSPAKEGroup(group) {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		if asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
-			s.recordPreauthFailure(clientName, &clientRecord)
-			if armor != nil {
-				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+			etype, err := crypto.NewRegistry().Get(etypeID)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			w, err := spake.DeriveW(etype, clientKey.Key, group)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			transcript = spake.TranscriptForGroup(group, transcript, msg.Response.PubKey, nil)
+			result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			bodyDER, err := asn1.Marshal(request.ReqBody)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			k1, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 1)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			if msg.Response.Factor.EType != etypeID {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
+			var factor protocol.SPAKESecondFactor
+			if err != nil {
+				s.recordPreauthFailure(clientName, &clientRecord)
+				if armor != nil {
+					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+				}
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			if asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
+				s.recordPreauthFailure(clientName, &clientRecord)
+				if armor != nil {
+					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+				}
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			s.recordPreauthSuccess(clientName, &clientRecord)
+			if s.passwordExpired(clientRecord) {
+				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+			}
+			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+				return response
+			}
+			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 		}
-		k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		s.recordPreauthSuccess(clientName, &clientRecord)
-		if s.passwordExpired(clientRecord) {
-			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
-		}
-		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
-			return response
-		}
-		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 	}
 	if pkinitPA != nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil ||
@@ -581,7 +666,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
 			if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
-				clientName.Realm, clientName.Components); err != nil {
+				requestClientName.Realm, requestClientName.Components); err != nil {
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 		}
@@ -592,8 +677,18 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
 		}
-		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
-			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
+		selectedKDF := pkinit.PickKDFAlgorithm(verified.SupportedKDFs)
+		requestDER, err := asn1.Marshal(request)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		kdfClientName := requestClientName
+		if anonymousRequest {
+			kdfClientName = anonymousPrincipal()
+		}
+		paRep, replyKey, err := pkinit.BuildPAASRepWithKDF(verified.PublicValue, etypeID,
+			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner, selectedKDF,
+			kdfClientName, serviceName, requestDER)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
@@ -786,6 +881,118 @@ func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.A
 	return request, armor, 0
 }
 
+func (s *Server) pacPrivsvrKey() (kdb.Key, bool) {
+	name := principal.Principal{
+		Realm: s.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", s.Realm},
+	}
+	record, ok, err := s.DB.Lookup(name)
+	if err != nil || !ok {
+		return kdb.Key{}, false
+	}
+	enctypes := make([]int, 0, len(record.Keys))
+	registry := crypto.NewRegistry()
+	for enctype, key := range record.Keys {
+		if key.KVNO != 0 && record.KVNO != 0 && key.KVNO != record.KVNO {
+			continue
+		}
+		if _, err := registry.Get(enctype); err == nil {
+			enctypes = append(enctypes, int(enctype))
+		}
+	}
+	sort.Ints(enctypes)
+	if len(enctypes) == 0 {
+		return kdb.Key{}, false
+	}
+	key := record.Keys[int32(enctypes[0])]
+	key.Enctype = int32(enctypes[0])
+	return key, true
+}
+
+func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service principal.Principal,
+	headerKey, serviceKey kdb.Key, serviceTicket bool, replaceClient bool) error {
+	if !s.EnablePAC {
+		return nil
+	}
+	privKey, ok := s.pacPrivsvrKey()
+	if !ok {
+		// AS TGTs use the same krbtgt key for both PAC signatures.
+		if len(service.Components) == 2 && service.Components[0] == "krbtgt" {
+			privKey = serviceKey
+			ok = true
+		}
+	}
+	if !ok {
+		return fmt.Errorf("PAC: no usable krbtgt key for PAC signatures")
+	}
+	privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
+	if err != nil {
+		return err
+	}
+	headerEType, err := crypto.NewRegistry().Get(headerKey.Enctype)
+	if err != nil {
+		return err
+	}
+	headerPACKey := pac.Key{EType: headerEType, Key: headerKey.Key}
+	serviceEType, err := crypto.NewRegistry().Get(serviceKey.Enctype)
+	if err != nil {
+		return err
+	}
+	serverPACKey := pac.Key{EType: serviceEType, Key: serviceKey.Key}
+	privPACKey := pac.Key{EType: privEType, Key: privKey.Key}
+	p, err := pac.FromAuthorizationData(ticketPart.AuthorizationData)
+	if err != nil {
+		if !stderrors.Is(err, pac.ErrNotFound) {
+			return err
+		}
+		p = pac.New()
+	} else if err := p.Verify(headerPACKey, privPACKey); err != nil {
+		return err
+	}
+	if replaceClient {
+		if err := p.SetClientInfo(ticketPart.AuthTime.Time, client); err != nil {
+			return err
+		}
+	}
+	if len(p.Buffers) == 0 && s.GeneratePAC != nil {
+		logonInfo, err := s.GeneratePAC(client, service)
+		if err != nil {
+			return err
+		}
+		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfo, Data: logonInfo})
+	} else if len(p.Buffers) == 0 {
+		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfo})
+	}
+	var dummyTicket []byte
+	if serviceTicket {
+		originalAuthData := ticketPart.AuthorizationData
+		dummyAuthData, err := pac.AddDummyAuthorizationData(originalAuthData)
+		if err != nil {
+			return err
+		}
+		ticketPart.AuthorizationData = dummyAuthData
+		dummyTicket = marshalDER(*ticketPart)
+		ticketPart.AuthorizationData = originalAuthData
+	}
+	var encoded []byte
+	if dummyTicket != nil {
+		encoded, err = p.SignWithTicket(ticketPart.AuthTime.Time, &client,
+			serverPACKey, privPACKey, dummyTicket)
+	} else {
+		encoded, err = p.Sign(ticketPart.AuthTime.Time, &client,
+			serverPACKey, privPACKey, serviceTicket)
+	}
+	if err != nil {
+		return err
+	}
+	authdata, err := pac.AddAuthorizationData(ticketPart.AuthorizationData, encoded)
+	if err != nil {
+		return err
+	}
+	ticketPart.AuthorizationData = authdata
+	return nil
+}
+
 func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
@@ -849,6 +1056,9 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		CRealm:   clientName.Realm,
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
+	}
+	if err := s.issuePAC(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false); err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketPlain := marshalDER(ticketPart)
 	ticketCipher, err := encryptWithKey(serviceKey, 2, ticketPlain)
@@ -1378,7 +1588,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA)
 }
 
 func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bool {
@@ -1503,7 +1713,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -1577,7 +1787,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		CRealm: ticketPart.CRealm, CName: ticketPart.CName,
 		Transited: ticketPart.Transited,
 		AuthTime:  authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
-		CAddr: addresses,
+		CAddr: addresses, AuthorizationData: ticketPart.AuthorizationData,
 	}
 	if issuedClient != nil {
 		ticketPart.CRealm = issuedClient.Realm
@@ -1596,6 +1806,11 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
+	if err := s.issuePAC(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
+		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
+		issuedClient != nil); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
 	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
 	if err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
@@ -2037,7 +2252,7 @@ func (s *Server) permitsSPAKEGroup(group int32) bool {
 }
 
 func (s *Server) selectSPAKEGroup(pa *protocol.PAData) int32 {
-	if !isSPAKESupport(pa) {
+	if !s.EnableSPAKE || !isSPAKESupport(pa) {
 		return 0
 	}
 	var msg protocol.PASPAKE
@@ -2228,6 +2443,7 @@ func principalSalt(key kdb.Key, name principal.Principal) string {
 }
 
 func stringPointer(value string) *string { return &value }
+func int32Pointer(value int32) *int32    { return &value }
 
 func mandatoryChecksumType(etype int32) int32 {
 	switch etype {

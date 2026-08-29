@@ -1,6 +1,7 @@
 package pkinit
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -12,7 +13,109 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
+
+func TestSupportedKDFAlgorithms(t *testing.T) {
+	got := SupportedKDFAlgorithmIDs()
+	if len(got) != 3 {
+		t.Fatalf("supported KDF count = %d, want 3", len(got))
+	}
+	want := []string{"1.3.6.1.5.2.3.6.2", "1.3.6.1.5.2.3.6.1", "1.3.6.1.5.2.3.6.3"}
+	for i, id := range got {
+		var oid asn1.ObjectIdentifier
+		if _, err := asn1.Unmarshal(der(0x06, id), &oid); err != nil {
+			t.Fatalf("KDF %d OID: %v", i, err)
+		}
+		if oid.String() != want[i] {
+			t.Errorf("KDF %d = %s, want %s", i, oid, want[i])
+		}
+	}
+}
+
+func TestPickKDFAlgorithmUsesServerPreference(t *testing.T) {
+	got := PickKDFAlgorithm([][]byte{KDFSHA512, KDFSHA1, KDFSHA256})
+	if !bytes.Equal(got, KDFSHA256) {
+		t.Fatalf("selected KDF = %x, want SHA-256 %x", got, KDFSHA256)
+	}
+	if got := PickKDFAlgorithm([][]byte{[]byte{0x01}}); got != nil {
+		t.Fatalf("unsupported selected KDF = %x, want nil", got)
+	}
+}
+
+func TestAuthPackSupportedKDFWireEncoding(t *testing.T) {
+	auth := PKAuthenticator{
+		Cusec: 7,
+		CTime: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Nonce: 42,
+		PAChecksum: []byte{
+			0xaa, 0xbb,
+		},
+	}
+	public := []byte{0x01, 0x02}
+	data := authPackDER(auth, public, SupportedKDFAlgorithmIDs())
+	fields, err := sequenceFields(data)
+	if err != nil || len(fields) != 3 {
+		t.Fatalf("AuthPack fields = %d, err=%v; want authenticator, public value, supported KDFs", len(fields), err)
+	}
+	if fields[2][0] != 0xa4 {
+		t.Fatalf("supportedKDFs tag = 0x%x, want 0xa4", fields[2][0])
+	}
+	items, err := sequenceFields(mustContent(fields[2]))
+	if err != nil || len(items) != 3 {
+		t.Fatalf("supportedKDFs items = %d, err=%v; want 3", len(items), err)
+	}
+	for i, item := range items {
+		itemFields, err := sequenceFields(item)
+		if err != nil || len(itemFields) != 1 || itemFields[0][0] != 0xa0 {
+			t.Fatalf("KDF item %d malformed: err=%v", i, err)
+		}
+		oidDER, err := tlvContent(itemFields[0])
+		if err != nil || len(oidDER) == 0 || oidDER[0] != 0x06 {
+			t.Fatalf("KDF item %d OID malformed: err=%v", i, err)
+		}
+	}
+	_, _, got, err := parseAuthPack(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range got {
+		if !bytes.Equal(got[i], SupportedKDFAlgorithmIDs()[i]) {
+			t.Fatalf("decoded KDF %d = %x, want %x", i, got[i], SupportedKDFAlgorithmIDs()[i])
+		}
+	}
+}
+
+func TestPKINITKDFMITVectors(t *testing.T) {
+	secret := make([]byte, 256)
+	u := principal.Principal{Realm: "SU.SE", NameType: principal.NTPrincipal, Components: []string{"lha"}}
+	v := principal.Principal{Realm: "SU.SE", NameType: principal.NTPrincipal, Components: []string{"krbtgt", "SU.SE"}}
+	asReq := bytes.Repeat([]byte{0xaa}, 10)
+	pkAsRep := bytes.Repeat([]byte{0xbb}, 9)
+	vectors := []struct {
+		name string
+		oid  []byte
+		want string
+	}{
+		{"SHA-1/AES", KDFSHA1, "e6ab38c9413e035bb079201ed0b6b73d8d49a814a737c04ee6649614206f73ad"},
+		{"SHA-256/AES", KDFSHA256, "77ef4e48c420ae3fec75109d7981697eed5d295c90c62564f7bfd101fa9bc1d5"},
+	}
+	for _, vector := range vectors {
+		t.Run(vector.name, func(t *testing.T) {
+			got, err := DeriveKey(secret, vector.oid, u, v, crypto.EnctypeAES256SHA1, asReq, pkAsRep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := hex.DecodeString(vector.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("derived key = %x, want %x", got, want)
+			}
+		})
+	}
+}
 
 func TestOctetString2KeyRFC4556Vector(t *testing.T) {
 	cases := []struct {
@@ -204,6 +307,39 @@ func TestPAASReqChecksumAndNonce(t *testing.T) {
 	}
 	if _, err := VerifyPAASReq(append(append([]byte(nil), pa.PADataValue...), 0), body); err == nil {
 		t.Fatal("trailing PA-PK-AS-REQ data accepted")
+	}
+}
+
+func TestLegacyPAASReqDoesNotAdvertiseKDFs(t *testing.T) {
+	cert, key := testCertificate(t)
+	client, err := NewClient(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x30, 0x02, 0x05, 0x00}
+	legacy, err := client.BuildPAASReq(body, time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyPAASReqForKDC(legacy.PADataValue, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.SupportedKDFs != nil {
+		t.Fatalf("legacy request advertised supported KDFs: %v", verified.SupportedKDFs)
+	}
+	clientName := principal.Principal{Realm: "PKINIT.TEST", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	serverName := principal.Principal{Realm: "PKINIT.TEST", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "PKINIT.TEST"}}
+	agile, err := client.BuildPAASReqForPrincipals(body, time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), 77, clientName, serverName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err = VerifyPAASReqForKDC(agile.PADataValue, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(verified.SupportedKDFs) != len(SupportedKDFAlgorithmIDs()) {
+		t.Fatalf("context-aware request KDF count = %d, want %d", len(verified.SupportedKDFs), len(SupportedKDFAlgorithmIDs()))
 	}
 }
 

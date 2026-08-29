@@ -97,7 +97,9 @@ func startGoKDCWithGroup(t *testing.T, policy *kdb.PolicyRecord, groupName strin
 		MaxTicketLife:    10 * time.Hour,
 		MaxRenewableLife: 24 * time.Hour,
 		EnableSPAKE:      groupName != "",
-		SPAKEGroups:      []int32{group},
+	}
+	if groupName != "" {
+		server.SPAKEGroups = []int32{group}
 	}
 	service := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	backend := principal.Principal{Realm: goKDCRealm, NameType: principal.NTSrvHst, Components: []string{"HTTP", "backend.test"}}
