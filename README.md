@@ -116,7 +116,8 @@ disposable integration test environments.
 - MIT **FILE ccache** (v4) reader/writer, byte-compatible with `klist`.
 - MIT **DIR** ccache collections (primary switching and subsidiary caches) and
   process-local **MEMORY** ccaches with collection resolution.
-- **krb5.conf** parsing, DNS SRV **KDC discovery**, UDP/TCP transport with
+- **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
+  DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover, and HTTPS KDC Proxy routing for `kdc =
   https://host:port/path` entries.
 
@@ -244,6 +245,20 @@ encryption type.
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
 transited-policy checking are intentionally out of scope.
+
+Realm discovery follows MIT's profile hostrealm order: exact host, then
+progressively shorter suffixes with and without a leading dot. The optional
+`_kerberos.<hostname>` TXT fallback is exposed through an injectable resolver
+and is gated by `dns_lookup_realm`. URI KDC discovery parses MIT
+`krb5srv:flags:udp|tcp|kkdcp:residual` records, honors priority, and runs
+before SRV when URI lookup is enabled (the MIT default). The separate
+`RealmForHostWithFallback` helper exposes MIT's upper-cased parent-domain
+heuristic after profile lookup.
+
+`config.ParseKDCConf` parses profile-format `[kdcdefaults]` and `[realms]`
+settings while retaining unsupported values for inspection.
+`kdc.Server.ApplyKDCConf` applies supported lifetime and listener-port
+settings without guessing at other KDC policy.
 
 Password history is retained as derived key sets in the in-memory
 `PrincipalRecord` and is never stored as cleartext. When `kadmin/history` is
