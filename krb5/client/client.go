@@ -21,6 +21,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/transport"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -31,6 +32,9 @@ type Client struct {
 	Dialer   transport.Dialer
 	Now      func() time.Time
 	Exchange func(ctx context.Context, realm string, payload []byte) ([]byte, error)
+	// SPAKEGroups controls the PA-SPAKE groups offered by ASExchange. When
+	// empty, only MIT's default edwards25519 group is offered.
+	SPAKEGroups []int32
 	// Canonicalize requests KDC canonicalization and permits the KDC to
 	// return a canonical client principal in an AS-REP.
 	Canonicalize bool
@@ -105,12 +109,21 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 	if err != nil {
 		return nil, fmt.Errorf("AS exchange string-to-key: %w", err)
 	}
+	groups := c.SPAKEGroups
+	if len(groups) == 0 {
+		groups = []int32{spake.GroupEdwards25519}
+	}
+	support, err := spake.EncodeSupport(groups)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{{PADataType: preauth.PADataSPAKE, PADataValue: support}}
 	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
 	if err != nil {
 		return nil, err
 	}
 	if kerberosError, ok := decodeKRBError(response); ok {
-		if kerberosError.Code != 25 {
+		if kerberosError.Code != 25 && kerberosError.Code != 91 {
 			return nil, kerberosError
 		}
 		methodData, err := preauth.ParseMethodData(kerberosError.ErrorData())
@@ -129,6 +142,95 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		if err != nil {
 			return nil, fmt.Errorf("AS exchange string-to-key: %w", err)
 		}
+		if challengePA := preauth.FindPAData(methodData, preauth.PADataSPAKE); challengePA != nil {
+			if len(challengePA.PADataValue) == 0 {
+				goto timestampFallback
+			}
+			msg, err := spake.Decode(challengePA.PADataValue)
+			if err != nil {
+				return nil, fmt.Errorf("AS exchange SPAKE challenge: %w", err)
+			}
+			if msg.Challenge == nil {
+				// A KDC may advertise SPAKE without selecting it.  Keep the
+				// established PA-ENC-TIMESTAMP fallback in that case.
+				goto timestampFallback
+			}
+			supportsFactor := false
+			for _, factor := range msg.Challenge.Factors {
+				if factor.Type == spake.FactorNone {
+					supportsFactor = true
+					break
+				}
+			}
+			if !supportsFactor {
+				return nil, fmt.Errorf("AS exchange SPAKE: challenge has no supported factor")
+			}
+			groups := c.SPAKEGroups
+			if len(groups) == 0 {
+				groups = []int32{spake.GroupEdwards25519}
+			}
+			offered := false
+			for _, group := range groups {
+				if group == msg.Challenge.Group {
+					offered = true
+					break
+				}
+			}
+			if !offered {
+				return nil, fmt.Errorf("AS exchange SPAKE: challenge group %d was not offered", msg.Challenge.Group)
+			}
+			challengeDER := challengePA.PADataValue
+			w, err := spake.DeriveW(etype, key, msg.Challenge.Group)
+			if err != nil {
+				return nil, err
+			}
+			private, public, err := spake.Keygen(msg.Challenge.Group, w, false)
+			if err != nil {
+				return nil, err
+			}
+			result, err := spake.Result(msg.Challenge.Group, w, private, msg.Challenge.PubKey, true)
+			if err != nil {
+				return nil, err
+			}
+			transcript := spake.TranscriptForGroup(msg.Challenge.Group, nil, support, challengeDER)
+			transcript = spake.TranscriptForGroup(msg.Challenge.Group, transcript, public, nil)
+			bodyDER, err := asn1.Marshal(request.ReqBody)
+			if err != nil {
+				return nil, err
+			}
+			k0, err := spake.DeriveKey(etype, key, w, result, transcript, bodyDER,
+				msg.Challenge.Group, 0)
+			if err != nil {
+				return nil, err
+			}
+			k1, err := spake.DeriveKey(etype, key, w, result, transcript, bodyDER,
+				msg.Challenge.Group, 1)
+			if err != nil {
+				return nil, err
+			}
+			factorDER, err := spake.EncodeFactor()
+			if err != nil {
+				return nil, err
+			}
+			factorCipher, err := etype.Encrypt(k1, spake.KeyUsage, factorDER)
+			if err != nil {
+				return nil, err
+			}
+			responseDER, err := spake.EncodeResponse(public, factorCipher, etype.ID())
+			if err != nil {
+				return nil, err
+			}
+			request.PAData = protocol.MethodData{{PADataType: preauth.PADataSPAKE, PADataValue: responseDER}}
+			if cookie := preauth.FindPAData(methodData, preauth.PADataCookie); cookie != nil {
+				request.PAData = append(request.PAData, *cookie)
+			}
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce, etype.ID(), k0, now)
+		}
+	timestampFallback:
 		timestamp, err := preauth.BuildEncryptedTimestamp(etype, key, now, 0)
 		if err != nil {
 			return nil, err

@@ -17,12 +17,24 @@ const (
 	PADataEncryptedTimestamp = 2
 	PADataETypeInfo          = 11
 	PADataETypeInfo2         = 19
+	PADataCookie             = protocol.PADataFXCookie
+	PADataSPAKE              = protocol.PADataSPAKE
 )
 
 // EncTimestamp is the encrypted timestamp payload used by PA-ENC-TIMESTAMP.
 type EncTimestamp struct {
 	PATimestamp types.KerberosTime `krb5:"tag:0"`
 	PAUSec      *int32             `krb5:"tag:1,optional"`
+}
+
+// FindPAData returns the first padata element with the requested type.
+func FindPAData(data protocol.MethodData, typ int32) *protocol.PAData {
+	for i := range data {
+		if data[i].PADataType == typ {
+			return &data[i]
+		}
+	}
+	return nil
 }
 
 // ParseMethodData decodes METHOD-DATA carried in KRB-ERROR e-data.

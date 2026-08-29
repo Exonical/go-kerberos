@@ -16,6 +16,7 @@ when absent.
 | keytab | RED | RED | RED |
 | FILE ccache | RED | RED | RED |
 | AS exchange | RED | RED | RED |
+| PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |

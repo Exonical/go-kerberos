@@ -22,6 +22,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -246,6 +247,68 @@ func TestASAccountLockout(t *testing.T) {
 	record, _, _ = db.Lookup(*user)
 	if record.FailAuthCount != 0 || !record.LastSuccess.Equal(now.Add(61*time.Second)) {
 		t.Fatalf("successful authentication state = %#v", record)
+	}
+}
+
+func TestASSPAKEAccountLockout(t *testing.T) {
+	now := time.Unix(2000000125, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.EnableSPAKE = true
+	db := server.DB.(*kdb.Database)
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "spake-locked", MaxFailure: 2}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*user)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	record.Policy = "spake-locked"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := kclient.ASExchange(context.Background(), *user, "wrong-password"); err == nil ||
+			!hasKRBCode(err, kdcErrPreauthFailed) {
+			t.Fatalf("SPAKE attempt %d error = %v, want preauth failure", attempt, err)
+		}
+		record, _, err = db.Lookup(*user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.FailAuthCount != uint32(attempt) {
+			t.Fatalf("SPAKE attempt %d failure count = %d", attempt, record.FailAuthCount)
+		}
+	}
+	if _, err := kclient.ASExchange(context.Background(), *user, "alice-password"); err == nil ||
+		!hasKRBCode(err, kdcErrClientRevoked) {
+		t.Fatalf("SPAKE locked account error = %v, want client revoked", err)
+	}
+}
+
+func TestASSPAKEExpiredCookie(t *testing.T) {
+	now := time.Unix(2000000150, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnableSPAKE = true
+	var calls int
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		calls++
+		if calls == 2 {
+			server.Now = func() time.Time { return now.Add(spakeCookieLifetime + time.Second) }
+		}
+		return server.HandleMessage(payload), nil
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	_, err := (&client.Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(
+		context.Background(), user, "alice-password")
+	if err == nil || !hasKRBCode(err, kdcErrPreauthFailed) {
+		t.Fatalf("expired SPAKE cookie error = %v, want preauth failure", err)
+	}
+	if calls != 2 {
+		t.Fatalf("AS exchange calls = %d, want 2", calls)
 	}
 }
 
@@ -1175,6 +1238,57 @@ func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 	_, err = badClient.ASExchange(context.Background(), unknown, "password")
 	if err == nil || !hasKRBCode(err, 6) {
 		t.Fatalf("unknown client error = %v, want code 6", err)
+	}
+}
+
+func TestASEncryptedTimestampWithSPAKEAdvertisement(t *testing.T) {
+	now := time.Unix(2000000100, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnableSPAKE = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 1)
+
+	var hint protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &hint); err != nil {
+		t.Fatalf("preauthentication hint: %v", err)
+	}
+	if hint.ErrorCode != kdcErrPreauthRequired {
+		t.Fatalf("hint error code = %d, want %d", hint.ErrorCode, kdcErrPreauthRequired)
+	}
+	methodData, err := preauth.ParseMethodData(hint.EData)
+	if err != nil {
+		t.Fatalf("parse method data: %v", err)
+	}
+	timestampHint := preauth.FindPAData(methodData, paEncTimestamp)
+	if timestampHint == nil || len(timestampHint.PADataValue) != 0 {
+		t.Fatalf("PA-ENC-TIMESTAMP hint = %#v, want empty padata", timestampHint)
+	}
+	if preauth.FindPAData(methodData, paSPAKE) == nil {
+		t.Fatal("PA-SPAKE hint missing")
+	}
+
+	addPreauthPassword(t, &request, "alice-password", now)
+	response := server.HandleMessage(mustMarshal(t, request))
+	part := asReplyPart(t, response)
+	if part.Key.KeyType == 0 || len(part.Key.KeyValue) == 0 {
+		t.Fatalf("encrypted-timestamp AS reply has no session key: %#v", part.Key)
+	}
+}
+
+func TestASP256SPAKE(t *testing.T) {
+	now := time.Unix(2000000125, 0).UTC()
+	server, c := testServer(t, now)
+	server.EnableSPAKE = true
+	server.SPAKEGroups = []int32{spake.GroupP256}
+	c.SPAKEGroups = []int32{spake.GroupP256}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	credentials, err := c.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("P-256 SPAKE AS exchange: %v", err)
+	}
+	if credentials == nil || credentials.Key.KeyType == 0 || len(credentials.Key.KeyValue) == 0 {
+		t.Fatalf("P-256 SPAKE AS reply has no session key: %#v", credentials)
 	}
 }
 

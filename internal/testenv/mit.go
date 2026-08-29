@@ -51,22 +51,34 @@ type Realm struct {
 
 // Start creates and starts an MIT realm entirely below t.TempDir.
 func Start(t *testing.T) *Realm {
-	return start(t, "", false)
+	return start(t, "", false, "")
+}
+
+// StartWithSPAKE creates and starts an MIT realm with SPAKE enabled for the
+// client and KDC.
+func StartWithSPAKE(t *testing.T) *Realm {
+	return start(t, "", false, "edwards25519")
+}
+
+// StartWithSPAKEGroup creates and starts an MIT realm with the requested
+// SPAKE group enabled for the client and KDC.
+func StartWithSPAKEGroup(t *testing.T, group string) *Realm {
+	return start(t, "", false, group)
 }
 
 // StartWithMasterEType creates and starts an MIT realm with the requested
 // database master-key enctype.
 func StartWithMasterEType(t *testing.T, enctype string) *Realm {
-	return start(t, enctype, false)
+	return start(t, enctype, false, "")
 }
 
 // StartWithIPROP creates and starts an MIT realm with incremental propagation
 // enabled on kadmind.
 func StartWithIPROP(t *testing.T) *Realm {
-	return start(t, "", true)
+	return start(t, "", true, "")
 }
 
-func start(t *testing.T, masterEType string, iprop bool) *Realm {
+func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -111,6 +123,7 @@ func start(t *testing.T, masterEType string, iprop bool) *Realm {
  rdns = false
  ticket_lifetime = 24h
  forwardable = true
+%s
 
 [realms]
  %s = {
@@ -118,13 +131,19 @@ func start(t *testing.T, masterEType string, iprop bool) *Realm {
   admin_server = 127.0.0.1:%d
   kpasswd_port = %d
  }
-`, RealmName, RealmName, port, adminPort, kpasswdPort))
+`, RealmName, func() string {
+		if spakeGroup != "" {
+			return " spake_preauth_groups = " + spakeGroup + "\n"
+		}
+		return ""
+	}(), RealmName, port, adminPort, kpasswdPort))
 	writeFile(t, r.KDCConfig, fmt.Sprintf(`[kdcdefaults]
  kdc_ports = %d
  kdc_tcp_ports = %d
 
 [realms]
  %s = {
+%s
   database_name = %s/principal
   admin_database_name = %s/principal.kadm5
   admin_database_lockfile = %s/principal.kadm5.lock
@@ -133,7 +152,12 @@ func start(t *testing.T, masterEType string, iprop bool) *Realm {
   key_stash_file = %s/.k5.%s
 %s
  }
-`, port, port, RealmName, dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig))
+`, port, port, RealmName, func() string {
+		if spakeGroup != "" {
+			return "  spake_preauth_groups = " + spakeGroup + "\n"
+		}
+		return ""
+	}(), dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig))
 	acl := "admin/admin@" + RealmName + " sxe\n"
 	if iprop {
 		acl += "kiprop/replica@" + RealmName + " p\n"

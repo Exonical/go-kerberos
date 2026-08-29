@@ -27,6 +27,45 @@ type PAData struct {
 	PADataValue []byte `krb5:"tag:2"`
 }
 
+const (
+	// PADataSPAKE is the RFC PA-SPAKE padata type.
+	PADataSPAKE int32 = 151
+	// PADataFXCookie is the RFC PA-FX-COOKIE padata type.
+	PADataFXCookie int32 = 133
+)
+
+// SPAKESecondFactor is the RFC PA-SPAKE second-factor choice.
+type SPAKESecondFactor struct {
+	Type int32  `krb5:"tag:0"`
+	Data []byte `krb5:"tag:1,optional"`
+}
+
+// SPAKESupport advertises the groups supported by a client.
+type SPAKESupport struct {
+	Groups []int32 `krb5:"tag:0"`
+}
+
+// SPAKEChallenge selects a group and carries the KDC public value.
+type SPAKEChallenge struct {
+	Group   int32               `krb5:"tag:0"`
+	PubKey  []byte              `krb5:"tag:1"`
+	Factors []SPAKESecondFactor `krb5:"tag:2"`
+}
+
+// SPAKEResponse carries the client public value and encrypted factor.
+type SPAKEResponse struct {
+	PubKey []byte        `krb5:"tag:0"`
+	Factor EncryptedData `krb5:"tag:1"`
+}
+
+// PASPAKE is the PA-SPAKE CHOICE.
+type PASPAKE struct {
+	Support   *SPAKESupport   `krb5:"tag:0,choice"`
+	Challenge *SPAKEChallenge `krb5:"tag:1,choice"`
+	Response  *SPAKEResponse  `krb5:"tag:2,choice"`
+	EncData   *EncryptedData  `krb5:"tag:3,choice"`
+}
+
 type EncryptedData struct {
 	EType  int32   `krb5:"tag:0"`
 	KVNO   *uint32 `krb5:"tag:1,optional"`

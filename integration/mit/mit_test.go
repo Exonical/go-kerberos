@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 )
 
 func TestHarnessSelfTest(t *testing.T) {
@@ -166,6 +167,91 @@ func TestGoClientASExchange(t *testing.T) {
 	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
 	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
 		t.Fatalf("MIT klist does not contain TGT:\n%s", listing)
+	}
+}
+
+func TestGoClientSPAKEAgainstMITKDC(t *testing.T) {
+	realm := testenv.StartWithSPAKE(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	credentials, err := (&client.Client{
+		Config: cfg,
+		Now:    func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+	}).ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go SPAKE AS exchange: %v", err)
+	}
+	outputPath := filepath.Join(realm.Dir, "go-spake.ccache")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatalf("create Go SPAKE ccache: %v", err)
+	}
+	cache := &ccache.Cache{
+		DefaultPrincipal: clientPrincipal,
+		Credentials:      []ccache.Credential{credentials.ToCCacheCredential()},
+	}
+	if err := ccache.Write(output, cache); err != nil {
+		output.Close()
+		t.Fatalf("write Go SPAKE ccache: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close Go SPAKE ccache: %v", err)
+	}
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
+	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
+		t.Fatalf("MIT klist does not contain SPAKE TGT:\n%s", listing)
+	}
+}
+
+func TestGoClientP256SPAKEAgainstMITKDC(t *testing.T) {
+	realm := testenv.StartWithSPAKEGroup(t, "P-256")
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	credentials, err := (&client.Client{
+		Config:      cfg,
+		Now:         func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+		SPAKEGroups: []int32{spake.GroupP256},
+	}).ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go P-256 SPAKE AS exchange: %v", err)
+	}
+	outputPath := filepath.Join(realm.Dir, "go-p256-spake.ccache")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatalf("create Go P-256 SPAKE ccache: %v", err)
+	}
+	cache := &ccache.Cache{
+		DefaultPrincipal: clientPrincipal,
+		Credentials:      []ccache.Credential{credentials.ToCCacheCredential()},
+	}
+	if err := ccache.Write(output, cache); err != nil {
+		output.Close()
+		t.Fatalf("write Go P-256 SPAKE ccache: %v", err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatalf("close Go P-256 SPAKE ccache: %v", err)
+	}
+	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
+	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
+		t.Fatalf("MIT klist does not contain P-256 SPAKE TGT:\n%s", listing)
 	}
 }
 
