@@ -24,7 +24,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
-| PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
+| PKINIT (RFC 4556), RFC 8636 agility, and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented; SHA-256, SHA-1, and SHA-512 KDF identifiers are advertised in MIT preference order | KDF vectors, wire goldens, Go↔Go, Go client ↔ MIT KDC, and MIT client ↔ Go KDC coverage; MIT trace asserts SHA-256 negotiation | MIT pass |
 | PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
@@ -101,15 +101,27 @@ MIT `kvno` FAST-TGS interoperability: its trace contains
 is accepted by the Go KDC. MIT FAST AS interoperability remains covered by
 `kinit -T`.
 
-The PKINIT implementation supports the RFC 4556 Diffie-Hellman profile on
-both the client and Go KDC. The KDC validates the client certificate chain,
+The PKINIT implementation supports the RFC 4556 Diffie-Hellman profile and
+RFC 8636 algorithm agility on both the client and Go KDC. Clients advertise
+KDF identifiers SHA-256 (`1.3.6.1.5.2.3.6.2`), SHA-1
+(`1.3.6.1.5.2.3.6.1`), and SHA-512 (`1.3.6.1.5.2.3.6.3`) in that order.
+The KDC selects the first identifier in its own preference order that appears
+in the client list and includes it in `DHRepInfo`. The SP800-56A KDF binds
+the DH secret to the algorithm identifier, client and KDC principals,
+enctype, encoded AS-REQ, and encoded PA-PK-AS-REP. If either peer omits
+`supportedKDFs` or `kdfID`, the RFC 4556 octet-string-to-key fallback remains
+in use.
+
+The KDC validates the client certificate chain,
 the id-pkinit-KPClientAuth EKU, and the Kerberos principal SAN before signing
 the DH reply and encrypting the AS-REP with the DH-derived reply key. Coverage
 includes Go client ↔ Go KDC, Go client ↔ MIT KDC, and a live MIT
 client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
-available. The implementation currently uses the RFC 3526 MODP group 14
-profile and does not implement group 2 negotiation or newer algorithm-agility
-KDF profiles.
+available; the latter's `KRB5_TRACE` records the SHA-256 KDF identifier.
+The implementation currently uses the RFC 3526 MODP group 14 profile and
+does not implement group 2 negotiation. The SHA-512 KDF is implemented, but
+the MIT DES3 vector is not exercised because this repository does not expose
+the MIT DES3 enctype profile.
 
 Anonymous PKINIT follows RFC 6112/8062: the client sends unsigned DH-only
 PKINIT, and the KDC accepts that form only with the anonymous request option.

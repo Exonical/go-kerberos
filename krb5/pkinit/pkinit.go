@@ -8,15 +8,19 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"math/big"
 	"time"
 
 	krbcrypto "github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
@@ -26,6 +30,32 @@ const (
 	DHGroup14   = 14
 	DHGroup2    = 2
 )
+
+// RFC 8636 PKINIT KDF algorithm identifiers, represented as the contents of
+// an OBJECT IDENTIFIER as they are in MIT krb5's krb5_data values.
+var (
+	KDFSHA1   = []byte{0x2b, 0x06, 0x01, 0x05, 0x02, 0x03, 0x06, 0x01}
+	KDFSHA256 = []byte{0x2b, 0x06, 0x01, 0x05, 0x02, 0x03, 0x06, 0x02}
+	KDFSHA512 = []byte{0x2b, 0x06, 0x01, 0x05, 0x02, 0x03, 0x06, 0x03}
+)
+
+// SupportedKDFAlgorithmIDs returns MIT's preference order.
+func SupportedKDFAlgorithmIDs() [][]byte {
+	return [][]byte{append([]byte(nil), KDFSHA256...), append([]byte(nil), KDFSHA1...), append([]byte(nil), KDFSHA512...)}
+}
+
+// PickKDFAlgorithm selects the first algorithm in the KDC's preference list
+// which is present in the client's supported list.
+func PickKDFAlgorithm(client [][]byte) []byte {
+	for _, serverID := range SupportedKDFAlgorithmIDs() {
+		for _, clientID := range client {
+			if bytes.Equal(serverID, clientID) {
+				return serverID
+			}
+		}
+	}
+	return nil
+}
 
 var (
 	// RFC 3526 MODP group 14.
@@ -38,6 +68,7 @@ type AuthPack struct {
 	Authenticator PKAuthenticator
 	PublicValue   []byte
 	DHNonce       []byte
+	SupportedKDFs [][]byte
 }
 
 // PKAuthenticator authenticates an AS-REQ body to the KDC.
@@ -53,6 +84,7 @@ type PKAuthenticator struct {
 type VerifiedPAASReq struct {
 	Authenticator PKAuthenticator
 	PublicValue   []byte
+	SupportedKDFs [][]byte
 	Certificate   *x509.Certificate
 	Signed        bool
 }
@@ -103,6 +135,14 @@ func newDHPrivate() (*big.Int, error) {
 // BuildPAASReq constructs PA-PK-AS-REQ. bodyDER must be the exact DER bytes
 // of the AS-REQ KDC-REQ-BODY received by the KDC.
 func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (protocol.PAData, error) {
+	return c.BuildPAASReqForPrincipals(bodyDER, now, nonce,
+		principal.Principal{}, principal.Principal{})
+}
+
+// BuildPAASReqForPrincipals constructs PA-PK-AS-REQ with algorithm-agility
+// context for the supplied client and KDC principals.
+func (c *Client) BuildPAASReqForPrincipals(bodyDER []byte, now time.Time,
+	nonce uint32, client, server principal.Principal) (protocol.PAData, error) {
 	if c == nil || c.Private == nil || (!c.Anonymous && (c.Certificate == nil || c.Signer == nil)) {
 		return protocol.PAData{}, errors.New("pkinit: incomplete client state")
 	}
@@ -110,7 +150,7 @@ func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (prot
 		return protocol.PAData{}, errors.New("pkinit: empty AS-REQ body")
 	}
 	sum := sha1.Sum(bodyDER)
-	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public))
+	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public), SupportedKDFAlgorithmIDs())
 	var cms []byte
 	var err error
 	if c.Anonymous {
@@ -168,7 +208,7 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if err != nil {
 		return VerifiedPAASReq{}, err
 	}
-	auth, publicValue, err := parseAuthPack(content)
+	auth, publicValue, supportedKDFs, err := parseAuthPack(content)
 	if err != nil {
 		return VerifiedPAASReq{}, err
 	}
@@ -176,7 +216,7 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if len(auth.PAChecksum) != len(sum) || subtle.ConstantTimeCompare(auth.PAChecksum, sum[:]) != 1 {
 		return VerifiedPAASReq{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
 	}
-	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, Certificate: cert, Signed: signed}, nil
+	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, SupportedKDFs: supportedKDFs, Certificate: cert, Signed: signed}, nil
 }
 
 // ValidateClientCertificate verifies a PKINIT client certificate chain,
@@ -264,11 +304,11 @@ func ParseAuthPack(data []byte) (AuthPack, error) {
 	if err := requireSingleTLV(data); err != nil {
 		return AuthPack{}, err
 	}
-	auth, pub, err := parseAuthPack(data)
+	auth, pub, supportedKDFs, err := parseAuthPack(data)
 	if err != nil {
 		return AuthPack{}, err
 	}
-	return AuthPack{Authenticator: auth, PublicValue: pub}, nil
+	return AuthPack{Authenticator: auth, PublicValue: pub, SupportedKDFs: supportedKDFs}, nil
 }
 
 // SharedKey derives the RFC 4556 reply key from the KDC DH public value.
@@ -292,10 +332,41 @@ func (c *Client) SharedKeyWithNonces(serverPublic []byte, enctype int32, clientN
 	return octetString2Key(z, enctype)
 }
 
+// SharedKeyWithContext derives the RFC 8636 key when the KDC selected a KDF.
+// A nil algorithm preserves the RFC 4556 octet-string-to-key behavior.
+func (c *Client) SharedKeyWithContext(serverPublic []byte, enctype int32,
+	clientNonce, serverNonce, algorithm []byte, client, server principal.Principal,
+	asReq, pkAsRep []byte) ([]byte, error) {
+	if c == nil || c.Private == nil {
+		return nil, errors.New("pkinit: incomplete DH state")
+	}
+	y := new(big.Int).SetBytes(serverPublic)
+	if !validDHPublicValue(y) {
+		return nil, errors.New("pkinit: invalid DH public value")
+	}
+	shared := new(big.Int).Exp(y, c.Private, group14P).Bytes()
+	padded := make([]byte, (group14P.BitLen()+7)/8)
+	copy(padded[len(padded)-len(shared):], shared)
+	if len(algorithm) == 0 {
+		z := append(append(append([]byte(nil), padded...), clientNonce...), serverNonce...)
+		return octetString2Key(z, enctype)
+	}
+	return DeriveKey(padded, algorithm, client, server, enctype, asReq, pkAsRep)
+}
+
 // BuildPAASRep constructs the DH profile of PA-PK-AS-REP for a client
 // public value. The returned key is the RFC 4556 reply key used to encrypt
 // the AS-REP.
 func BuildPAASRep(clientPublic []byte, enctype int32, nonce uint32, cert *x509.Certificate, signer crypto.Signer) (protocol.PAData, []byte, error) {
+	return BuildPAASRepWithKDF(clientPublic, enctype, nonce, cert, signer, nil,
+		principal.Principal{}, principal.Principal{}, nil)
+}
+
+// BuildPAASRepWithKDF constructs a PA-PK-AS-REP and derives its reply key
+// using the selected RFC 8636 KDF. A nil algorithm selects RFC 4556.
+func BuildPAASRepWithKDF(clientPublic []byte, enctype int32, nonce uint32,
+	cert *x509.Certificate, signer crypto.Signer, algorithm []byte,
+	client, server principal.Principal, asReq []byte) (protocol.PAData, []byte, error) {
 	if cert == nil || signer == nil {
 		return protocol.PAData{}, nil, errors.New("pkinit: certificate and signer are required")
 	}
@@ -318,23 +389,36 @@ func BuildPAASRep(clientPublic []byte, enctype int32, nonce uint32, cert *x509.C
 	shared := new(big.Int).Exp(clientY, private, group14P).Bytes()
 	padded := make([]byte, (group14P.BitLen()+7)/8)
 	copy(padded[len(padded)-len(shared):], shared)
-	replyKey, err := octetString2Key(padded, enctype)
-	if err != nil {
-		return protocol.PAData{}, nil, err
-	}
-	dhInfo := derSeq(
-		derExplicit(0, derBitString(derIntBig(serverY))),
-		derExplicit(1, derInt(int64(nonce))),
-	)
+	dhFields := append(derExplicit(0, derBitString(derIntBig(serverY))),
+		derExplicit(1, derInt(int64(nonce)))...)
+	dhInfo := der(0x30, dhFields)
 	signed, err := signCMSWithContentType(dhInfo,
 		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 2}, cert, signer)
 	if err != nil {
 		return protocol.PAData{}, nil, err
 	}
-	return protocol.PAData{
+	repFields := derImplicitOctet(0, signed)
+	if len(algorithm) != 0 {
+		repFields = append(repFields, derExplicit(2, derSeq(
+			derExplicit(0, der(0x06, algorithm)),
+		))...)
+	}
+	pa := protocol.PAData{
 		PADataType:  PADataASRep,
-		PADataValue: derExplicit(0, derSeq(derImplicitOctet(0, signed))),
-	}, replyKey, nil
+		PADataValue: derExplicit(0, derSeq(repFields)),
+	}
+	if len(algorithm) == 0 {
+		replyKey, err := octetString2Key(padded, enctype)
+		if err != nil {
+			return protocol.PAData{}, nil, err
+		}
+		return pa, replyKey, nil
+	}
+	replyKey, err := DeriveKey(padded, algorithm, client, server, enctype, asReq, pa.PADataValue)
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	return pa, replyKey, nil
 }
 
 func parseSPKIPublicValue(data []byte) (*big.Int, error) {
@@ -364,6 +448,15 @@ func validDHPublicValue(value *big.Int) bool {
 
 // VerifyPAASRep verifies a PA-PK-AS-REP and derives its DH reply key.
 func (c *Client) VerifyPAASRep(data []byte, anchors *x509.CertPool, enctype int32, nonce uint32) ([]byte, error) {
+	return c.VerifyPAASRepWithContext(data, anchors, enctype, nonce,
+		principal.Principal{}, principal.Principal{}, nil)
+}
+
+// VerifyPAASRepWithContext verifies a PA-PK-AS-REP and derives its reply key,
+// including RFC 8636 algorithm-agility context when kdfID is present.
+func (c *Client) VerifyPAASRepWithContext(data []byte, anchors *x509.CertPool,
+	enctype int32, nonce uint32, client, server principal.Principal,
+	asReq []byte) ([]byte, error) {
 	if c == nil {
 		return nil, errors.New("pkinit: nil client")
 	}
@@ -402,13 +495,33 @@ func (c *Client) VerifyPAASRep(data []byte, anchors *x509.CertPool, enctype int3
 		return nil, errors.New("pkinit: KDC DH nonce mismatch")
 	}
 	var serverNonce []byte
-	if len(dhInfo) > 1 {
-		serverNonce, err = tlvContent(dhInfo[1])
-		if err != nil {
-			return nil, errors.New("pkinit: malformed KDC DH nonce")
+	var algorithm []byte
+	for _, field := range dhInfo[1:] {
+		switch field[0] {
+		case 0x81:
+			serverNonce, err = tlvContent(field)
+			if err != nil {
+				return nil, errors.New("pkinit: malformed KDC DH nonce")
+			}
+		case 0xa2:
+			kdfInfo, err := sequenceFields(mustContent(field))
+			if err != nil || len(kdfInfo) != 1 || kdfInfo[0][0] != 0xa0 {
+				return nil, errors.New("pkinit: malformed KDF identifier")
+			}
+			oidDER, err := tlvContent(kdfInfo[0])
+			if err != nil || len(oidDER) == 0 || oidDER[0] != 0x06 {
+				return nil, errors.New("pkinit: malformed KDF OID")
+			}
+			algorithm, err = tlvContent(oidDER)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, errors.New("pkinit: malformed DHRepInfo")
 		}
 	}
-	return c.SharedKeyWithNonces(serverY.Bytes(), enctype, nil, serverNonce)
+	return c.SharedKeyWithContext(serverY.Bytes(), enctype, nil, serverNonce,
+		algorithm, client, server, asReq, data)
 }
 
 func paASRepChoice(data []byte) ([]byte, error) {
@@ -425,47 +538,78 @@ func paASRepChoice(data []byte) ([]byte, error) {
 	return value, nil
 }
 
-func parseAuthPack(data []byte) (PKAuthenticator, []byte, error) {
+func parseAuthPack(data []byte) (PKAuthenticator, []byte, [][]byte, error) {
 	fields, err := sequenceFields(data)
 	if err != nil || len(fields) < 1 {
-		return PKAuthenticator{}, nil, errors.New("pkinit: malformed AuthPack")
+		return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed AuthPack")
 	}
 	afields, err := sequenceFields(mustContent(fields[0]))
 	if err != nil || len(afields) < 4 {
-		return PKAuthenticator{}, nil, fmt.Errorf("pkinit: malformed PKAuthenticator (fields=%d err=%v)", len(afields), err)
+		return PKAuthenticator{}, nil, nil, fmt.Errorf("pkinit: malformed PKAuthenticator (fields=%d err=%v)", len(afields), err)
 	}
 	cusec, err := parseExplicitInteger(afields[0])
 	if err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	ctimeDER, err := tlvContent(afields[1])
 	if err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	var ctime time.Time
 	if _, err := asn1.Unmarshal(ctimeDER, &ctime); err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	nonce, err := parseExplicitInteger(afields[2])
 	if err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	sumDER, err := tlvContent(afields[3])
 	if err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	sum, err := tlvContent(sumDER)
 	if err != nil {
-		return PKAuthenticator{}, nil, err
+		return PKAuthenticator{}, nil, nil, err
 	}
 	var pub []byte
-	if len(fields) > 1 {
-		pub, err = tlvContent(fields[1])
-		if err != nil {
-			return PKAuthenticator{}, nil, err
+	var supportedKDFs [][]byte
+	for _, field := range fields[1:] {
+		switch field[0] {
+		case 0xa1:
+			pub, err = tlvContent(field)
+			if err != nil {
+				return PKAuthenticator{}, nil, nil, err
+			}
+		case 0xa4:
+			content, err := tlvContent(field)
+			if err != nil {
+				return PKAuthenticator{}, nil, nil, err
+			}
+			elements, err := sequenceFields(content)
+			if err != nil || len(elements) == 0 {
+				return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed supportedKDFs")
+			}
+			for _, element := range elements {
+				efields, err := sequenceFields(element)
+				if err != nil || len(efields) != 1 || len(efields[0]) == 0 || efields[0][0] != 0xa0 {
+					return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed KDF algorithm identifier")
+				}
+				oidDER, err := tlvContent(efields[0])
+				if err != nil {
+					return PKAuthenticator{}, nil, nil, err
+				}
+				if len(oidDER) == 0 || oidDER[0] != 0x06 {
+					return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed KDF OID")
+				}
+				oid, err := tlvContent(oidDER)
+				if err != nil {
+					return PKAuthenticator{}, nil, nil, err
+				}
+				supportedKDFs = append(supportedKDFs, append([]byte(nil), oid...))
+			}
 		}
 	}
-	return PKAuthenticator{Cusec: int32(cusec.Int64()), CTime: ctime, Nonce: uint32(nonce.Uint64()), PAChecksum: append([]byte(nil), sum...)}, pub, nil
+	return PKAuthenticator{Cusec: int32(cusec.Int64()), CTime: ctime, Nonce: uint32(nonce.Uint64()), PAChecksum: append([]byte(nil), sum...)}, pub, supportedKDFs, nil
 }
 
 func mustContent(v []byte) []byte {
@@ -476,12 +620,24 @@ func mustContent(v []byte) []byte {
 	return x
 }
 
-func authPackDER(a PKAuthenticator, public []byte) []byte {
+func authPackDER(a PKAuthenticator, public []byte, supported ...[][]byte) []byte {
 	pa := derSeq(
 		derExplicit(0, derInt(int64(a.Cusec))), derExplicit(1, derTime(a.CTime)),
 		derExplicit(2, derInt(int64(a.Nonce))), derExplicit(3, derOctet(a.PAChecksum)),
 	)
-	return derSeq(derExplicit(0, pa), derExplicit(1, public))
+	fields := []byte{}
+	fields = append(fields, derExplicit(0, pa)...)
+	if len(public) != 0 {
+		fields = append(fields, derExplicit(1, public)...)
+	}
+	if len(supported) > 0 && len(supported[0]) > 0 {
+		var ids []byte
+		for _, oid := range supported[0] {
+			ids = append(ids, derSeq(derExplicit(0, der(0x06, oid)))...)
+		}
+		fields = append(fields, derExplicit(4, der(0x30, ids))...)
+	}
+	return der(0x30, fields)
 }
 
 func octetString2Key(z []byte, enctype int32) ([]byte, error) {
@@ -498,6 +654,61 @@ func octetString2Key(z []byte, enctype int32) ([]byte, error) {
 		out = append(out, h.Sum(nil)...)
 	}
 	return out[:need], nil
+}
+
+// DeriveKey implements the RFC 8636 SP800-56A ASN.1 single-step KDF.
+func DeriveKey(secret, algorithm []byte, client, server principal.Principal,
+	enctype int32, asReq, pkAsRep []byte) ([]byte, error) {
+	var newHash func() hash.Hash
+	switch {
+	case bytes.Equal(algorithm, KDFSHA1):
+		newHash = sha1.New
+	case bytes.Equal(algorithm, KDFSHA256):
+		newHash = sha256.New
+	case bytes.Equal(algorithm, KDFSHA512):
+		newHash = sha512.New
+	default:
+		return nil, errors.New("pkinit: unsupported KDF algorithm")
+	}
+	profile, err := krbcrypto.NewRegistry().Get(enctype)
+	if err != nil {
+		return nil, err
+	}
+	partyU := derExplicit(0, derOctet(encodePKINITPrincipal(client)))
+	partyV := derExplicit(1, derOctet(encodePKINITPrincipal(server)))
+	suppPubInfo := derSeq(
+		derExplicit(0, derInt(int64(enctype))),
+		derExplicit(1, derOctet(asReq)),
+		derExplicit(2, derOctet(pkAsRep)),
+	)
+	algorithmIdentifier := derSeq(der(0x06, algorithm))
+	otherInfo := derSeq(algorithmIdentifier, partyU, partyV, derExplicit(2, derOctet(suppPubInfo)))
+	out := make([]byte, 0, profile.KeySize())
+	for counter := uint32(1); len(out) < profile.KeySize(); counter++ {
+		h := newHash()
+		var count [4]byte
+		binary.BigEndian.PutUint32(count[:], counter)
+		_, _ = h.Write(count[:])
+		_, _ = h.Write(secret)
+		_, _ = h.Write(otherInfo)
+		out = append(out, h.Sum(nil)...)
+	}
+	return out[:profile.KeySize()], nil
+}
+
+func encodePKINITPrincipal(value principal.Principal) []byte {
+	var names []byte
+	for _, component := range value.Components {
+		names = append(names, der(0x1b, []byte(component))...)
+	}
+	principalName := derSeq(
+		derExplicit(0, derInt(int64(value.NameType))),
+		derExplicit(1, der(0x30, names)),
+	)
+	return derSeq(
+		derExplicit(0, der(0x1b, []byte(value.Realm))),
+		derExplicit(1, principalName),
+	)
 }
 
 func marshalSPKI(y *big.Int) []byte {

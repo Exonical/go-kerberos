@@ -676,8 +676,14 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
 		}
-		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
-			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
+		selectedKDF := pkinit.PickKDFAlgorithm(verified.SupportedKDFs)
+		requestDER, err := asn1.Marshal(request)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		paRep, replyKey, err := pkinit.BuildPAASRepWithKDF(verified.PublicValue, etypeID,
+			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner, selectedKDF,
+			clientName, serviceName, requestDER)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}

@@ -210,6 +210,9 @@ func TestServerPKINITFASTASExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap FAST PKINIT request: %v", err)
 	}
+	innerRequest := request
+	innerRequest.PAData = protocol.MethodData{pa}
+	requestDER := mustMarshal(t, innerRequest)
 	request.PAData = protocol.MethodData{fastData}
 	var reply protocol.ASRep
 	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
@@ -230,7 +233,8 @@ func TestServerPKINITFASTASExchange(t *testing.T) {
 	if len(pkReply) == 0 {
 		t.Fatal("FAST response omitted PA-PK-AS-REP")
 	}
-	dhKey, err := pkClient.VerifyPAASRep(pkReply, roots, reply.EncPart.EType, request.ReqBody.Nonce)
+	dhKey, err := pkClient.VerifyPAASRepWithContext(pkReply, roots, reply.EncPart.EType,
+		request.ReqBody.Nonce, user, service, requestDER)
 	if err != nil {
 		t.Fatalf("verify FAST PKINIT reply: %v", err)
 	}
