@@ -116,6 +116,11 @@ disposable integration test environments.
 - MIT **FILE ccache** (v4) reader/writer, byte-compatible with `klist`.
 - MIT **DIR** ccache collections (primary switching and subsidiary caches) and
   process-local **MEMORY** ccaches with collection resolution.
+- Heimdal/MIT-compatible **KCM** ccaches over Linux Unix-domain sockets,
+  including cache replacement, retrieval, collection enumeration, KDC
+  offsets, and the MIT `GET_CRED_LIST`/`REPLACE` extensions. The default
+  socket is `/var/run/.heim_org.h5l.kcm-socket`; use `ResolveKCM` for an
+  explicit socket, or pass `-` as the socket to disable KCM.
 - **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
   DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover, and HTTPS KDC Proxy routing for `kdc =

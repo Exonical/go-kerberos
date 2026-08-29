@@ -110,6 +110,16 @@ func TestCapathRealmPath(t *testing.T) {
 	}
 }
 
+func TestKCMSocketSetting(t *testing.T) {
+	cfg, err := Parse([]byte("[libdefaults]\nkcm_socket = /tmp/test-kcm.sock\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KCMSocket != "/tmp/test-kcm.sock" {
+		t.Fatalf("KCMSocket = %q", cfg.KCMSocket)
+	}
+}
+
 func TestCapathRealmPathRejectsLoopsAndExcessHops(t *testing.T) {
 	cfg := &Config{CapathOptions: map[string]map[string][]string{
 		"A": {"C": {"B", "A"}},

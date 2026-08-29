@@ -18,6 +18,7 @@ const (
 	TypeFile   Type = "FILE"
 	TypeDir    Type = "DIR"
 	TypeMemory Type = "MEMORY"
+	TypeKCM    Type = "KCM"
 )
 
 // Handle is a resolved credential cache. DIR handles refer to either a
@@ -28,6 +29,7 @@ type Handle struct {
 	path   string
 	dir    string
 	memory *memoryCache
+	kcm    *kcmHandle
 }
 
 type memoryCache struct {
@@ -60,6 +62,8 @@ func Resolve(name string) (*Handle, error) {
 		return resolveDirCollection(strings.TrimPrefix(name, "DIR:"))
 	case strings.HasPrefix(name, "MEMORY:"):
 		return resolveMemory(strings.TrimPrefix(name, "MEMORY:"))
+	case strings.HasPrefix(name, "KCM:"):
+		return resolveKCM(strings.TrimPrefix(name, "KCM:"))
 	default:
 		return nil, fmt.Errorf("ccache: unsupported cache type in %q", name)
 	}
@@ -174,6 +178,9 @@ func (h *Handle) Read() (*Cache, error) {
 		}
 		return cloneCache(h.memory.cache), nil
 	}
+	if h.typ == TypeKCM {
+		return h.kcm.read()
+	}
 	file, err := os.Open(h.path)
 	if err != nil {
 		return nil, err
@@ -197,6 +204,9 @@ func (h *Handle) Write(cache *Cache) error {
 		h.memory.mu.Unlock()
 		return nil
 	}
+	if h.typ == TypeKCM {
+		return h.kcm.write(cache)
+	}
 	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
@@ -210,6 +220,9 @@ func (h *Handle) Write(cache *Cache) error {
 
 // Primary resolves the current primary subsidiary of a DIR collection.
 func (h *Handle) Primary() (*Handle, error) {
+	if h != nil && h.typ == TypeKCM {
+		return ResolveKCM("", h.kcm.socket)
+	}
 	if h == nil || h.typ != TypeDir {
 		return nil, errors.New("ccache: primary is only available for DIR caches")
 	}
@@ -225,6 +238,9 @@ func (h *Handle) Primary() (*Handle, error) {
 
 // SetPrimary makes a DIR subsidiary the collection's primary cache.
 func (h *Handle) SetPrimary() error {
+	if h != nil && h.typ == TypeKCM {
+		return h.SetDefault()
+	}
 	if h == nil || h.typ != TypeDir || h.dir == "" {
 		return errors.New("ccache: primary is only available for DIR caches")
 	}
@@ -236,6 +252,9 @@ func (h *Handle) SetPrimary() error {
 
 // New creates a unique tktXXXXXX subsidiary in a DIR collection.
 func (h *Handle) New() (*Handle, error) {
+	if h != nil && h.typ == TypeKCM {
+		return h.kcm.newCache()
+	}
 	if h == nil || h.typ != TypeDir || h.dir == "" {
 		return nil, errors.New("ccache: new cache requires a DIR collection")
 	}
@@ -277,6 +296,9 @@ func (h *Handle) Collection() ([]*Handle, error) {
 		}
 		return result, nil
 	}
+	if h.typ == TypeKCM {
+		return h.kcm.collection()
+	}
 	if h.typ != TypeDir {
 		return []*Handle{h}, nil
 	}
@@ -311,6 +333,7 @@ func ReadName(name string) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer cache.Close()
 	return cache.Read()
 }
 
@@ -320,6 +343,7 @@ func WriteName(name string, cache *Cache) error {
 	if err != nil {
 		return err
 	}
+	defer resolved.Close()
 	return resolved.Write(cache)
 }
 
@@ -329,6 +353,7 @@ func Collection(name string) ([]*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resolved.Close()
 	return resolved.Collection()
 }
 
