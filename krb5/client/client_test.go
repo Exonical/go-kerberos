@@ -14,8 +14,10 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -47,12 +49,16 @@ func TestASExchangePreauthRetry(t *testing.T) {
 					NameType:   int32(principal.NTSrvInstance),
 					NameString: []string{"krbtgt", testRealm},
 				},
-				EData: mustMarshal(t, protocol.MethodData{{PADataType: 19, PADataValue: mustMarshal(t, protocol.ETypeInfo2{
-					{EType: crypto.EnctypeAES256SHA1},
-				})}}),
+				EData: mustMarshal(t, protocol.MethodData{
+					{PADataType: preauth.PADataSPAKE},
+					{PADataType: 19, PADataValue: mustMarshal(t, protocol.ETypeInfo2{
+						{EType: crypto.EnctypeAES256SHA1},
+					})},
+				}),
 			})
 		}
-		if request.PAData == nil || len(request.PAData) != 1 {
+		if request.PAData == nil || len(request.PAData) != 1 ||
+			request.PAData[0].PADataType != preauth.PADataEncryptedTimestamp {
 			t.Fatalf("preauth data = %#v", request.PAData)
 		}
 		key, err := profile.StringToKey([]byte("password"), []byte(testRealm+"alice"), nil)
@@ -98,6 +104,108 @@ func TestASExchangePreauthRetry(t *testing.T) {
 		result.Client.Components[0] != clientPrincipal.Components[0] ||
 		result.Key.KeyType != crypto.EnctypeAES256SHA1 {
 		t.Fatalf("result = %#v, calls = %d", result, calls)
+	}
+}
+
+func TestASExchangeAcceptsMixedSPAKEFactors(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	clientPrincipal := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := profile.StringToKey([]byte("password"), []byte(testRealm+"alice"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	support, err := spake.EncodeSupport([]int32{spake.GroupEdwards25519})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := spake.DeriveW(profile, key, spake.GroupEdwards25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPrivate, serverPublic, err := spake.Keygen(spake.GroupEdwards25519, w, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challengeDER, err := asn1.Marshal(protocol.PASPAKE{Challenge: &protocol.SPAKEChallenge{
+		Group: spake.GroupEdwards25519, PubKey: serverPublic,
+		Factors: []protocol.SPAKESecondFactor{{Type: 99}, {Type: spake.FactorNone}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.ASReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		calls++
+		if calls == 1 {
+			return asn1.Marshal(protocol.KRBError{
+				PVNO: 5, MsgType: 30, STime: kerberosTime(now), ErrorCode: 25,
+				Realm: testRealm,
+				SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+				EData: mustMarshal(t, protocol.MethodData{
+					{PADataType: preauth.PADataSPAKE, PADataValue: challengeDER},
+					{PADataType: 19, PADataValue: mustMarshal(t, protocol.ETypeInfo2{{EType: crypto.EnctypeAES256SHA1}})},
+				}),
+			})
+		}
+		if len(request.PAData) != 1 || request.PAData[0].PADataType != preauth.PADataSPAKE {
+			t.Fatalf("response PA-DATA = %#v", request.PAData)
+		}
+		response, err := spake.Decode(request.PAData[0].PADataValue)
+		if err != nil || response.Response == nil {
+			t.Fatalf("SPAKE response = %#v, %v", response, err)
+		}
+		result, err := spake.Result(spake.GroupEdwards25519, w, serverPrivate, response.Response.PubKey, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transcript := spake.Transcript(nil, support, challengeDER)
+		transcript = spake.Transcript(transcript, response.Response.PubKey, nil)
+		bodyDER, err := asn1.Marshal(request.ReqBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k0, err := spake.DeriveKey(profile, key, w, result, transcript, bodyDER, spake.GroupEdwards25519, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionKey := bytes.Repeat([]byte{0x42}, profile.KeySize())
+		encPart := mustMarshal(t, protocol.EncASRepPart{
+			Key:      protocol.EncryptionKey{KeyType: profile.ID(), KeyValue: sessionKey},
+			Nonce:    request.ReqBody.Nonce,
+			AuthTime: kerberosTime(now), EndTime: kerberosTime(now.Add(time.Hour)),
+			SRealm: testRealm,
+			SName:  protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+		})
+		cipher, err := profile.Encrypt(k0, 3, encPart)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return asn1.Marshal(protocol.ASRep{
+			PVNO: 5, MsgType: 11, CRealm: testRealm,
+			CName: protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
+			Ticket: protocol.Ticket{
+				TktVNO: 5, Realm: testRealm,
+				SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+				EncPart: protocol.EncryptedData{EType: profile.ID(), Cipher: []byte{1}},
+			},
+			EncPart: protocol.EncryptedData{EType: profile.ID(), Cipher: cipher},
+		})
+	}
+	credentials, err := (&Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(
+		context.Background(), clientPrincipal, "password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	if calls != 2 || credentials.Key.KeyType != profile.ID() {
+		t.Fatalf("credentials = %#v, calls = %d", credentials, calls)
 	}
 }
 

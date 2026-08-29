@@ -136,6 +136,9 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			return nil, fmt.Errorf("AS exchange string-to-key: %w", err)
 		}
 		if challengePA := preauth.FindPAData(methodData, preauth.PADataSPAKE); challengePA != nil {
+			if len(challengePA.PADataValue) == 0 {
+				goto timestampFallback
+			}
 			msg, err := spake.Decode(challengePA.PADataValue)
 			if err != nil {
 				return nil, fmt.Errorf("AS exchange SPAKE challenge: %w", err)
@@ -145,12 +148,14 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 				// established PA-ENC-TIMESTAMP fallback in that case.
 				goto timestampFallback
 			}
+			supportsFactor := false
 			for _, factor := range msg.Challenge.Factors {
-				if factor.Type != spake.FactorNone {
-					return nil, fmt.Errorf("AS exchange SPAKE: unsupported second factor %d", factor.Type)
+				if factor.Type == spake.FactorNone {
+					supportsFactor = true
+					break
 				}
 			}
-			if len(msg.Challenge.Factors) == 0 {
+			if !supportsFactor {
 				return nil, fmt.Errorf("AS exchange SPAKE: challenge has no supported factor")
 			}
 			challengeDER := challengePA.PADataValue

@@ -249,6 +249,68 @@ func TestASAccountLockout(t *testing.T) {
 	}
 }
 
+func TestASSPAKEAccountLockout(t *testing.T) {
+	now := time.Unix(2000000125, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.EnableSPAKE = true
+	db := server.DB.(*kdb.Database)
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "spake-locked", MaxFailure: 2}); err != nil {
+		t.Fatal(err)
+	}
+	user, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*user)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	record.Policy = "spake-locked"
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := kclient.ASExchange(context.Background(), *user, "wrong-password"); err == nil ||
+			!hasKRBCode(err, kdcErrPreauthFailed) {
+			t.Fatalf("SPAKE attempt %d error = %v, want preauth failure", attempt, err)
+		}
+		record, _, err = db.Lookup(*user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if record.FailAuthCount != uint32(attempt) {
+			t.Fatalf("SPAKE attempt %d failure count = %d", attempt, record.FailAuthCount)
+		}
+	}
+	if _, err := kclient.ASExchange(context.Background(), *user, "alice-password"); err == nil ||
+		!hasKRBCode(err, kdcErrClientRevoked) {
+		t.Fatalf("SPAKE locked account error = %v, want client revoked", err)
+	}
+}
+
+func TestASSPAKEExpiredCookie(t *testing.T) {
+	now := time.Unix(2000000150, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnableSPAKE = true
+	var calls int
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		calls++
+		if calls == 2 {
+			server.Now = func() time.Time { return now.Add(spakeCookieLifetime + time.Second) }
+		}
+		return server.HandleMessage(payload), nil
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	_, err := (&client.Client{Now: func() time.Time { return now }, Exchange: exchange}).ASExchange(
+		context.Background(), user, "alice-password")
+	if err == nil || !hasKRBCode(err, kdcErrPreauthFailed) {
+		t.Fatalf("expired SPAKE cookie error = %v, want preauth failure", err)
+	}
+	if calls != 2 {
+		t.Fatalf("AS exchange calls = %d, want 2", calls)
+	}
+}
+
 func TestASAccountLockoutConcurrentFailuresAreAtomic(t *testing.T) {
 	const attempts = 16
 	now := time.Unix(2000000150, 0).UTC()

@@ -90,17 +90,6 @@ func scalar(data []byte) (*edwards25519.Scalar, error) {
 	return value, nil
 }
 
-func canonicalScalar(data []byte) (*edwards25519.Scalar, error) {
-	if len(data) != 32 {
-		return nil, fmt.Errorf("SPAKE scalar must be 32 bytes")
-	}
-	value, err := new(edwards25519.Scalar).SetCanonicalBytes(data)
-	if err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
 // KeygenWithPrivate computes a masked public value from a supplied private
 // scalar. It is useful for deterministic vectors and test harnesses.
 func KeygenWithPrivate(group int32, w, private []byte, useM bool) ([]byte, error) {

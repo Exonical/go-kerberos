@@ -38,6 +38,7 @@ const (
 	defaultTCPIdleTimeout  = time.Minute
 	defaultTCPConnections  = 45
 	defaultUDPWorkers      = 1024
+	spakeCookieLifetime    = 10 * time.Minute
 	paTGSReq               = 1
 	paEncTimestamp         = 2
 	paFXCookie             = 133
@@ -500,7 +501,18 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
 		var factor protocol.SPAKESecondFactor
-		if err != nil || asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
+		if err != nil {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			if armor != nil {
+				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+			}
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		if asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			if armor != nil {
+				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+			}
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
@@ -1939,26 +1951,32 @@ func supportsSPAKEGroup(pa *protocol.PAData, group int32) bool {
 	return false
 }
 
-func (s *Server) spakeKey() []byte {
+func (s *Server) spakeKey() ([]byte, error) {
 	s.spakeCookieMu.Lock()
 	defer s.spakeCookieMu.Unlock()
 	if len(s.spakeCookieKey) == 0 {
 		s.spakeCookieKey = make([]byte, 32)
-		_, _ = io.ReadFull(crypto.RandomSource, s.spakeCookieKey)
+		if _, err := io.ReadFull(crypto.RandomSource, s.spakeCookieKey); err != nil {
+			s.spakeCookieKey = nil
+			return nil, err
+		}
 	}
-	return append([]byte(nil), s.spakeCookieKey...)
+	return append([]byte(nil), s.spakeCookieKey...), nil
 }
 
 func (s *Server) makeSPAKECookie(group int32, private, transcript []byte) ([]byte, error) {
 	if len(private) != 32 || len(transcript) == 0 {
 		return nil, fmt.Errorf("invalid SPAKE cookie state")
 	}
-	data := make([]byte, 0, 2+2+4+4+32+4+len(transcript))
+	data := make([]byte, 0, 2+2+8+4+4+32+4+len(transcript))
 	var b2 [2]byte
 	binary.BigEndian.PutUint16(b2[:], 1)
 	data = append(data, b2[:]...)
 	binary.BigEndian.PutUint16(b2[:], 0)
 	data = append(data, b2[:]...)
+	var b8 [8]byte
+	binary.BigEndian.PutUint64(b8[:], uint64(s.now().Unix()))
+	data = append(data, b8[:]...)
 	var b4 [4]byte
 	binary.BigEndian.PutUint32(b4[:], uint32(group))
 	data = append(data, b4[:]...)
@@ -1968,18 +1986,26 @@ func (s *Server) makeSPAKECookie(group int32, private, transcript []byte) ([]byt
 	binary.BigEndian.PutUint32(b4[:], uint32(len(transcript)))
 	data = append(data, b4[:]...)
 	data = append(data, transcript...)
-	mac := hmac.New(sha256.New, s.spakeKey())
+	key, err := s.spakeKey()
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(data)
 	return append(data, mac.Sum(nil)...), nil
 }
 
 func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, bool) {
-	if pa == nil || len(pa.PADataValue) < 2+2+4+4+32+4+sha256.Size {
+	if pa == nil || len(pa.PADataValue) < 2+2+8+4+4+32+4+sha256.Size {
 		return 0, nil, nil, false
 	}
 	data := pa.PADataValue
 	macStart := len(data) - sha256.Size
-	mac := hmac.New(sha256.New, s.spakeKey())
+	key, err := s.spakeKey()
+	if err != nil {
+		return 0, nil, nil, false
+	}
+	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(data[:macStart])
 	if !hmac.Equal(mac.Sum(nil), data[macStart:]) {
 		return 0, nil, nil, false
@@ -1990,6 +2016,11 @@ func (s *Server) parseSPAKECookie(pa *protocol.PAData) (int32, []byte, []byte, b
 	stage := binary.BigEndian.Uint16(data[pos:])
 	pos += 2
 	if version != 1 || stage != 0 || pos+4 > macStart {
+		return 0, nil, nil, false
+	}
+	issuedAt := int64(binary.BigEndian.Uint64(data[pos:]))
+	pos += 8
+	if s.now().Unix() > issuedAt+int64(spakeCookieLifetime/time.Second) {
 		return 0, nil, nil, false
 	}
 	group := int32(binary.BigEndian.Uint32(data[pos:]))
