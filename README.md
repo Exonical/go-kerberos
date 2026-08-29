@@ -72,6 +72,10 @@ disposable integration test environments.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
   sequence enforcement.
+- **MS-KKDCP**: HTTPS KDC Proxy Protocol client and `http.Handler` server,
+  including strict DER wrapper and embedded TCP-length validation. Configure
+  an HTTPS `kdc` entry and provide `client.Client.HTTPAnchors` (or a
+  `kkdcp.Client` with a custom `x509.CertPool`) for private proxy CAs.
 
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
@@ -109,7 +113,8 @@ disposable integration test environments.
 - MIT **DIR** ccache collections (primary switching and subsidiary caches) and
   process-local **MEMORY** ccaches with collection resolution.
 - **krb5.conf** parsing, DNS SRV **KDC discovery**, UDP/TCP transport with
-  response-too-big failover.
+  response-too-big failover, and HTTPS KDC Proxy routing for `kdc =
+  https://host:port/path` entries.
 
 ### CLIs
 - `gokinit`, `goklist`, and `gokvno` — drop-in style equivalents of the MIT
