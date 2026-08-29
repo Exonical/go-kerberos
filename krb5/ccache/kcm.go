@@ -716,14 +716,28 @@ func (h *kcmHandle) collection() ([]*Handle, error) {
 
 // KCMServer serves the Heimdal KCM v2 protocol over a Unix socket.
 type KCMServer struct {
-	Socket      string
-	mu          sync.Mutex
+	Socket string
+	// IsolatePeers scopes all cache state to the Unix peer UID. When false,
+	// the server retains the shared namespace used by the test daemon and
+	// existing callers.
+	IsolatePeers bool
+	mu           sync.Mutex
+	caches       map[string]*kcmServerCache
+	uuids        map[[16]byte]string
+	defaultName  string
+	next         uint64
+	shared       *kcmNamespace
+	namespaces   map[uint32]*kcmNamespace
+	peerUID      func(net.Conn) (uint32, error)
+	listener     net.Listener
+	conns        map[net.Conn]struct{}
+}
+
+type kcmNamespace struct {
 	caches      map[string]*kcmServerCache
 	uuids       map[[16]byte]string
 	defaultName string
 	next        uint64
-	listener    net.Listener
-	conns       map[net.Conn]struct{}
 }
 
 type kcmServerCache struct {
@@ -737,7 +751,17 @@ type kcmServerCache struct {
 
 // NewKCMServer creates an in-memory KCM server at socket.
 func NewKCMServer(socket string) *KCMServer {
-	return &KCMServer{Socket: socket, caches: make(map[string]*kcmServerCache), uuids: make(map[[16]byte]string), conns: make(map[net.Conn]struct{}), defaultName: "default"}
+	shared := &kcmNamespace{
+		caches:      make(map[string]*kcmServerCache),
+		uuids:       make(map[[16]byte]string),
+		defaultName: "default",
+	}
+	return &KCMServer{
+		Socket: socket, caches: shared.caches, uuids: shared.uuids,
+		defaultName: shared.defaultName, shared: shared,
+		namespaces: make(map[uint32]*kcmNamespace),
+		peerUID:    kcmPeerUID, conns: make(map[net.Conn]struct{}),
+	}
 }
 
 // Serve listens and serves KCM requests until the listener fails.
@@ -783,9 +807,23 @@ func (s *KCMServer) ServeListener(listener net.Listener) error {
 		if s.conns == nil {
 			s.conns = make(map[net.Conn]struct{})
 		}
+		uid := uint32(0)
+		if s.IsolatePeers {
+			lookup := s.peerUID
+			if lookup == nil {
+				lookup = kcmPeerUID
+			}
+			var uidErr error
+			uid, uidErr = lookup(conn)
+			if uidErr != nil {
+				_ = conn.Close()
+				s.mu.Unlock()
+				continue
+			}
+		}
 		s.conns[conn] = struct{}{}
 		s.mu.Unlock()
-		go s.serveConn(conn)
+		go s.serveConn(conn, uid)
 	}
 }
 
@@ -810,7 +848,7 @@ func (s *KCMServer) Close() error {
 	return firstErr
 }
 
-func (s *KCMServer) serveConn(conn net.Conn) {
+func (s *KCMServer) serveConn(conn net.Conn, uid uint32) {
 	defer func() {
 		_ = conn.Close()
 		s.mu.Lock()
@@ -822,7 +860,7 @@ func (s *KCMServer) serveConn(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		payload, code := s.dispatch(request)
+		payload, code := s.dispatchPeer(request, uid)
 		reply := make([]byte, 4+len(payload))
 		binary.BigEndian.PutUint32(reply[:4], uint32(code))
 		copy(reply[4:], payload)
@@ -852,29 +890,52 @@ func readRequestFrame(r io.Reader) ([]byte, error) {
 }
 
 func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
+	return s.dispatchPeer(request, 0)
+}
+
+func (s *KCMServer) namespace(uid uint32) *kcmNamespace {
+	if !s.IsolatePeers {
+		return s.shared
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns := s.namespaces[uid]
+	if ns == nil {
+		ns = &kcmNamespace{
+			caches:      make(map[string]*kcmServerCache),
+			uuids:       make(map[[16]byte]string),
+			defaultName: "default",
+		}
+		s.namespaces[uid] = ns
+	}
+	return ns
+}
+
+func (s *KCMServer) dispatchPeer(request []byte, uid uint32) ([]byte, int32) {
 	if len(request) < 4 || request[0] != kcmMajor || request[1] != kcmMinor {
 		return nil, kcmErrInternal
 	}
 	op := binary.BigEndian.Uint16(request[2:4])
 	args := request[4:]
+	ns := s.namespace(uid)
 	switch op {
 	case kcmOpGetDefaultCache:
 		s.mu.Lock()
-		name := s.defaultName
+		name := ns.defaultName
 		s.mu.Unlock()
 		return cstring(name), 0
 	case kcmOpGenNew:
 		s.mu.Lock()
-		s.next++
-		name := fmt.Sprintf("unique%d", s.next)
-		s.ensure(name)
+		ns.next++
+		name := fmt.Sprintf("unique%d", ns.next)
+		s.ensure(ns, name)
 		s.mu.Unlock()
 		return cstring(name), 0
 	case kcmOpGetCacheUUIDList:
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		value := make([]byte, 0, len(s.uuids)*kcmUUIDLen)
-		for uuid := range s.uuids {
+		value := make([]byte, 0, len(ns.uuids)*kcmUUIDLen)
+		for uuid := range ns.uuids {
 			value = append(value, uuid[:]...)
 		}
 		return value, 0
@@ -885,7 +946,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		var uuid [16]byte
 		copy(uuid[:], args)
 		s.mu.Lock()
-		name, ok := s.uuids[uuid]
+		name, ok := ns.uuids[uuid]
 		s.mu.Unlock()
 		if !ok {
 			return nil, kcmErrEnd
@@ -896,13 +957,15 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 	if err != nil {
 		return nil, kcmErrInternal
 	}
-	readOnly := op == kcmOpGetPrincipal || op == kcmOpGetCredList ||
+	requiresExisting := op == kcmOpGetPrincipal || op == kcmOpGetCredList ||
 		op == kcmOpGetCredUUIDList || op == kcmOpGetCredByUUID ||
-		op == kcmOpRetrieve || op == kcmOpRemoveCred || op == kcmOpGetKDCOffset
+		op == kcmOpRetrieve || op == kcmOpRemoveCred || op == kcmOpGetKDCOffset ||
+		op == kcmOpDestroy || op == kcmOpSetDefaultCache || op == kcmOpSetKDCOffset ||
+		op == kcmOpStore
 	s.mu.Lock()
-	cache := s.caches[name]
-	if cache == nil && !readOnly {
-		cache = s.ensure(name)
+	cache := ns.caches[name]
+	if cache == nil && !requiresExisting {
+		cache = s.ensure(ns, name)
 	}
 	s.mu.Unlock()
 	if cache == nil {
@@ -923,10 +986,10 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		return nil, 0
 	case kcmOpDestroy:
 		s.mu.Lock()
-		delete(s.caches, name)
-		delete(s.uuids, cache.uuid)
-		if s.defaultName == name {
-			s.defaultName = "default"
+		delete(ns.caches, name)
+		delete(ns.uuids, cache.uuid)
+		if ns.defaultName == name {
+			ns.defaultName = "default"
 		}
 		s.mu.Unlock()
 		return nil, 0
@@ -948,7 +1011,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		}
 		s.mu.Lock()
 		cache.creds = append(cache.creds, append([]byte(nil), rest...))
-		cache.credUUIDs = append(cache.credUUIDs, s.nextCredentialUUID(cache.uuid))
+		cache.credUUIDs = append(cache.credUUIDs, s.nextCredentialUUID(ns, cache.uuid))
 		s.mu.Unlock()
 		return nil, 0
 	case kcmOpGetCredList:
@@ -1031,7 +1094,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		return nil, kcmErrNotFound
 	case kcmOpSetDefaultCache:
 		s.mu.Lock()
-		s.defaultName = name
+		ns.defaultName = name
 		s.mu.Unlock()
 		return nil, 0
 	case kcmOpGetKDCOffset:
@@ -1050,7 +1113,7 @@ func (s *KCMServer) dispatch(request []byte) ([]byte, int32) {
 		s.mu.Unlock()
 		return nil, 0
 	case kcmOpReplace:
-		return s.replace(cache, rest)
+		return s.replace(ns, cache, rest)
 	default:
 		return nil, kcmErrInternal
 	}
@@ -1153,21 +1216,21 @@ func splitCString(value []byte) (string, []byte, error) {
 	return string(value[:pos]), value[pos+1:], nil
 }
 
-func (s *KCMServer) ensure(name string) *kcmServerCache {
-	cache := s.caches[name]
+func (s *KCMServer) ensure(ns *kcmNamespace, name string) *kcmServerCache {
+	cache := ns.caches[name]
 	if cache != nil {
 		return cache
 	}
-	s.next++
+	ns.next++
 	var uuid [16]byte
-	binary.BigEndian.PutUint64(uuid[8:], s.next)
+	binary.BigEndian.PutUint64(uuid[8:], ns.next)
 	cache = &kcmServerCache{name: name, uuid: uuid}
-	s.caches[name] = cache
-	s.uuids[uuid] = name
+	ns.caches[name] = cache
+	ns.uuids[uuid] = name
 	return cache
 }
 
-func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) {
+func (s *KCMServer) replace(ns *kcmNamespace, cache *kcmServerCache, rest []byte) ([]byte, int32) {
 	if len(rest) < 8 {
 		return nil, kcmErrInternal
 	}
@@ -1198,7 +1261,7 @@ func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) 
 			return nil, kcmErrInternal
 		}
 		creds = append(creds, raw)
-		credUUIDs = append(credUUIDs, s.nextCredentialUUID(cache.uuid))
+		credUUIDs = append(credUUIDs, s.nextCredentialUUID(ns, cache.uuid))
 		rest = rest[n:]
 	}
 	if len(rest) != 0 {
@@ -1213,11 +1276,11 @@ func (s *KCMServer) replace(cache *kcmServerCache, rest []byte) ([]byte, int32) 
 	return nil, 0
 }
 
-func (s *KCMServer) nextCredentialUUID(cache [16]byte) [16]byte {
-	s.next++
+func (s *KCMServer) nextCredentialUUID(ns *kcmNamespace, cache [16]byte) [16]byte {
+	ns.next++
 	var value [16]byte
 	copy(value[:8], cache[:8])
-	binary.BigEndian.PutUint64(value[8:], s.next)
+	binary.BigEndian.PutUint64(value[8:], ns.next)
 	return value
 }
 
