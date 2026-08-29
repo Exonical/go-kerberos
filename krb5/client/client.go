@@ -19,6 +19,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kkdcp"
+	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -59,6 +60,10 @@ type Credentials struct {
 	RenewTill *types.KerberosTime
 	Ticket    []byte
 }
+
+// OTPProvider supplies the token value and optional PIN for an OTP challenge.
+// The challenge contains the token metadata selected by the KDC.
+type OTPProvider func(otp.Challenge) (value string, pin string, err error)
 
 // ToCCacheCredential converts credentials to a FILE ccache credential.
 func (c Credentials) ToCCacheCredential() ccache.Credential {
@@ -436,6 +441,109 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, etypeID, clientKey, armor, now)
 	}
 	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, armor, now)
+}
+
+// ASExchangeFASTOTP obtains initial credentials with RFC 6560 OTP
+// preauthentication inside RFC 6113 FAST. MIT uses the FAST armor key
+// directly both to protect the OTP nonce (usage 45) and as the AS reply key.
+func (c *Client) ASExchangeFASTOTP(ctx context.Context, clientPrincipal principal.Principal,
+	armorTGT *Credentials, provider OTPProvider) (*Credentials, error) {
+	if c == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil client")
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil context")
+	}
+	if armorTGT == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil armor TGT")
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: nil OTP provider")
+	}
+	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
+		return nil, fmt.Errorf("OTP FAST AS exchange: invalid client principal")
+	}
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	armor, err := fast.NewArmor(fast.TGT{
+		Ticket: armorTGT.Ticket, Client: armorTGT.Client, Key: armorTGT.Key,
+	}, now)
+	if err != nil {
+		return nil, err
+	}
+	request, err := c.newASReq(clientPrincipal, now)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = nil
+	fastData, err := armor.WrapASReq(request.ReqBody, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{fastData}
+	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	kerberosError, ok := decodeKRBError(response)
+	if !ok {
+		return nil, fmt.Errorf("OTP FAST AS exchange: expected PREAUTH_REQUIRED")
+	}
+	if kerberosError.Code != 25 {
+		return nil, kerberosError
+	}
+	fastReply, err := armor.UnwrapReply(errorMethodData(kerberosError), nil, request.ReqBody.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange preauthentication: %w", err)
+	}
+	challengePA := preauth.FindPAData(fastReply.PAData, otp.PADataChallenge)
+	if challengePA == nil {
+		return nil, fmt.Errorf("OTP FAST AS exchange: missing PA-OTP-CHALLENGE")
+	}
+	challenge, err := otp.DecodeChallenge(challengePA.PADataValue)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS challenge: %w", err)
+	}
+	value, pin, err := provider(challenge)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS provider: %w", err)
+	}
+	if len(challenge.TokenInfo) == 0 {
+		return nil, fmt.Errorf("OTP FAST AS challenge: no token information")
+	}
+	ti := challenge.TokenInfo[0]
+	otpRequest := otp.Request{
+		Flags: ti.Flags & otp.FlagNextOTP, OTPValue: []byte(value),
+		Format: ti.Format, TokenID: append([]byte(nil), ti.TokenID...),
+		AlgID: ti.AlgID, Vendor: ti.Vendor,
+	}
+	if pin != "" {
+		pinValue := types.UTF8String(pin)
+		otpRequest.PIN = &pinValue
+	}
+	otpRequest.EncData, err = otp.EncryptNonce(armor.EType, armor.Key, challenge.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS request: %w", err)
+	}
+	otpDER, err := otp.EncodeRequest(otpRequest)
+	if err != nil {
+		return nil, fmt.Errorf("OTP FAST AS request: %w", err)
+	}
+	fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{
+		{PADataType: otp.PADataRequest, PADataValue: otpDER},
+	})
+	if err != nil {
+		return nil, err
+	}
+	request.PAData = protocol.MethodData{fastData}
+	response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+	if err != nil {
+		return nil, err
+	}
+	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce,
+		armor.EType.ID(), armor.Key, armor, now)
 }
 
 func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principal, nonce uint32, etypeID int32, key []byte, armor *fast.Armor, now time.Time) (*Credentials, error) {

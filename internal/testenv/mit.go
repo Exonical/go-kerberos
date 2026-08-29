@@ -78,7 +78,18 @@ func StartWithIPROP(t *testing.T) *Realm {
 	return start(t, "", true, "")
 }
 
+// StartWithOTP creates and starts an MIT realm with the OTP KDC
+// preauthentication module configured to use the supplied RADIUS endpoint.
+func StartWithOTP(t *testing.T, radiusServer, radiusSecret string) *Realm {
+	return startWithOTP(t, "", false, "", radiusServer, radiusSecret)
+}
+
 func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Realm {
+	return startWithOTP(t, masterEType, iprop, spakeGroup, "", "")
+}
+
+func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
+	radiusServer, radiusSecret string) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -95,6 +106,19 @@ func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Rea
 	ipropPort := 0
 	if iprop {
 		ipropPort = freePort(t)
+	}
+	otpKDCConfig := ""
+	if radiusServer != "" {
+		secretPath := filepath.Join(dir, "otp-radius.secret")
+		writeFile(t, secretPath, radiusSecret+"\n")
+		otpKDCConfig = fmt.Sprintf(`
+
+[otp]
+ DEFAULT = {
+  server = %s
+  secret = %s
+ }
+`, radiusServer, secretPath)
 	}
 	r := &Realm{
 		Dir:         dir,
@@ -157,7 +181,7 @@ func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Rea
 			return "  spake_preauth_groups = " + spakeGroup + "\n"
 		}
 		return ""
-	}(), dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig))
+	}(), dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig)+otpKDCConfig)
 	acl := "admin/admin@" + RealmName + " sxe\n"
 	if iprop {
 		acl += "kiprop/replica@" + RealmName + " p\n"

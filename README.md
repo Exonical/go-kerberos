@@ -110,6 +110,8 @@ disposable integration test environments.
 ### Formats and configuration
 - MIT **FILE keytab** (v2) reader/writer, byte-compatible with `ktutil`.
 - MIT **FILE ccache** (v4) reader/writer, byte-compatible with `klist`.
+- MIT **DIR** ccache collections (primary switching and subsidiary caches) and
+  process-local **MEMORY** ccaches with collection resolution.
 - **krb5.conf** parsing, DNS SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover, and HTTPS KDC Proxy routing for `kdc =
   https://host:port/path` entries.
@@ -183,6 +185,15 @@ Go KDC requires the anonymous request option, issues an addressless ticket
 with the anonymous flag, and interoperates with MIT `kinit -n` in both
 directions. Ordinary PKINIT continues to require configured client trust
 anchors.
+
+RFC 6560 OTP preauthentication is available through
+`Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
+requires an RFC 6113 FAST armor TGT, and follows MIT's usage-45 encryption
+of the challenge nonce with the FAST armor key. KDCs enable OTP by setting
+`Server.OTPValidator` (and may provide challenge token metadata through
+`Server.OTPTokenInfo`); OTP requests without FAST are rejected. The
+integration suite covers both Go-client-to-MIT-KDC and MIT-client-to-Go-KDC
+exchanges when MIT's `krb5-otp` plugin is installed.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,

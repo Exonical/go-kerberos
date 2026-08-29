@@ -14,7 +14,8 @@ when absent.
 | AES128 SHA256 | RED | RED | RED |
 | AES256 SHA384 | RED | RED | RED |
 | keytab | RED | RED | RED |
-| FILE ccache | RED | RED | RED |
+| FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
+| DIR and MEMORY ccache types | Go resolver, DIR primary/collection and MEMORY concurrency tests | MIT `kinit` DIR collection read by Go | Go DIR collection read by MIT `klist`/`kvno` |
 | AS exchange | RED | RED | RED |
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
@@ -24,6 +25,7 @@ when absent.
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
 | PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
+| PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
 | MIT password policy and KDC account lockout | Go unit + live MIT `kadmin`/`kinit` | MIT policy semantics | Go kadmind policy checks; Go KDC lockout, expiration, and optional persistence |
@@ -227,6 +229,24 @@ target from the same hook. A nil hook permits non-forwardable S4U2Self but
 denies S4U2Proxy with `KDC_ERR_BADOPTION`. Forwarded TGT requests require
 a forwardable header TGT and set the FORWARDED ticket flag while honoring
 requested addresses.
+
+## RFC 6560 OTP preauthentication
+
+The Go client and KDC implement MIT-compatible PA-OTP-CHALLENGE (141) and
+PA-OTP-REQUEST (142) inside FAST. `Client.ASExchangeFASTOTP` obtains the
+token value through a callback; `Server.OTPValidator` validates it and
+`Server.OTPTokenInfo` can supply token metadata. The challenge nonce is
+encrypted directly with the FAST armor key using key usage 45, matching
+MIT krb5 1.22.2; no additional CF2/KDF is used for this request path.
+
+The in-process Go KDC/client OTP exchange is covered by
+`TestServerOTPFASTASExchange`. Live interoperability is covered in both
+directions: `TestGoClientOTPAgainstMITKDC` uses the MIT OTP module with an
+in-process UDP RADIUS acceptor, while `TestMITClientOTPAgainstGoKDC` uses
+MIT `kinit` with a FAST armor ccache and the Go KDC hooks. These tests
+require the Ubuntu `krb5-otp` package (the test remains conditional when
+the plugin is unavailable). The Go KDC includes a FAST cookie in the
+initial OTP challenge, as required by MIT's retry processing.
 
 ## Testing layers
 
