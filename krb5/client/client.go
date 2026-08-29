@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	stdcrypto "crypto"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/binary"
 	"fmt"
@@ -1380,5 +1381,73 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err != nil {
 		return nil, err
 	}
+	if err := verifyAnonymousReplyKX(reply, replyKey); err != nil {
+		return nil, err
+	}
 	return c.decodeASRepForService(response, anon, service, request.ReqBody.Nonce, reply.EncPart.EType, replyKey, now)
+}
+
+const (
+	paPKINITKX         int32 = 147
+	keyUsagePAPKINITKX       = 44
+)
+
+func verifyAnonymousReplyKX(reply protocol.ASRep, replyKey []byte) error {
+	var kxValue []byte
+	for _, item := range reply.PAData {
+		if item.PADataType == paPKINITKX {
+			kxValue = item.PADataValue
+			break
+		}
+	}
+	if len(kxValue) == 0 {
+		return fmt.Errorf("anonymous PKINIT: missing PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+	}
+	var encryptedKey protocol.EncryptedData
+	if err := asn1.Unmarshal(kxValue, &encryptedKey); err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+	}
+	if encryptedKey.EType != reply.EncPart.EType {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype mismatch: %w", krberrors.ErrIntegrity)
+	}
+	etype, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype: %w", krberrors.ErrIntegrity)
+	}
+	plainKey, err := etype.Decrypt(replyKey, keyUsagePAPKINITKX, encryptedKey.Cipher)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX decrypt: %w", krberrors.ErrIntegrity)
+	}
+	var kdcKey protocol.EncryptionKey
+	if err := asn1.Unmarshal(plainKey, &kdcKey); err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key: %w", krberrors.ErrIntegrity)
+	}
+	if kdcKey.KeyType != reply.EncPart.EType {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key enctype mismatch: %w", krberrors.ErrIntegrity)
+	}
+	plainReply, err := etype.Decrypt(replyKey, 3, reply.EncPart.Cipher)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT AS-REP decrypt: %w", krberrors.ErrIntegrity)
+	}
+	if len(plainReply) > 0 && plainReply[0] == 0x7a {
+		plainReply = append([]byte(nil), plainReply...)
+		plainReply[0] = 0x79
+	}
+	var part protocol.EncASRepPart
+	if err := asn1.Unmarshal(plainReply, &part); err != nil {
+		return fmt.Errorf("anonymous PKINIT AS-REP: %w", krberrors.ErrIntegrity)
+	}
+	expected, err := crypto.CF2(
+		etype, kdcKey.KeyValue, replyKey,
+		[]byte("PKINIT"), []byte("KEYEXCHANGE"),
+	)
+	if err != nil {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX derive: %w", krberrors.ErrIntegrity)
+	}
+	if part.Key.KeyType != reply.EncPart.EType ||
+		len(part.Key.KeyValue) != len(expected) ||
+		subtle.ConstantTimeCompare(part.Key.KeyValue, expected) != 1 {
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX session key mismatch: %w", krberrors.ErrIntegrity)
+	}
+	return nil
 }

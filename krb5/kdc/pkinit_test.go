@@ -7,12 +7,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 
 	krb5asn1 "github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -83,6 +85,40 @@ func TestServerAnonymousRequiresPKINIT(t *testing.T) {
 	if kerberosError.ErrorCode != kdcErrBadOption {
 		t.Fatalf("anonymous request error = %d, want %d",
 			kerberosError.ErrorCode, kdcErrBadOption)
+	}
+}
+
+func TestClientAnonymousRejectsMissingPKINITKX(t *testing.T) {
+	now := time.Unix(2000001008, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, _, _ := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	originalExchange := kclient.Exchange
+	kclient.Exchange = func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
+		response, err := originalExchange(ctx, realm, payload)
+		if err != nil {
+			return nil, err
+		}
+		var reply protocol.ASRep
+		if asnErr := krb5asn1.Unmarshal(response, &reply); asnErr != nil || reply.MsgType != 11 {
+			return response, nil
+		}
+		filtered := reply.PAData[:0]
+		for _, item := range reply.PAData {
+			if item.PADataType != 147 {
+				filtered = append(filtered, item)
+			}
+		}
+		reply.PAData = filtered
+		return krb5asn1.Marshal(reply)
+	}
+	_, err := kclient.AnonymousASExchange(context.Background(), "TEST.REALM", roots)
+	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+		t.Fatalf("missing PA-PKINIT-KX error = %v, want integrity", err)
 	}
 }
 

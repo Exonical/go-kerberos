@@ -61,6 +61,7 @@ const (
 	krbAPErrRepeat         = 34
 	krbAPErrSkew           = 37
 	krbAPErrInKeyUsage     = 44
+	keyUsagePAPKINITKX     = 44
 )
 
 // Server is a Kerberos KDC backed by a pluggable principal store.
@@ -861,7 +862,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		encodedKey := marshalDER(protocol.EncryptionKey{
 			KeyType: etypeID, KeyValue: contributionKey,
 		})
-		cipher, encryptErr := etype.Encrypt(replyEncryptionKey.Key, krbAPErrInKeyUsage, encodedKey)
+		cipher, encryptErr := etype.Encrypt(replyEncryptionKey.Key, keyUsagePAPKINITKX, encodedKey)
 		if encryptErr != nil {
 			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 		}
