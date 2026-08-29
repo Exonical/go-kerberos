@@ -2,7 +2,6 @@
 package spnego
 
 import (
-	"bytes"
 	"encoding/asn1"
 	"fmt"
 	"time"
@@ -621,5 +620,3 @@ func (c *Context) VerifyMIC(data, token []byte) error {
 	}
 	return c.ctx.VerifyMIC(data, token)
 }
-
-func oidEqual(a, b asn1.ObjectIdentifier) bool { return bytes.Equal(mustOID(a), mustOID(b)) }
