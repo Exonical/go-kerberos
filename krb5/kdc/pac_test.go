@@ -10,6 +10,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestOptInPACIssuanceAndExtraction(t *testing.T) {
@@ -37,6 +38,14 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	privKey, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
 	plain, err := etype.Decrypt(key.Key, 2, ticket.EncPart.Cipher)
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +54,8 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if err := asn1.Unmarshal(plain, &part); err != nil {
 		t.Fatal(err)
 	}
-	p, err := pac.FromTicket(part, pac.Key{EType: etype, Key: key.Key}, &pac.Key{EType: etype, Key: key.Key})
+	p, err := pac.FromTicket(part, pac.Key{EType: etype, Key: key.Key},
+		&pac.Key{EType: privEType, Key: privKey.Key})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,12 +91,97 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	servicePAC, err := pac.FromTicket(servicePart,
-		pac.Key{EType: serviceEType, Key: serviceKDBKey.Key}, &pac.Key{EType: etype, Key: key.Key})
+		pac.Key{EType: serviceEType, Key: serviceKDBKey.Key},
+		&pac.Key{EType: privEType, Key: privKey.Key})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if data, ok := servicePAC.Buffer(pac.LogonInfo); !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
 		t.Fatalf("TGS logon-info = %x", data)
+	}
+	ticketPAC, ok := servicePAC.Buffer(pac.TicketChecksum)
+	if !ok || len(ticketPAC) < 4 {
+		t.Fatal("TGS PAC is missing ticket checksum")
+	}
+	dummyAuthData, err := pac.DummyAuthorizationData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummyPart := servicePart
+	dummyPart.AuthorizationData = append(append(protocol.AuthorizationData(nil),
+		dummyAuthData...), part.AuthorizationData...)
+	if err := servicePAC.VerifyTicketSignature(marshalDER(dummyPart),
+		pac.Key{EType: privEType, Key: privKey.Key}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPACRenewValidateUsesHeaderKeyAndMixedPrivsvrEnctype(t *testing.T) {
+	now := time.Unix(2000001900, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnablePAC = true
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatal("service principal lookup failed")
+	}
+	header := record.Keys[crypto.EnctypeAES128SHA1]
+	output := record.Keys[crypto.EnctypeAES256SHA1]
+	priv, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	if priv.Enctype == output.Enctype {
+		t.Fatalf("privileged-server key unexpectedly uses output enctype %d", output.Enctype)
+	}
+	headerEType, err := crypto.NewRegistry().Get(header.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputEType, err := crypto.NewRegistry().Get(output.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privEType, err := crypto.NewRegistry().Get(priv.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := pac.New()
+	incomingData, err := incoming.Sign(now, nil,
+		pac.Key{EType: headerEType, Key: header.Key},
+		pac.Key{EType: privEType, Key: priv.Key}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authdata, err := pac.AuthorizationData(incomingData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := protocol.EncTicketPart{
+		AuthTime:          types.KerberosTime{Time: now, Present: true},
+		AuthorizationData: authdata,
+	}
+	if err := server.issuePAC(&part, principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		service, header, output, true, false); err != nil {
+		t.Fatalf("renew PAC re-sign: %v", err)
+	}
+	renewed, err := pac.FromTicket(part,
+		pac.Key{EType: outputEType, Key: output.Key},
+		&pac.Key{EType: privEType, Key: priv.Key})
+	if err != nil {
+		t.Fatalf("renewed PAC verification: %v", err)
+	}
+	if _, ok := renewed.Buffer(pac.TicketChecksum); !ok {
+		t.Fatal("renewed PAC missing ticket checksum")
+	}
+	if err := server.issuePAC(&part, principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		service, output, output, true, false); err != nil {
+		t.Fatalf("validate PAC re-sign: %v", err)
+	}
+	if _, err := pac.FromTicket(part,
+		pac.Key{EType: outputEType, Key: output.Key},
+		&pac.Key{EType: privEType, Key: priv.Key}); err != nil {
+		t.Fatalf("validated PAC verification: %v", err)
 	}
 }
 

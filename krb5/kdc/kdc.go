@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -869,7 +870,7 @@ func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.A
 	return request, armor, 0
 }
 
-func (s *Server) pacPrivsvrKey(etypeID int32) (kdb.Key, bool) {
+func (s *Server) pacPrivsvrKey() (kdb.Key, bool) {
 	name := principal.Principal{
 		Realm: s.Realm, NameType: principal.NTSrvInstance,
 		Components: []string{"krbtgt", s.Realm},
@@ -878,16 +879,31 @@ func (s *Server) pacPrivsvrKey(etypeID int32) (kdb.Key, bool) {
 	if err != nil || !ok {
 		return kdb.Key{}, false
 	}
-	key, ok := record.Keys[etypeID]
-	return key, ok
+	enctypes := make([]int, 0, len(record.Keys))
+	registry := crypto.NewRegistry()
+	for enctype, key := range record.Keys {
+		if key.KVNO != 0 && record.KVNO != 0 && key.KVNO != record.KVNO {
+			continue
+		}
+		if _, err := registry.Get(enctype); err == nil {
+			enctypes = append(enctypes, int(enctype))
+		}
+	}
+	sort.Ints(enctypes)
+	if len(enctypes) == 0 {
+		return kdb.Key{}, false
+	}
+	key := record.Keys[int32(enctypes[0])]
+	key.Enctype = int32(enctypes[0])
+	return key, true
 }
 
 func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service principal.Principal,
-	serviceKey kdb.Key, serviceTicket bool, replaceClient bool) error {
+	headerKey, serviceKey kdb.Key, serviceTicket bool, replaceClient bool) error {
 	if !s.EnablePAC {
 		return nil
 	}
-	privKey, ok := s.pacPrivsvrKey(serviceKey.Enctype)
+	privKey, ok := s.pacPrivsvrKey()
 	if !ok {
 		// AS TGTs use the same krbtgt key for both PAC signatures.
 		if len(service.Components) == 2 && service.Components[0] == "krbtgt" {
@@ -896,17 +912,22 @@ func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service pr
 		}
 	}
 	if !ok {
-		return fmt.Errorf("PAC: no krbtgt key for enctype %d", serviceKey.Enctype)
-	}
-	serverEType, err := crypto.NewRegistry().Get(serviceKey.Enctype)
-	if err != nil {
-		return err
+		return fmt.Errorf("PAC: no usable krbtgt key for PAC signatures")
 	}
 	privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
 	if err != nil {
 		return err
 	}
-	serverPACKey := pac.Key{EType: serverEType, Key: serviceKey.Key}
+	headerEType, err := crypto.NewRegistry().Get(headerKey.Enctype)
+	if err != nil {
+		return err
+	}
+	headerPACKey := pac.Key{EType: headerEType, Key: headerKey.Key}
+	serviceEType, err := crypto.NewRegistry().Get(serviceKey.Enctype)
+	if err != nil {
+		return err
+	}
+	serverPACKey := pac.Key{EType: serviceEType, Key: serviceKey.Key}
 	privPACKey := pac.Key{EType: privEType, Key: privKey.Key}
 	p, err := pac.FromAuthorizationData(ticketPart.AuthorizationData)
 	if err != nil {
@@ -914,7 +935,7 @@ func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service pr
 			return err
 		}
 		p = pac.New()
-	} else if err := p.Verify(privPACKey, privPACKey); err != nil {
+	} else if err := p.Verify(headerPACKey, privPACKey); err != nil {
 		return err
 	}
 	if replaceClient {
@@ -931,7 +952,26 @@ func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service pr
 	} else if len(p.Buffers) == 0 {
 		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfo})
 	}
-	encoded, err := p.Sign(ticketPart.AuthTime.Time, &client, serverPACKey, privPACKey, serviceTicket)
+	var dummyTicket []byte
+	if serviceTicket {
+		originalAuthData := ticketPart.AuthorizationData
+		dummyAuthData, err := pac.DummyAuthorizationData()
+		if err != nil {
+			return err
+		}
+		ticketPart.AuthorizationData = append(append(protocol.AuthorizationData(nil),
+			dummyAuthData...), originalAuthData...)
+		dummyTicket = marshalDER(*ticketPart)
+		ticketPart.AuthorizationData = originalAuthData
+	}
+	var encoded []byte
+	if dummyTicket != nil {
+		encoded, err = p.SignWithTicket(ticketPart.AuthTime.Time, &client,
+			serverPACKey, privPACKey, dummyTicket)
+	} else {
+		encoded, err = p.Sign(ticketPart.AuthTime.Time, &client,
+			serverPACKey, privPACKey, serviceTicket)
+	}
 	if err != nil {
 		return err
 	}
@@ -1007,7 +1047,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
-	if err := s.issuePAC(&ticketPart, clientName, serviceName, serviceKey, false, false); err != nil {
+	if err := s.issuePAC(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketPlain := marshalDER(ticketPart)
@@ -1538,7 +1578,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA)
 }
 
 func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bool {
@@ -1663,7 +1703,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -1757,7 +1797,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	ticketPart.Flags = flags
 	if err := s.issuePAC(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
-		serviceName, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
+		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
 		issuedClient != nil); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}

@@ -200,7 +200,9 @@ added after an encoded `EncTicketPart` is available. PAC authorization data
 uses the nested AD-IF-RELEVANT/AD-WIN2K-PAC containers. KDC PAC issuance and
 TGS re-signing are opt-in through `Server.EnablePAC` and the
 `Server.GeneratePAC` opaque logon-info hook; acceptors can use
-`pac.FromTicket` to extract and verify PAC signatures. Full NDR logon-info
+`pac.FromTicket` to extract and verify PAC signatures. Service tickets also
+receive MIT's type-16 ticket checksum using the dummy-PAC encoding flow. Full
+NDR logon-info
 marshaling, RC4-HMAC PAC signing, UPN_DNS_INFO generation, and S4U-specific
 client-info policy are intentionally outside this slice.
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"time"
 	"unicode/utf16"
 
@@ -58,7 +59,7 @@ func Parse(data []byte) (*PAC, error) {
 		return nil, fmt.Errorf("PAC: truncated header")
 	}
 	count := binary.LittleEndian.Uint32(data)
-	if count > maxBuffers {
+	if count == 0 || count > maxBuffers {
 		return nil, fmt.Errorf("PAC: too many buffers: %d", count)
 	}
 	tableLen := uint64(headerLen) + uint64(count)*bufferLen
@@ -66,6 +67,9 @@ func Parse(data []byte) (*PAC, error) {
 		return nil, fmt.Errorf("PAC: truncated buffer table")
 	}
 	p := &PAC{Version: binary.LittleEndian.Uint32(data[4:])}
+	if p.Version != 0 {
+		return nil, fmt.Errorf("PAC: unsupported version %d", p.Version)
+	}
 	p.raw = append([]byte(nil), data...)
 	p.Buffers = make([]Buffer, count)
 	type span struct{ start, end uint64 }
@@ -108,9 +112,6 @@ func (p *PAC) MarshalBinary() ([]byte, error) {
 	}
 	if len(p.Buffers) > maxBuffers {
 		return nil, fmt.Errorf("PAC: too many buffers")
-	}
-	if !p.dirty && p.raw != nil {
-		return append([]byte(nil), p.raw...), nil
 	}
 	if p.raw != nil {
 		if encoded, ok := marshalPreservingLayout(p); ok {
@@ -281,6 +282,9 @@ func (p *PAC) addClientInfo(authtime time.Time, client principal.Principal) erro
 		return nil
 	}
 	encoded := utf16.Encode([]rune(name))
+	if len(encoded)*2 > math.MaxUint16 {
+		return fmt.Errorf("PAC: client-info name is too long")
+	}
 	data := make([]byte, 10+len(encoded)*2)
 	filetime := uint64(authtime.Unix()+11644473600) * 10000000
 	binary.LittleEndian.PutUint64(data, filetime)
@@ -303,6 +307,9 @@ func (p *PAC) SetClientInfo(authtime time.Time, client principal.Principal) erro
 		return err
 	}
 	encoded := utf16.Encode([]rune(name))
+	if len(encoded)*2 > math.MaxUint16 {
+		return fmt.Errorf("PAC: client-info name is too long")
+	}
 	data := make([]byte, 10+len(encoded)*2)
 	filetime := uint64(authtime.Unix()+11644473600) * 10000000
 	binary.LittleEndian.PutUint64(data, filetime)
@@ -314,11 +321,27 @@ func (p *PAC) SetClientInfo(authtime time.Time, client principal.Principal) erro
 	return nil
 }
 
-// Sign adds or replaces MIT PAC signature buffers and returns the encoded PAC.
-// When serviceTicket is true, the full KDC checksum buffer (type 19) is
-// included. A ticket checksum (type 16) is added separately by
-// AddTicketSignature after the EncTicketPart has been encoded.
+// Sign adds or replaces PAC signature buffers and returns the encoded PAC.
+// For a service ticket, use SignWithTicket when the encoded dummy ticket is
+// available so the type-16 ticket checksum is included before the PAC
+// checksums are calculated.
 func (p *PAC) Sign(authtime time.Time, client *principal.Principal, serverKey, privsvrKey Key, serviceTicket bool) ([]byte, error) {
+	return p.sign(authtime, client, serverKey, privsvrKey, serviceTicket, nil)
+}
+
+// SignWithTicket signs a PAC using MIT's ticket-signing order. ticket is the
+// encoded EncTicketPart containing a one-byte dummy PAC authorization-data
+// element.
+func (p *PAC) SignWithTicket(authtime time.Time, client *principal.Principal,
+	serverKey, privsvrKey Key, ticket []byte) ([]byte, error) {
+	if len(ticket) == 0 {
+		return nil, fmt.Errorf("PAC: missing encoded dummy ticket")
+	}
+	return p.sign(authtime, client, serverKey, privsvrKey, true, ticket)
+}
+
+func (p *PAC) sign(authtime time.Time, client *principal.Principal, serverKey, privsvrKey Key,
+	serviceTicket bool, ticket []byte) ([]byte, error) {
 	if p == nil {
 		return nil, fmt.Errorf("PAC: nil value")
 	}
@@ -338,6 +361,18 @@ func (p *PAC) Sign(authtime time.Time, client *principal.Principal, serverKey, p
 		if err := ensureSignature(p, FullChecksum, privsvrKey); err != nil {
 			return nil, err
 		}
+		if ticket != nil {
+			if err := ensureSignature(p, TicketChecksum, privsvrKey); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if ticket != nil {
+		value, err := privsvrKey.EType.Checksum(privsvrKey.Key, checksumUsage, ticket)
+		if err != nil {
+			return nil, err
+		}
+		p.setSignature(TicketChecksum, value)
 	}
 	if err := zeroSignature(p, ServerChecksum); err != nil {
 		return nil, err
@@ -401,6 +436,35 @@ func (p *PAC) AddTicketSignature(encTicketPart []byte, privsvrKey Key) error {
 	return nil
 }
 
+// VerifyTicketSignature verifies the type-16 checksum against an encoded
+// EncTicketPart containing the dummy PAC authorization-data element used
+// during signing.
+func (p *PAC) VerifyTicketSignature(encTicketPart []byte, privsvrKey Key) error {
+	if p == nil {
+		return fmt.Errorf("PAC: nil value")
+	}
+	if privsvrKey.EType == nil || len(privsvrKey.Key) == 0 {
+		return fmt.Errorf("PAC: missing ticket verification key")
+	}
+	expectedType, err := checksumType(privsvrKey)
+	if err != nil {
+		return err
+	}
+	gotType, ok := p.signatureType(TicketChecksum)
+	if !ok || gotType != expectedType {
+		return fmt.Errorf("PAC: ticket checksum type mismatch")
+	}
+	expected, ok := p.signature(TicketChecksum)
+	if !ok {
+		return fmt.Errorf("PAC: missing or malformed ticket checksum")
+	}
+	if err := privsvrKey.EType.VerifyChecksum(privsvrKey.Key, checksumUsage,
+		encTicketPart, expected); err != nil {
+		return fmt.Errorf("PAC ticket checksum: %w", err)
+	}
+	return nil
+}
+
 func (p *PAC) setSignature(typ uint32, value []byte) {
 	p.dirty = true
 	for i := range p.Buffers {
@@ -421,9 +485,16 @@ func (p *PAC) Verify(serverKey, privsvrKey Key) error {
 	if serverKey.EType == nil || len(serverKey.Key) == 0 {
 		return fmt.Errorf("PAC: missing server verification key")
 	}
+	serverType, err := checksumType(serverKey)
+	if err != nil {
+		return err
+	}
 	serverExpected, ok := p.signature(ServerChecksum)
 	if !ok {
 		return fmt.Errorf("PAC: missing or malformed server checksum")
+	}
+	if got, ok := p.signatureType(ServerChecksum); !ok || got != serverType {
+		return fmt.Errorf("PAC: server checksum type mismatch")
 	}
 	var privExpected, fullExpected []byte
 	if _, ok := p.Buffer(KDCChecksum); ok {
@@ -431,11 +502,29 @@ func (p *PAC) Verify(serverKey, privsvrKey Key) error {
 		if !ok {
 			return fmt.Errorf("PAC: missing or malformed KDC checksum")
 		}
+		if privsvrKey.EType != nil {
+			privType, err := checksumType(privsvrKey)
+			if err != nil {
+				return err
+			}
+			if got, ok := p.signatureType(KDCChecksum); !ok || got != privType {
+				return fmt.Errorf("PAC: KDC checksum type mismatch")
+			}
+		}
 	}
 	if _, ok := p.Buffer(FullChecksum); ok {
 		fullExpected, ok = p.signature(FullChecksum)
 		if !ok {
 			return fmt.Errorf("PAC: missing or malformed full checksum")
+		}
+		if privsvrKey.EType != nil {
+			privType, err := checksumType(privsvrKey)
+			if err != nil {
+				return err
+			}
+			if got, ok := p.signatureType(FullChecksum); !ok || got != privType {
+				return fmt.Errorf("PAC: full checksum type mismatch")
+			}
 		}
 	}
 	if fullExpected != nil && privsvrKey.EType != nil {
@@ -487,6 +576,14 @@ func (p *PAC) Verify(serverKey, privsvrKey Key) error {
 		}
 	}
 	return nil
+}
+
+func (p *PAC) signatureType(typ uint32) (int32, bool) {
+	data, ok := p.Buffer(typ)
+	if !ok || len(data) < 4 {
+		return 0, false
+	}
+	return int32(binary.LittleEndian.Uint32(data)), true
 }
 
 func clone(p *PAC) *PAC {

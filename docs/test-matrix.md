@@ -201,16 +201,17 @@ checksum usage 17 for server, KDC, and full PAC signatures. The nested
 AD-IF-RELEVANT/AD-WIN2K-PAC authorization-data form is covered by round-trip
 tests. `Server.EnablePAC` enables Go KDC issuance and TGS re-signing, with
 `Server.GeneratePAC` supplying opaque logon-info bytes. `pac.FromTicket`
-extracts and verifies PACs for acceptors.
+extracts and verifies PACs for acceptors, including checksum-type matching
+against the supplied keys. KDC service-ticket issuance also emits and
+verifies the MIT type-16 ticket checksum using the dummy-PAC ticket encoding
+flow.
 
 The MIT `t_pac.c` container layout is represented by parser and alignment
 goldens; the installed Go crypto registry currently has AES enctypes but not
 RC4-HMAC, so MIT's legacy RC4 signature vectors are parsed but cannot be
 verified by the production checksum implementation. Full Microsoft NDR
 logon-info marshaling, UPN_DNS_INFO generation, and S4U-specific client-info
-substitution are not implemented. Ticket checksum type 16 is exposed through
-`PAC.AddTicketSignature`; the KDC integration does not yet synthesize the
-dummy-ticket encoding required to populate it. No separate live MIT PAC gate
+substitution are not implemented. No separate live MIT PAC gate
 is included because MIT's public command-line tooling does not expose a
 portable PAC construction/inspection operation; the binary container and
 checksum behavior are covered in package tests.

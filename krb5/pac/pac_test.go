@@ -2,12 +2,16 @@ package pac
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
 func TestParseMarshalPAC(t *testing.T) {
@@ -31,6 +35,29 @@ func TestParseMarshalPAC(t *testing.T) {
 	}
 	if !bytes.Equal(input, out) {
 		t.Fatalf("round trip differs:\n%s\n%s", hex.EncodeToString(input), hex.EncodeToString(out))
+	}
+}
+
+func TestMarshalReflectsDirectEditsAfterParse(t *testing.T) {
+	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}).mustMarshal(t)
+	parsed, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Version = 7
+	parsed.Buffers[0].Data[0] = 2
+	parsed.Buffers[0].Type = UPNDNSInfo
+	got, err := parsed.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(raw, got) {
+		t.Fatal("MarshalBinary returned stale raw encoding")
+	}
+	if binary.LittleEndian.Uint32(got[4:]) != 7 ||
+		binary.LittleEndian.Uint32(got[8:]) != UPNDNSInfo ||
+		got[24] != 2 {
+		t.Fatalf("direct edits were not encoded: %x", got)
 	}
 }
 
@@ -124,6 +151,53 @@ func TestParseRejectsUnalignedBuffer(t *testing.T) {
 	}
 }
 
+func TestParseRejectsUnsupportedVersion(t *testing.T) {
+	data := make([]byte, 24)
+	data[0] = 1
+	data[12] = 1
+	data[16] = 24
+	data[5] = 1
+	if _, err := Parse(data); err == nil {
+		t.Fatal("Parse accepted unsupported PAC version")
+	}
+}
+
+func TestClientInfoRejectsOversizedName(t *testing.T) {
+	client := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{strings.Repeat("a", 40000)}}
+	if err := (&PAC{}).SetClientInfo(time.Unix(1700000000, 0), client); err == nil {
+		t.Fatal("SetClientInfo accepted oversized UTF-16 name")
+	}
+}
+
+func TestVerifyRejectsChecksumTypeMismatch(t *testing.T) {
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := Key{EType: etype, Key: bytes.Repeat([]byte{0x31}, etype.KeySize())}
+	p := &PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}
+	encoded, err := p.Sign(time.Unix(1700000000, 0), nil, key, key, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Buffers[1].Type == ServerChecksum {
+		binary.LittleEndian.PutUint32(parsed.Buffers[1].Data, uint32(999))
+	} else {
+		for i := range parsed.Buffers {
+			if parsed.Buffers[i].Type == ServerChecksum {
+				binary.LittleEndian.PutUint32(parsed.Buffers[i].Data, uint32(999))
+			}
+		}
+	}
+	if err := parsed.Verify(key, key); err == nil {
+		t.Fatal("Verify accepted mismatched checksum type")
+	}
+}
+
 func TestParseRejectsOverlapAndDuplicateTypes(t *testing.T) {
 	data := make([]byte, 8+2*16+8)
 	data[0] = 2
@@ -154,6 +228,35 @@ func TestAuthorizationDataRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(raw, got) {
 		t.Fatalf("PAC changed through authdata wrapping")
+	}
+}
+
+func TestAddAuthorizationDataReplacesAllPACs(t *testing.T) {
+	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}).mustMarshal(t)
+	outer, err := AuthorizationData(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := append(append(protocol.AuthorizationData(nil), outer...),
+		outer...)
+	replacement := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{2}}}}).mustMarshal(t)
+	updated, err := AddAuthorizationData(combined, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range updated {
+		if entry.ADType != ADIfRelevant {
+			continue
+		}
+		var inner protocol.AuthorizationData
+		if err := asn1.Unmarshal(entry.ADData, &inner); err != nil {
+			t.Fatal(err)
+		}
+		for _, nested := range inner {
+			if nested.ADType == ADWin2KPac && !bytes.Equal(nested.ADData, replacement) {
+				t.Fatal("PAC occurrence was not replaced")
+			}
+		}
 	}
 }
 
