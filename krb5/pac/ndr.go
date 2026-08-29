@@ -637,6 +637,9 @@ func ParseLogonInfo(data []byte) (LogonInfo, error) {
 		if err != nil || count != l.SidCount {
 			return LogonInfo{}, fmt.Errorf("PAC: extra SID count mismatch")
 		}
+		if count > uint32((len(r.data)-r.off)/8) {
+			return LogonInfo{}, fmt.Errorf("PAC: extra SID array exceeds input")
+		}
 		l.ExtraSIDs = make([]SIDAndAttributes, count)
 		sidPresent := make([]bool, count)
 		for i := range l.ExtraSIDs {
