@@ -502,6 +502,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil)
 	}
+	if otpEnabled && armor == nil && !anonymousRequest {
+		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
@@ -563,64 +566,74 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	if spakePA != nil {
 		msg, err := spake.Decode(spakePA.PADataValue)
-		cookiePA := findPA(request.PAData, paFXCookie)
-		group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
-		if err != nil || msg.Response == nil || !okCookie || !s.permitsSPAKEGroup(group) {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		etype, err := crypto.NewRegistry().Get(etypeID)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
-		w, err := spake.DeriveW(etype, clientKey.Key, group)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		transcript = spake.TranscriptForGroup(group, transcript, msg.Response.PubKey, nil)
-		result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		bodyDER, err := asn1.Marshal(request.ReqBody)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		k1, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 1)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		if msg.Response.Factor.EType != etypeID {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
-		var factor protocol.SPAKESecondFactor
-		if err != nil {
-			s.recordPreauthFailure(clientName, &clientRecord)
-			if armor != nil {
-				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+		// A support message with no permitted group is not an attempted
+		// SPAKE response.  MIT ignores it and continues through the ordinary
+		// encrypted-timestamp preauthentication path.
+		if msg.Response == nil {
+			spakePA = nil
+		} else {
+			cookiePA := findPA(request.PAData, paFXCookie)
+			group, private, transcript, okCookie := s.parseSPAKECookie(cookiePA)
+			if !okCookie || !s.permitsSPAKEGroup(group) {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		if asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
-			s.recordPreauthFailure(clientName, &clientRecord)
-			if armor != nil {
-				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+			etype, err := crypto.NewRegistry().Get(etypeID)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			w, err := spake.DeriveW(etype, clientKey.Key, group)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			transcript = spake.TranscriptForGroup(group, transcript, msg.Response.PubKey, nil)
+			result, err := spake.Result(group, w, private, msg.Response.PubKey, false)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			bodyDER, err := asn1.Marshal(request.ReqBody)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			k1, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 1)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			if msg.Response.Factor.EType != etypeID {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			factorPlain, err := etype.Decrypt(k1, spake.KeyUsage, msg.Response.Factor.Cipher)
+			var factor protocol.SPAKESecondFactor
+			if err != nil {
+				s.recordPreauthFailure(clientName, &clientRecord)
+				if armor != nil {
+					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+				}
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			if asn1.Unmarshal(factorPlain, &factor) != nil || factor.Type != spake.FactorNone {
+				s.recordPreauthFailure(clientName, &clientRecord)
+				if armor != nil {
+					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
+				}
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
+			if err != nil {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			s.recordPreauthSuccess(clientName, &clientRecord)
+			if s.passwordExpired(clientRecord) {
+				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
+			}
+			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+				return response
+			}
+			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 		}
-		k0, err := spake.DeriveKey(etype, clientKey.Key, w, result, transcript, bodyDER, group, 0)
-		if err != nil {
-			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-		}
-		s.recordPreauthSuccess(clientName, &clientRecord)
-		if s.passwordExpired(clientRecord) {
-			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
-		}
-		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
-			return response
-		}
-		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
 	}
 	if pkinitPA != nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil ||
@@ -2101,7 +2114,7 @@ func (s *Server) permitsSPAKEGroup(group int32) bool {
 }
 
 func (s *Server) selectSPAKEGroup(pa *protocol.PAData) int32 {
-	if !isSPAKESupport(pa) {
+	if !s.EnableSPAKE || !isSPAKESupport(pa) {
 		return 0
 	}
 	var msg protocol.PASPAKE
