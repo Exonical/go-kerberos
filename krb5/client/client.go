@@ -1373,6 +1373,7 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if err != nil {
 		return nil, err
 	}
+	var requestDER []byte
 	if kerberosError, ok := decodeKRBError(response); ok {
 		if kerberosError.Code != 25 {
 			return nil, kerberosError
@@ -1381,11 +1382,20 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		if err != nil {
 			return nil, fmt.Errorf("PKINIT AS request body: %w", err)
 		}
-		pa, err := pk.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce)
+		serverPrincipal := principal.Principal{
+			Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", clientPrincipal.Realm},
+		}
+		pa, err := pk.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
+			clientPrincipal, serverPrincipal)
 		if err != nil {
 			return nil, err
 		}
 		request.PAData = protocol.MethodData{pa}
+		requestDER, err = asn1.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("PKINIT AS request: %w", err)
+		}
 		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 		if err != nil {
 			return nil, err
@@ -1408,7 +1418,11 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if len(pkReply) == 0 {
 		return nil, fmt.Errorf("PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
 	}
-	replyKey, err := pk.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	replyKey, err := pk.VerifyPAASRepWithContext(pkReply, anchors, reply.EncPart.EType,
+		request.ReqBody.Nonce, clientPrincipal, principal.Principal{
+			Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", clientPrincipal.Realm},
+		}, requestDER)
 	if err != nil {
 		return nil, err
 	}
@@ -1459,11 +1473,24 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err != nil {
 		return nil, fmt.Errorf("anonymous PKINIT AS request body: %w", err)
 	}
-	pa, pkClient, err := pkinit.BuildAnonymousPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	serverPrincipal := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", realm},
+	}
+	pkClient, err := pkinit.NewAnonymousClient()
+	if err != nil {
+		return nil, err
+	}
+	pa, err := pkClient.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
+		anon, serverPrincipal)
 	if err != nil {
 		return nil, err
 	}
 	request.PAData = protocol.MethodData{pa}
+	requestDER, err := asn1.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("anonymous PKINIT AS request: %w", err)
+	}
 	response, err = c.roundTrip(ctx, realm, request)
 	if err != nil {
 		return nil, err
@@ -1485,7 +1512,11 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if len(pkReply) == 0 {
 		return nil, fmt.Errorf("anonymous PKINIT AS exchange: AS-REP has no PA-PK-AS-REP")
 	}
-	replyKey, err := pkClient.VerifyPAASRep(pkReply, anchors, reply.EncPart.EType, request.ReqBody.Nonce)
+	replyKey, err := pkClient.VerifyPAASRepWithContext(pkReply, anchors, reply.EncPart.EType,
+		request.ReqBody.Nonce, principal.Principal{
+			Realm: "WELLKNOWN:ANONYMOUS", NameType: principal.NTWellKnown,
+			Components: []string{"WELLKNOWN", "ANONYMOUS"},
+		}, serverPrincipal, requestDER)
 	if err != nil {
 		return nil, err
 	}

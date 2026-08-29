@@ -181,6 +181,14 @@ with the anonymous flag, and interoperates with MIT `kinit -n` in both
 directions. Ordinary PKINIT continues to require configured client trust
 anchors.
 
+PKINIT also implements RFC 8636 algorithm agility. Clients advertise the MIT
+preference order SHA-256, SHA-1, and SHA-512 using KDF identifiers
+`1.3.6.1.5.2.3.6.2`, `.1`, and `.3`; the KDC selects the first algorithm in
+its preference order that the client supports. The RFC 8636 SP800-56A KDF
+uses the encoded AS-REQ, PA-PK-AS-REP, and PKINIT principal context. If
+`supportedKDFs` or `kdfID` is absent, both sides retain the RFC 4556
+octet-string-to-key fallback for interoperability with legacy peers.
+
 RFC 6560 OTP preauthentication is available through
 `Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
 requires an RFC 6113 FAST armor TGT, and follows MIT's usage-45 encryption

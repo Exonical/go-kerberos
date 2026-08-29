@@ -390,6 +390,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	anonymousRequest := request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0
 	clientName := principalFromProtocol(*request.ReqBody.CName, request.ReqBody.Realm)
+	requestClientName := clientName
 	if anonymousRequest && !isAnonymousPrincipal(clientName) {
 		return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
 	}
@@ -665,7 +666,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
 			if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
-				clientName.Realm, clientName.Components); err != nil {
+				requestClientName.Realm, requestClientName.Components); err != nil {
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 		}
@@ -676,8 +677,18 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
 		}
-		paRep, replyKey, err := pkinit.BuildPAASRep(verified.PublicValue, etypeID,
-			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner)
+		selectedKDF := pkinit.PickKDFAlgorithm(verified.SupportedKDFs)
+		requestDER, err := asn1.Marshal(request)
+		if err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		kdfClientName := requestClientName
+		if anonymousRequest {
+			kdfClientName = anonymousPrincipal()
+		}
+		paRep, replyKey, err := pkinit.BuildPAASRepWithKDF(verified.PublicValue, etypeID,
+			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner, selectedKDF,
+			kdfClientName, serviceName, requestDER)
 		if err != nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
