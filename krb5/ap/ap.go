@@ -68,8 +68,26 @@ type APRepDetails struct {
 
 var replayCache = struct {
 	sync.Mutex
-	entries map[string]struct{}
-}{entries: make(map[string]struct{})}
+	entries    map[string]time.Time
+	lastSweep  time.Time
+	sweepCount int
+}{entries: make(map[string]time.Time)}
+
+func sweepReplayCache(now time.Time, skew time.Duration) {
+	if !replayCache.lastSweep.IsZero() && now.Sub(replayCache.lastSweep) < time.Second {
+		return
+	}
+	if !replayCache.lastSweep.IsZero() && len(replayCache.entries) <= replayCache.sweepCount {
+		return
+	}
+	for key, ctime := range replayCache.entries {
+		if !withinSkew(ctime, now, skew) {
+			delete(replayCache.entries, key)
+		}
+	}
+	replayCache.lastSweep = now
+	replayCache.sweepCount = len(replayCache.entries)
+}
 
 // BuildAPReq constructs an AP-REQ and its initiator state.
 func BuildAPReq(creds *client.Credentials, opts types.APOptions, now time.Time) (*APReq, []byte, error) {
@@ -203,6 +221,9 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 	if skew < 0 {
 		skew = -skew
 	}
+	replayCache.Lock()
+	sweepReplayCache(now, skew)
+	replayCache.Unlock()
 	if !withinSkew(authenticator.Ctime.Time, now, skew) {
 		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
 	}
@@ -211,7 +232,7 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 	replayCache.Lock()
 	_, replayed := replayCache.entries[replayKey]
 	if !replayed {
-		replayCache.entries[replayKey] = struct{}{}
+		replayCache.entries[replayKey] = authenticator.Ctime.Time
 	}
 	replayCache.Unlock()
 	if replayed {

@@ -135,6 +135,84 @@ func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 	}
 }
 
+func TestVerifyAPReqExpiresReplayEntries(t *testing.T) {
+	resetReplayCache()
+	defer resetReplayCache()
+	now := time.Date(2025, 5, 7, 7, 8, 9, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	replayCache.Lock()
+	if len(replayCache.entries) != 1 {
+		t.Fatalf("replay cache size = %d, want 1", len(replayCache.entries))
+	}
+	replayCache.Unlock()
+
+	expiredAt := now.Add(10 * time.Minute)
+	if _, err := VerifyAPReq(kt, der, expiredAt, 5*time.Minute); !errors.Is(err, krberrors.ErrClockSkew) {
+		t.Fatalf("expired authenticator error = %v, want ErrClockSkew", err)
+	}
+	replayCache.Lock()
+	defer replayCache.Unlock()
+	if len(replayCache.entries) != 0 {
+		t.Fatalf("replay cache retained expired entry: %d entries", len(replayCache.entries))
+	}
+}
+
+func TestVerifyAPReqReplayWithinSkewRemainsDetected(t *testing.T) {
+	resetReplayCache()
+	defer resetReplayCache()
+	now := time.Date(2025, 5, 8, 7, 8, 9, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now.Add(time.Minute), 5*time.Minute); err == nil {
+		t.Fatal("VerifyAPReq accepted replay within skew")
+	}
+	replayCache.Lock()
+	defer replayCache.Unlock()
+	if len(replayCache.entries) != 1 {
+		t.Fatalf("replay cache size = %d, want 1", len(replayCache.entries))
+	}
+}
+
+func TestVerifyAPReqReplayCacheRemainsBounded(t *testing.T) {
+	resetReplayCache()
+	defer resetReplayCache()
+	start := time.Date(2025, 5, 9, 7, 8, 9, 0, time.UTC)
+	creds, kt := apFixture(t, start, start.Add(10*time.Minute))
+	const (
+		skew  = time.Second
+		count = 120
+	)
+	for i := 0; i < count; i++ {
+		now := start.Add(time.Duration(i) * 2 * time.Second)
+		_, der, err := BuildAPReq(creds, 0, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyAPReq(kt, der, now, skew); err != nil {
+			t.Fatalf("VerifyAPReq at %s: %v", now, err)
+		}
+		replayCache.Lock()
+		size := len(replayCache.entries)
+		replayCache.Unlock()
+		if size > 1 {
+			t.Fatalf("replay cache size = %d after request %d, want at most 1", size, i)
+		}
+	}
+}
+
 func TestVerifyAPRepRejectsCTimeMismatch(t *testing.T) {
 	now := time.Date(2025, 6, 7, 8, 9, 10, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
@@ -155,6 +233,14 @@ func TestVerifyAPRepRejectsCTimeMismatch(t *testing.T) {
 	if err := VerifyAPRep(request, apRepDER); err == nil {
 		t.Fatal("VerifyAPRep accepted mismatched ctime")
 	}
+}
+
+func resetReplayCache() {
+	replayCache.Lock()
+	defer replayCache.Unlock()
+	replayCache.entries = make(map[string]time.Time)
+	replayCache.lastSweep = time.Time{}
+	replayCache.sweepCount = 0
 }
 
 func apFixture(t *testing.T, start, end time.Time) (*client.Credentials, *keytab.Keytab) {
