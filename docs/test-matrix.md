@@ -15,7 +15,7 @@ when absent.
 | AES256 SHA384 | RED | RED | RED |
 | keytab | RED | RED | RED |
 | FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
-| DIR and MEMORY ccache types | Go resolver, DIR primary/collection and MEMORY concurrency tests | MIT `kinit` DIR collection read by Go | Go DIR collection read by MIT `klist`/`kvno` |
+| DIR, MEMORY, and KCM ccache types | Go resolver, DIR primary/collection, MEMORY concurrency, and KCM v2 framing/server tests | MIT KCM test-server round trips and Go KCM server against MIT CLI where available | MIT KCM protocol operations, UUID fallback, default-cache ordering, and `GET_CRED_LIST`/`REPLACE` |
 | AS exchange | RED | RED | RED |
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
@@ -34,6 +34,16 @@ when absent.
 | MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Full-resync dump transfer is implemented in `krb5/kprop`; live full-resync daemon gates require disposable MIT daemon orchestration and are tracked separately |
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
+
+KCM uses Heimdal protocol version 2.0 over a Unix-domain stream. Requests and
+replies use four-byte big-endian framing; names are NUL terminated, while
+principals and credentials retain the v4 FILE ccache encoding. The client
+enforces the 10 MiB reply limit, maps the Heimdal matching flags, retries
+cached retrieval for older daemons, and falls back from the MIT
+`GET_CRED_LIST` extension to UUID iteration. Linux does not implement the
+optional Mach transport. The Go server is intentionally an in-memory daemon
+for tests and local development; it does not provide daemon authentication or
+persistent storage.
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or

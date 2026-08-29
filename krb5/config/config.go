@@ -22,6 +22,7 @@ type Config struct {
 	DefaultCCacheName       string
 	DefaultKeytabName       string
 	DefaultClientKeytabName string
+	KCMSocket               string
 	UDPPreferenceLimit      int
 	PermittedEnctypes       []int32
 	DefaultTKTEnctypes      []int32
@@ -290,6 +291,8 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DefaultKeytabName = value
 		case "default_client_keytab_name":
 			cfg.DefaultClientKeytabName = value
+		case "kcm_socket":
+			cfg.KCMSocket = value
 		case "udp_preference_limit":
 			limit, err := strconv.Atoi(value)
 			if err != nil || limit < 0 {
