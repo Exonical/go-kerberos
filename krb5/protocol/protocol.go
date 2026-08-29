@@ -27,6 +27,49 @@ type PAData struct {
 	PADataValue []byte `krb5:"tag:2"`
 }
 
+// OTPTokenInfo describes an RFC 6560 token accepted by the KDC.
+type OTPTokenInfo struct {
+	Flags          int32             `krb5:"tag:0"`
+	Vendor         *types.UTF8String `krb5:"tag:1,optional"`
+	Challenge      []byte            `krb5:"tag:2,optional"`
+	Length         *int32            `krb5:"tag:3,optional"`
+	Format         *int32            `krb5:"tag:4,optional"`
+	TokenID        []byte            `krb5:"tag:5,optional"`
+	AlgID          *types.UTF8String `krb5:"tag:6,optional"`
+	IterationCount *int32            `krb5:"tag:8,optional"`
+}
+
+// PAOTPChallenge is the PA-OTP-CHALLENGE payload.
+type PAOTPChallenge struct {
+	Nonce     []byte            `krb5:"tag:0"`
+	Service   *types.UTF8String `krb5:"tag:1,optional"`
+	TokenInfo []OTPTokenInfo    `krb5:"tag:2"`
+	Salt      *string           `krb5:"tag:3,optional"`
+	S2KParams []byte            `krb5:"tag:4,optional"`
+}
+
+// PAOTPRequest is the PA-OTP-REQUEST payload.
+type PAOTPRequest struct {
+	Flags          int32               `krb5:"tag:0"`
+	Nonce          []byte              `krb5:"tag:1,optional"`
+	EncData        EncryptedData       `krb5:"tag:2"`
+	IterationCount *int32              `krb5:"tag:4,optional"`
+	OTPValue       []byte              `krb5:"tag:5,optional"`
+	PIN            *types.UTF8String   `krb5:"tag:6,optional"`
+	Challenge      []byte              `krb5:"tag:7,optional"`
+	Time           *types.KerberosTime `krb5:"tag:8,optional"`
+	Counter        []byte              `krb5:"tag:9,optional"`
+	Format         *int32              `krb5:"tag:10,optional"`
+	TokenID        []byte              `krb5:"tag:11,optional"`
+	AlgID          *types.UTF8String   `krb5:"tag:12,optional"`
+	Vendor         *types.UTF8String   `krb5:"tag:13,optional"`
+}
+
+// PAOTPEncRequest is the encrypted nonce wrapper used by MIT.
+type PAOTPEncRequest struct {
+	Nonce []byte `krb5:"tag:0"`
+}
+
 const (
 	// PADataSPAKE is the RFC PA-SPAKE padata type.
 	PADataSPAKE int32 = 151

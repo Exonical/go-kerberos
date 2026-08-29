@@ -15,6 +15,7 @@ const (
 	tagInteger         = 0x02
 	tagBitString       = 0x03
 	tagOctetString     = 0x04
+	tagUTF8String      = 0x0c
 	tagSequence        = 0x30
 	tagGeneralizedTime = 0x18
 	tagGeneralString   = 0x1b
@@ -215,6 +216,9 @@ func encodeBare(value reflect.Value, depth int) ([]byte, error) {
 		}
 		return encoded, nil
 	}
+	if value.Type() == reflect.TypeOf(types.UTF8String("")) {
+		return encodeTLV(tagUTF8String, []byte(value.String())), nil
+	}
 	switch value.Kind() {
 	case reflect.Bool:
 		if value.Bool() {
@@ -345,6 +349,13 @@ func decodeBare(tag byte, content []byte, destination reflect.Value, depth int) 
 			return err
 		}
 		destination.SetUint(uint64(flags))
+		return nil
+	}
+	if destination.Type() == reflect.TypeOf(types.UTF8String("")) {
+		if tag != tagUTF8String {
+			return fmt.Errorf("unexpected UTF8String tag 0x%x", tag)
+		}
+		destination.SetString(string(content))
 		return nil
 	}
 	switch destination.Kind() {

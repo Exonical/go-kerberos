@@ -179,6 +179,13 @@ with the anonymous flag, and interoperates with MIT `kinit -n` in both
 directions. Ordinary PKINIT continues to require configured client trust
 anchors.
 
+RFC 6560 OTP preauthentication is available through
+`Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
+requires an RFC 6113 FAST armor TGT, and follows MIT's usage-45 encryption
+of the challenge nonce with the FAST armor key. KDCs enable OTP by setting
+`Server.OTPValidator` (and may provide challenge token metadata through
+`Server.OTPTokenInfo`); OTP requests without FAST are rejected.
+
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
 include the encrypted `K/M@REALM` record, and encrypt principal key data with

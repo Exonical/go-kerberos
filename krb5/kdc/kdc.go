@@ -23,6 +23,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -98,6 +99,12 @@ type Server struct {
 	// Hook KRBError codes in the protocol range are returned unchanged; other
 	// errors default to KDC_ERR_POLICY or KRB_ERR_GENERIC as appropriate.
 	Authorize func(client, service principal.Principal, asExchange bool) error
+	// OTPValidator enables RFC 6560 preauthentication for the named
+	// principals. OTP is accepted only inside FAST.
+	OTPValidator func(principal.Principal, string) error
+	// OTPTokenInfo supplies the token metadata advertised in the challenge.
+	// A nil hook uses an unspecified token format.
+	OTPTokenInfo func(principal.Principal) []otp.TokenInfo
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -415,9 +422,11 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
+	otpPA := findPA(request.PAData, otp.PADataRequest)
+	otpEnabled := s.OTPValidator != nil
 	var etypeID int32
 	var clientKey, serviceKey kdb.Key
-	if pkinitPA != nil || anonymousRequest {
+	if pkinitPA != nil || anonymousRequest || otpEnabled {
 		etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
 	} else {
 		etypeID, clientKey, serviceKey, ok = s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
@@ -437,6 +446,54 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
+	}
+	if otpEnabled && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
+		spakePA == nil && otpPA == nil && !s.DisablePreauth {
+		if armor == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		nonce, err := otp.NewNonce(s.now(), armor.etype.KeySize())
+		if err != nil {
+			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+		}
+		tokenInfo := []otp.TokenInfo{{Length: int32Pointer(-1), Format: int32Pointer(-1), IterationCount: int32Pointer(-1)}}
+		if s.OTPTokenInfo != nil {
+			tokenInfo = s.OTPTokenInfo(clientName)
+		}
+		if len(tokenInfo) == 0 {
+			tokenInfo = []otp.TokenInfo{{Length: int32Pointer(-1), Format: int32Pointer(-1), IterationCount: int32Pointer(-1)}}
+		}
+		methodData := protocol.MethodData{{PADataType: otp.PADataChallenge,
+			PADataValue: marshalDER(otp.Challenge{Nonce: nonce, TokenInfo: tokenInfo})}}
+		return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName,
+			marshalDER(methodData), request.ReqBody.Nonce, armor)
+	}
+	if otpPA != nil {
+		if armor == nil || s.OTPValidator == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		otpRequest, err := otp.DecodeRequest(otpPA.PADataValue)
+		if err != nil || otpRequest.EncData.EType != armor.etype.ID() {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		nonce, err := otp.DecryptNonce(armor.etype, armor.key, otpRequest.EncData)
+		if err != nil || otp.ValidateNonce(nonce, armor.etype.KeySize(), s.now(), s.skew()) != nil {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if err := s.OTPValidator(clientName, string(otpRequest.OTPValue)); err != nil {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil)
 	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
@@ -2228,6 +2285,7 @@ func principalSalt(key kdb.Key, name principal.Principal) string {
 }
 
 func stringPointer(value string) *string { return &value }
+func int32Pointer(value int32) *int32    { return &value }
 
 func mandatoryChecksumType(etype int32) int32 {
 	switch etype {
