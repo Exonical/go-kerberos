@@ -190,6 +190,20 @@ of the challenge nonce with the FAST armor key. KDCs enable OTP by setting
 integration suite covers both Go-client-to-MIT-KDC and MIT-client-to-Go-KDC
 exchanges when MIT's `krb5-otp` plugin is installed.
 
+MS-PAC container support is available in `krb5/pac`. PAC headers and aligned
+`PAC_INFO_BUFFER` tables are parsed with strict bounds and overlap checks;
+unknown buffers, including Microsoft logon-info/NDR data, are preserved as
+opaque bytes. The package encodes client-info (type 10), server and KDC
+checksums (types 6 and 7), and MIT's full PAC checksum (type 19), using
+Kerberos application-data checksum usage 17. Ticket checksum type 16 can be
+added after an encoded `EncTicketPart` is available. PAC authorization data
+uses the nested AD-IF-RELEVANT/AD-WIN2K-PAC containers. KDC PAC issuance and
+TGS re-signing are opt-in through `Server.EnablePAC` and the
+`Server.GeneratePAC` opaque logon-info hook; acceptors can use
+`pac.FromTicket` to extract and verify PAC signatures. Full NDR logon-info
+marshaling, RC4-HMAC PAC signing, UPN_DNS_INFO generation, and S4U-specific
+client-info policy are intentionally outside this slice.
+
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
 include the encrypted `K/M@REALM` record, and encrypt principal key data with

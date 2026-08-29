@@ -192,6 +192,29 @@ aliases, and other procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
 
+## MS-PAC
+
+`krb5/pac` covers strict MS-PAC header and `PAC_INFO_BUFFER` parsing,
+eight-byte alignment, bounds and overlap rejection, unknown-buffer
+preservation, client-info FILETIME/UTF-16LE encoding, and MIT application-data
+checksum usage 17 for server, KDC, and full PAC signatures. The nested
+AD-IF-RELEVANT/AD-WIN2K-PAC authorization-data form is covered by round-trip
+tests. `Server.EnablePAC` enables Go KDC issuance and TGS re-signing, with
+`Server.GeneratePAC` supplying opaque logon-info bytes. `pac.FromTicket`
+extracts and verifies PACs for acceptors.
+
+The MIT `t_pac.c` container layout is represented by parser and alignment
+goldens; the installed Go crypto registry currently has AES enctypes but not
+RC4-HMAC, so MIT's legacy RC4 signature vectors are parsed but cannot be
+verified by the production checksum implementation. Full Microsoft NDR
+logon-info marshaling, UPN_DNS_INFO generation, and S4U-specific client-info
+substitution are not implemented. Ticket checksum type 16 is exposed through
+`PAC.AddTicketSignature`; the KDC integration does not yet synthesize the
+dummy-ticket encoding required to populate it. No separate live MIT PAC gate
+is included because MIT's public command-line tooling does not expose a
+portable PAC construction/inspection operation; the binary container and
+checksum behavior are covered in package tests.
+
 The KDB `Store` interface remains compatible with Lookup-only stores.
 Stores may additionally implement `kdb.AliasResolver` to resolve an alias
 principal to its canonical record. The in-memory database exposes this through
