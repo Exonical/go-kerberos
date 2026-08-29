@@ -23,6 +23,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
+| SPNEGO (RFC 4178) over Kerberos GSS | Go unit coverage, including DER, legacy OID, and mechListMIC negotiation | `TestGoSPNEGOInitiatorAgainstMIT` (Python GSSAPI linked to MIT) | `TestMITSPNEGOInitiatorAgainstGo` (Python GSSAPI linked to MIT) |
 | PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
