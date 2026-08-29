@@ -84,6 +84,9 @@ disposable integration test environments.
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
   against real MIT `kinit`, `klist`, and `kvno` clients.
+- RFC 4120 user-to-user authentication (`ENC-TKT-IN-SKEY`), including
+  second-ticket validation, session-key-encrypted service tickets, and AP
+  `USE-SESSION-KEY` acceptance.
 - Optional principal aliases through `kdb.AliasResolver`. AS aliases require
   client canonicalization and return the canonical client name; TGS aliases
   echo the requested service name unless canonicalization is requested.

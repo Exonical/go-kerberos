@@ -54,6 +54,7 @@ const (
 	kdcErrGeneric          = 60
 	kdcErrBadOption        = 13
 	kdcErrPolicy           = 12
+	kdcErrServerNoMatch    = 26
 	kdcErrCannotPostdate   = 10
 	kdcErrClientRevoked    = 18
 	kdcErrKeyExpired       = 23
@@ -1465,6 +1466,13 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	options := request.ReqBody.KDCOptions
+	if options&types.KDCEncTktInSkey != 0 {
+		if len(request.ReqBody.AdditionalTickets) != 1 ||
+			options&(types.KDCRenew|types.KDCValidate|types.KDCForwarded|types.KDCProxy|types.KDCCNameInAddlTkt) != 0 ||
+			requestedServiceName.Realm != s.Realm {
+			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+		}
+	}
 	if options&types.KDCRenew != 0 {
 		if code, ok := s.ticketValidity(ticketPart); !ok {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
@@ -1607,6 +1615,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	var issuedClient *principal.Principal
 	var delegationEvidence *principal.Principal
 	var pacVerifyKey *kdb.Key
+	var u2uTicketKey *kdb.Key
 	if s4uUser != nil {
 		if serviceName.String() != requester.String() || options&types.KDCCNameInAddlTkt != 0 {
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
@@ -1680,6 +1689,55 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			ticketPart.AuthorizationData = evidencePart.AuthorizationData
 		}
 	}
+	if options&types.KDCEncTktInSkey != 0 {
+		second := request.ReqBody.AdditionalTickets[0]
+		if second.Realm != s.Realm ||
+			second.SName.NameType != int32(principal.NTSrvInstance) ||
+			len(second.SName.NameString) != 2 ||
+			second.SName.NameString[0] != "krbtgt" ||
+			second.SName.NameString[1] != s.Realm {
+			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+		}
+		localTGT := principal.Principal{
+			Realm: s.Realm, NameType: principal.NTSrvInstance,
+			Components: []string{"krbtgt", s.Realm},
+		}
+		localTGTRecord, exists, err := s.DB.Lookup(localTGT)
+		if err != nil || !exists {
+			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+		}
+		secondKey, ok := selectKVNO(localTGTRecord, second.EncPart.EType, second.EncPart.KVNO)
+		if !ok {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		secondEType, err := crypto.NewRegistry().Get(secondKey.Enctype)
+		if err != nil {
+			return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
+		}
+		secondPlain, err := secondEType.Decrypt(secondKey.Key, 2, second.EncPart.Cipher)
+		if err != nil {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		var secondPart protocol.EncTicketPart
+		if err := asn1.Unmarshal(secondPlain, &secondPart); err != nil {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		if code, valid := s.ticketValidity(secondPart); !valid {
+			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+		}
+		if secondPart.CRealm != serviceName.Realm ||
+			!sameProtocolPrincipal(secondPart.CName, *protocolPrincipal(serviceName)) {
+			return s.tgsErrorResponse(armor, kdcErrServerNoMatch, request.ReqBody.SName)
+		}
+		if _, err := crypto.NewRegistry().Get(secondPart.Key.KeyType); err != nil ||
+			len(secondPart.Key.KeyValue) == 0 {
+			return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
+		}
+		u2uTicketKey = &kdb.Key{
+			Enctype: secondPart.Key.KeyType,
+			Key:     append([]byte(nil), secondPart.Key.KeyValue...),
+		}
+	}
 	if options&types.KDCForwarded != 0 {
 		if len(serviceName.Components) != 2 || serviceName.Components[0] != "krbtgt" ||
 			serviceName.Components[1] != request.ReqBody.Realm ||
@@ -1689,7 +1747,17 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		ticketPart.Flags |= types.TicketForwarded
 	}
 	etypeID, serviceKey, ok := selectServiceKey(request.ReqBody.EType, serviceRecord)
-	if !ok {
+	if options&types.KDCEncTktInSkey != 0 {
+		for _, requestedEType := range request.ReqBody.EType {
+			if requestedEType == u2uTicketKey.Enctype {
+				etypeID = u2uTicketKey.Enctype
+				break
+			}
+		}
+		if !ok && s.EnablePAC {
+			return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
+		}
+	} else if !ok {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 	}
 	replyKey := ticketPart.Key
@@ -1698,7 +1766,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, pacVerifyKey)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, pacVerifyKey, u2uTicketKey)
 }
 
 func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bool {
@@ -1823,7 +1891,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, pacVerifyKey *kdb.Key) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -1924,14 +1992,22 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		issuedClient != nil, nil, delegationEvidence, pacVerifyKey); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
-	ticketCipher, err := encryptWithKey(serviceKey, 2, marshalDER(ticketPart))
+	ticketEncryptionKey := serviceKey
+	ticketKVNO := serviceKey.KVNO
+	var ticketKVNOPtr = &ticketKVNO
+	if u2uTicketKey != nil {
+		ticketEncryptionKey = *u2uTicketKey
+		ticketKVNO = 0
+		// MIT's optional-zero KVNO encoder omits a zero value on U2U tickets.
+		ticketKVNOPtr = nil
+	}
+	ticketCipher, err := encryptWithKey(ticketEncryptionKey, 2, marshalDER(ticketPart))
 	if err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
-	ticketKVNO := serviceKey.KVNO
 	ticket := protocol.Ticket{
 		TktVNO: 5, Realm: serviceName.Realm, SName: *protocolPrincipal(serviceName),
-		EncPart: protocol.EncryptedData{EType: etypeID, KVNO: &ticketKVNO, Cipher: ticketCipher},
+		EncPart: protocol.EncryptedData{EType: ticketEncryptionKey.Enctype, KVNO: ticketKVNOPtr, Cipher: ticketCipher},
 	}
 	if request.ReqBody.KDCOptions&(types.KDCRenew|types.KDCValidate) != 0 {
 		ticket.SName = headerTicket.SName

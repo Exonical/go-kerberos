@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -47,6 +48,150 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	if !samePrincipal(credentials.Server, service) {
 		t.Fatalf("service server = %v, want %v", credentials.Server, service)
 	}
+}
+
+func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
+	now := time.Unix(2000000010, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.AddPrincipal("bob", "bob-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	alice := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	bob := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"bob"}}
+	aliceTGT, err := kclient.ASExchange(context.Background(), alice, "alice-password")
+	if err != nil {
+		t.Fatalf("alice ASExchange: %v", err)
+	}
+	bobTGT, err := kclient.ASExchange(context.Background(), bob, "bob-password")
+	if err != nil {
+		t.Fatalf("bob ASExchange: %v", err)
+	}
+	credentials, err := kclient.TGSExchangeU2U(context.Background(), bobTGT, aliceTGT.Ticket, alice)
+	if err != nil {
+		t.Fatalf("TGSExchangeU2U: %v", err)
+	}
+	if !credentials.IsSKey || !bytes.Equal(credentials.SecondTicket, aliceTGT.Ticket) {
+		t.Fatalf("U2U credentials metadata = %#v", credentials)
+	}
+	if !samePrincipal(credentials.Server, alice) {
+		t.Fatalf("U2U server = %v, want %v", credentials.Server, alice)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(credentials.Ticket, &ticket); err != nil {
+		t.Fatalf("U2U ticket: %v", err)
+	}
+	peerEType, err := crypto.NewRegistry().Get(aliceTGT.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alicePlain, err := peerEType.Decrypt(aliceTGT.Key.KeyValue, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatalf("decrypt U2U ticket: %v", err)
+	}
+	var aliceTicketPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(alicePlain, &aliceTicketPart); err != nil {
+		t.Fatalf("U2U ticket part: %v", err)
+	}
+	if !bytes.Equal(aliceTicketPart.Key.KeyValue, credentials.Key.KeyValue) {
+		t.Fatal("U2U ticket could not be decrypted with peer TGT session key")
+	}
+	_, apDER, err := ap.BuildAPReq(credentials, types.APUseSessionKey, now)
+	if err != nil {
+		t.Fatalf("BuildAPReq U2U: %v", err)
+	}
+	verified, err := ap.VerifyAPReqWithSessionKey(aliceTGT.Key, apDER, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("VerifyAPReqWithSessionKey: %v", err)
+	}
+	if !samePrincipal(verified.Client, bob) || !samePrincipal(verified.Server, alice) {
+		t.Fatalf("verified U2U AP-REQ = %#v", verified)
+	}
+}
+
+func TestServerUserToUserRejectsInvalidSecondTickets(t *testing.T) {
+	now := time.Unix(2000000015, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.AddPrincipal("bob", "bob-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	alice := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	bob := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"bob"}}
+	aliceTGT, err := kclient.ASExchange(context.Background(), alice, "alice-password")
+	if err != nil {
+		t.Fatalf("alice ASExchange: %v", err)
+	}
+	bobTGT, err := kclient.ASExchange(context.Background(), bob, "bob-password")
+	if err != nil {
+		t.Fatalf("bob ASExchange: %v", err)
+	}
+	tests := []struct {
+		name       string
+		additional []protocol.Ticket
+		want       int32
+	}{
+		{name: "missing", want: kdcErrBadOption},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := server.HandleMessage(rawTGSRequestWithPadata(t, bobTGT, alice, now,
+				types.KDCEncTktInSkey, nil, test.additional))
+			var kerberosError protocol.KRBError
+			if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+				t.Fatalf("KRB-ERROR: %v", err)
+			}
+			if kerberosError.ErrorCode != test.want {
+				t.Fatalf("error code = %d, want %d", kerberosError.ErrorCode, test.want)
+			}
+		})
+	}
+	ordinary, err := kclient.TGSExchange(context.Background(), aliceTGT,
+		principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}})
+	if err != nil {
+		t.Fatalf("ordinary TGSExchange: %v", err)
+	}
+	var nonTGT protocol.Ticket
+	if err := asn1.Unmarshal(ordinary.Ticket, &nonTGT); err != nil {
+		t.Fatal(err)
+	}
+	var second protocol.Ticket
+	if err := asn1.Unmarshal(aliceTGT.Ticket, &second); err != nil {
+		t.Fatal(err)
+	}
+	second.Realm = "FOREIGN.REALM"
+	for _, test := range []struct {
+		name string
+		tkt  protocol.Ticket
+		want int32
+	}{
+		{name: "non-tgt", tkt: nonTGT, want: kdcErrPolicy},
+		{name: "wrong-realm", tkt: second, want: kdcErrPolicy},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := server.HandleMessage(rawTGSRequestWithPadata(t, bobTGT, alice, now,
+				types.KDCEncTktInSkey, nil, []protocol.Ticket{test.tkt}))
+			var kerberosError protocol.KRBError
+			if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+				t.Fatalf("KRB-ERROR: %v", err)
+			}
+			if kerberosError.ErrorCode != test.want {
+				t.Fatalf("error code = %d, want %d", kerberosError.ErrorCode, test.want)
+			}
+		})
+	}
+	second.Realm = "TEST.REALM"
+	t.Run("multiple", func(t *testing.T) {
+		response := server.HandleMessage(rawTGSRequestWithPadata(t, bobTGT, alice, now,
+			types.KDCEncTktInSkey, nil, []protocol.Ticket{second, second}))
+		var kerberosError protocol.KRBError
+		if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+			t.Fatalf("KRB-ERROR: %v", err)
+		}
+		if kerberosError.ErrorCode != kdcErrBadOption {
+			t.Fatalf("error code = %d, want %d", kerberosError.ErrorCode, kdcErrBadOption)
+		}
+	})
 }
 
 func TestServerAuthorizationHookASAndTGS(t *testing.T) {
