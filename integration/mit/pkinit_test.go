@@ -226,6 +226,15 @@ func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
 		traceData, _ := os.ReadFile(trace)
 		t.Fatalf("MIT kinit against Go KDC: %v\noutput: %s\ntrace: %s", err, out, traceData)
 	}
+	traceData, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("read MIT PKINIT trace: %v", err)
+	}
+	traceText := string(traceData)
+	if !strings.Contains(traceText, "PKINIT client used KDF") ||
+		!strings.Contains(strings.ToUpper(traceText), "2B06010502030602") {
+		t.Fatalf("MIT PKINIT trace did not show SHA-256 KDF negotiation:\n%s", traceText)
+	}
 }
 
 func TestMITClientAnonymousPKINITAgainstGoKDC(t *testing.T) {

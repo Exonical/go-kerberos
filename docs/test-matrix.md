@@ -24,7 +24,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
-| PKINIT (RFC 4556) and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented | unit + Go↔Go + MIT client coverage, including both anonymous directions | MIT pass |
+| PKINIT (RFC 4556), RFC 8636 agility, and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented; SHA-256, SHA-1, and SHA-512 KDF identifiers are advertised in MIT preference order | KDF vectors, wire goldens, Go↔Go, Go client ↔ MIT KDC, and MIT client ↔ Go KDC coverage; MIT trace asserts SHA-256 negotiation | MIT pass |
 | PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
 | MIT kadm5 administrative RPC subset and `kadm5.acl` | Go client ↔ Go kadmind + live MIT `kadmind` | MIT `kadmind` and Go `kadm5.Server` | Go client ↔ Go server; MIT `kadmin` ↔ Go server, including ordered ACL grants/denials |
@@ -34,6 +34,13 @@ when absent.
 | MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Full-resync dump transfer is implemented in `krb5/kprop`; live full-resync daemon gates require disposable MIT daemon orchestration and are tracked separately |
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
+| MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
+
+The Go-to-MIT and MIT-to-Go KKDCP gates pass using a disposable TLS proxy and
+a real MIT KDC. The reverse gate skips when the installed MIT runtime lacks
+the `k5tls` plugin; Ubuntu provides it through the optional `krb5-k5tls`
+package. MIT 1.22.2's source contains the HTTPS transport and TLS plugin path
+used as the behavioral reference.
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
@@ -101,15 +108,27 @@ MIT `kvno` FAST-TGS interoperability: its trace contains
 is accepted by the Go KDC. MIT FAST AS interoperability remains covered by
 `kinit -T`.
 
-The PKINIT implementation supports the RFC 4556 Diffie-Hellman profile on
-both the client and Go KDC. The KDC validates the client certificate chain,
+The PKINIT implementation supports the RFC 4556 Diffie-Hellman profile and
+RFC 8636 algorithm agility on both the client and Go KDC. Clients advertise
+KDF identifiers SHA-256 (`1.3.6.1.5.2.3.6.2`), SHA-1
+(`1.3.6.1.5.2.3.6.1`), and SHA-512 (`1.3.6.1.5.2.3.6.3`) in that order.
+The KDC selects the first identifier in its own preference order that appears
+in the client list and includes it in `DHRepInfo`. The SP800-56A KDF binds
+the DH secret to the algorithm identifier, client and KDC principals,
+enctype, encoded AS-REQ, and encoded PA-PK-AS-REP. If either peer omits
+`supportedKDFs` or `kdfID`, the RFC 4556 octet-string-to-key fallback remains
+in use.
+
+The KDC validates the client certificate chain,
 the id-pkinit-KPClientAuth EKU, and the Kerberos principal SAN before signing
 the DH reply and encrypting the AS-REP with the DH-derived reply key. Coverage
 includes Go client ↔ Go KDC, Go client ↔ MIT KDC, and a live MIT
 client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
-available. The implementation currently uses the RFC 3526 MODP group 14
-profile and does not implement group 2 negotiation or newer algorithm-agility
-KDF profiles.
+available; the latter's `KRB5_TRACE` records the SHA-256 KDF identifier.
+The implementation currently uses the RFC 3526 MODP group 14 profile and
+does not implement group 2 negotiation. The SHA-512 KDF is implemented, but
+the MIT DES3 vector is not exercised because this repository does not expose
+the MIT DES3 enctype profile.
 
 Anonymous PKINIT follows RFC 6112/8062: the client sends unsigned DH-only
 PKINIT, and the KDC accepts that form only with the anonymous request option.
@@ -191,6 +210,30 @@ the Go server covers `getprinc`, `addprinc`, `cpw`, `listprincs`, and
 aliases, and other procedures remain out of scope. MIT's legacy
 AUTH-GSSAPI flavor is retained only as a source-compatibility constant; the
 modern MIT 1.22 daemon uses RPCSEC_GSS flavor 6.
+
+## MS-PAC
+
+`krb5/pac` covers strict MS-PAC header and `PAC_INFO_BUFFER` parsing,
+eight-byte alignment, bounds and overlap rejection, unknown-buffer
+preservation, client-info FILETIME/UTF-16LE encoding, and MIT application-data
+checksum usage 17 for server, KDC, and full PAC signatures. The nested
+AD-IF-RELEVANT/AD-WIN2K-PAC authorization-data form is covered by round-trip
+tests. `Server.EnablePAC` enables Go KDC issuance and TGS re-signing, with
+`Server.GeneratePAC` supplying opaque logon-info bytes. `pac.FromTicket`
+extracts and verifies PACs for acceptors, including checksum-type matching
+against the supplied keys. KDC service-ticket issuance also emits and
+verifies the MIT type-16 ticket checksum using the dummy-PAC ticket encoding
+flow.
+
+The MIT `t_pac.c` container layout is represented by parser and alignment
+goldens; the installed Go crypto registry currently has AES enctypes but not
+RC4-HMAC, so MIT's legacy RC4 signature vectors are parsed but cannot be
+verified by the production checksum implementation. Full Microsoft NDR
+logon-info marshaling, UPN_DNS_INFO generation, and S4U-specific client-info
+substitution are not implemented. No separate live MIT PAC gate
+is included because MIT's public command-line tooling does not expose a
+portable PAC construction/inspection operation; the binary container and
+checksum behavior are covered in package tests.
 
 The KDB `Store` interface remains compatible with Lookup-only stores.
 Stores may additionally implement `kdb.AliasResolver` to resolve an alias

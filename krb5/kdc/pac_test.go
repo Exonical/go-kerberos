@@ -1,0 +1,286 @@
+package kdc
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/pac"
+	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
+)
+
+func TestOptInPACIssuanceAndExtraction(t *testing.T) {
+	now := time.Unix(2000001900, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.EnablePAC = true
+	server.GeneratePAC = func(client, service principal.Principal) ([]byte, error) {
+		return []byte{0xaa, 0xbb, 0xcc}, nil
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	creds, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(creds.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := server.DB.Lookup(ticketPrincipal(ticket))
+	if err != nil || !ok {
+		t.Fatalf("lookup ticket key: %v", err)
+	}
+	key := record.Keys[ticket.EncPart.EType]
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privKey, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key.Key, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var part protocol.EncTicketPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatal(err)
+	}
+	p, err := pac.FromTicket(part, pac.Key{EType: etype, Key: key.Key},
+		&pac.Key{EType: privEType, Key: privKey.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, ok := p.Buffer(pac.LogonInfo)
+	if !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
+		t.Fatalf("logon-info = %x", data)
+	}
+
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	serviceCreds, err := kclient.TGSExchange(context.Background(), creds, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serviceTicket protocol.Ticket
+	if err := asn1.Unmarshal(serviceCreds.Ticket, &serviceTicket); err != nil {
+		t.Fatal(err)
+	}
+	serviceRecord, ok, err := server.DB.Lookup(ticketPrincipal(serviceTicket))
+	if err != nil || !ok {
+		t.Fatalf("lookup service key: %v", err)
+	}
+	serviceKDBKey := serviceRecord.Keys[serviceTicket.EncPart.EType]
+	serviceEType, err := crypto.NewRegistry().Get(serviceKDBKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servicePlain, err := serviceEType.Decrypt(serviceKDBKey.Key, 2, serviceTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var servicePart protocol.EncTicketPart
+	if err := asn1.Unmarshal(servicePlain, &servicePart); err != nil {
+		t.Fatal(err)
+	}
+	servicePAC, err := pac.FromTicket(servicePart,
+		pac.Key{EType: serviceEType, Key: serviceKDBKey.Key},
+		&pac.Key{EType: privEType, Key: privKey.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, ok := servicePAC.Buffer(pac.LogonInfo); !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
+		t.Fatalf("TGS logon-info = %x", data)
+	}
+	ticketPAC, ok := servicePAC.Buffer(pac.TicketChecksum)
+	if !ok || len(ticketPAC) < 4 {
+		t.Fatal("TGS PAC is missing ticket checksum")
+	}
+	dummyPart := servicePart
+	dummyPart.AuthorizationData, err = pac.AddDummyAuthorizationData(part.AuthorizationData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := servicePAC.VerifyTicketSignature(marshalDER(dummyPart),
+		pac.Key{EType: privEType, Key: privKey.Key}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPACRenewValidateUsesHeaderKeyAndMixedPrivsvrEnctype(t *testing.T) {
+	now := time.Unix(2000001900, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnablePAC = true
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatal("service principal lookup failed")
+	}
+	header := record.Keys[crypto.EnctypeAES128SHA1]
+	output := record.Keys[crypto.EnctypeAES256SHA1]
+	priv, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	if priv.Enctype == output.Enctype {
+		t.Fatalf("privileged-server key unexpectedly uses output enctype %d", output.Enctype)
+	}
+	headerEType, err := crypto.NewRegistry().Get(header.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputEType, err := crypto.NewRegistry().Get(output.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privEType, err := crypto.NewRegistry().Get(priv.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := pac.New()
+	incomingData, err := incoming.Sign(now, nil,
+		pac.Key{EType: headerEType, Key: header.Key},
+		pac.Key{EType: privEType, Key: priv.Key}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authdata, err := pac.AuthorizationData(incomingData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := protocol.EncTicketPart{
+		AuthTime:          types.KerberosTime{Time: now, Present: true},
+		AuthorizationData: authdata,
+	}
+	if err := server.issuePAC(&part, principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		service, header, output, true, false); err != nil {
+		t.Fatalf("renew PAC re-sign: %v", err)
+	}
+	renewed, err := pac.FromTicket(part,
+		pac.Key{EType: outputEType, Key: output.Key},
+		&pac.Key{EType: privEType, Key: priv.Key})
+	if err != nil {
+		t.Fatalf("renewed PAC verification: %v", err)
+	}
+	if _, ok := renewed.Buffer(pac.TicketChecksum); !ok {
+		t.Fatal("renewed PAC missing ticket checksum")
+	}
+	if err := server.issuePAC(&part, principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		service, output, output, true, false); err != nil {
+		t.Fatalf("validate PAC re-sign: %v", err)
+	}
+	if _, err := pac.FromTicket(part,
+		pac.Key{EType: outputEType, Key: output.Key},
+		&pac.Key{EType: privEType, Key: priv.Key}); err != nil {
+		t.Fatalf("validated PAC verification: %v", err)
+	}
+}
+
+func TestPACTicketChecksumMatchesAuthorizationPlacement(t *testing.T) {
+	now := time.Unix(2000001950, 0).UTC()
+	server, _ := testServer(t, now)
+	server.EnablePAC = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatal("service principal lookup failed")
+	}
+	serviceKey := record.Keys[crypto.EnctypeAES256SHA1]
+	serviceEType, err := crypto.NewRegistry().Get(serviceKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, ok := server.pacPrivsvrKey()
+	if !ok {
+		t.Fatal("privileged-server key unavailable")
+	}
+	privEType, err := crypto.NewRegistry().Get(priv.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		ad   func(t *testing.T) protocol.AuthorizationData
+	}{
+		{
+			name: "existing PAC before unrelated data",
+			ad: func(t *testing.T) protocol.AuthorizationData {
+				t.Helper()
+				existing := pac.New()
+				raw, err := existing.Sign(now, nil,
+					pac.Key{EType: serviceEType, Key: serviceKey.Key},
+					pac.Key{EType: privEType, Key: priv.Key}, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inner, err := asn1.Marshal(protocol.AuthorizationData{
+					{ADType: pac.ADWin2KPac, ADData: raw},
+					{ADType: 77, ADData: []byte("unrelated-inner")},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return protocol.AuthorizationData{
+					{ADType: pac.ADIfRelevant, ADData: inner},
+					{ADType: 78, ADData: []byte("unrelated-outer")},
+				}
+			},
+		},
+		{
+			name: "no PAC after unrelated data",
+			ad: func(t *testing.T) protocol.AuthorizationData {
+				t.Helper()
+				inner, err := asn1.Marshal(protocol.AuthorizationData{
+					{ADType: 79, ADData: []byte("unrelated-inner")},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return protocol.AuthorizationData{
+					{ADType: 80, ADData: []byte("unrelated-outer")},
+					{ADType: pac.ADIfRelevant, ADData: inner},
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.ad(t)
+			part := protocol.EncTicketPart{
+				AuthTime:          types.KerberosTime{Time: now, Present: true},
+				AuthorizationData: original,
+			}
+			if err := server.issuePAC(&part, user, service, serviceKey, serviceKey, true, false); err != nil {
+				t.Fatalf("issue PAC: %v", err)
+			}
+			signed, err := pac.FromTicket(part,
+				pac.Key{EType: serviceEType, Key: serviceKey.Key},
+				&pac.Key{EType: privEType, Key: priv.Key})
+			if err != nil {
+				t.Fatalf("verify signed PAC: %v", err)
+			}
+			dummy, err := pac.AddDummyAuthorizationData(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dummyPart := part
+			dummyPart.AuthorizationData = dummy
+			if err := signed.VerifyTicketSignature(marshalDER(dummyPart),
+				pac.Key{EType: privEType, Key: priv.Key}); err != nil {
+				t.Fatalf("verify ticket checksum: %v", err)
+			}
+		})
+	}
+}
+
+func ticketPrincipal(ticket protocol.Ticket) principal.Principal {
+	return principal.Principal{Realm: ticket.Realm, NameType: principal.NameType(ticket.SName.NameType), Components: ticket.SName.NameString}
+}

@@ -72,6 +72,10 @@ disposable integration test environments.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
   sequence enforcement.
+- **MS-KKDCP**: HTTPS KDC Proxy Protocol client and `http.Handler` server,
+  including strict DER wrapper and embedded TCP-length validation. Configure
+  an HTTPS `kdc` entry and provide `client.Client.HTTPAnchors` (or a
+  `kkdcp.Client` with a custom `x509.CertPool`) for private proxy CAs.
 
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
@@ -110,7 +114,8 @@ disposable integration test environments.
   process-local **MEMORY** ccaches with collection resolution.
 - **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
   DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
-  response-too-big failover.
+  response-too-big failover, and HTTPS KDC Proxy routing for `kdc =
+  https://host:port/path` entries.
 
 ### CLIs
 - `gokinit`, `goklist`, and `gokvno` — drop-in style equivalents of the MIT
@@ -182,6 +187,14 @@ with the anonymous flag, and interoperates with MIT `kinit -n` in both
 directions. Ordinary PKINIT continues to require configured client trust
 anchors.
 
+PKINIT also implements RFC 8636 algorithm agility. Clients advertise the MIT
+preference order SHA-256, SHA-1, and SHA-512 using KDF identifiers
+`1.3.6.1.5.2.3.6.2`, `.1`, and `.3`; the KDC selects the first algorithm in
+its preference order that the client supports. The RFC 8636 SP800-56A KDF
+uses the encoded AS-REQ, PA-PK-AS-REP, and PKINIT principal context. If
+`supportedKDFs` or `kdfID` is absent, both sides retain the RFC 4556
+octet-string-to-key fallback for interoperability with legacy peers.
+
 RFC 6560 OTP preauthentication is available through
 `Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
 requires an RFC 6113 FAST armor TGT, and follows MIT's usage-45 encryption
@@ -190,6 +203,22 @@ of the challenge nonce with the FAST armor key. KDCs enable OTP by setting
 `Server.OTPTokenInfo`); OTP requests without FAST are rejected. The
 integration suite covers both Go-client-to-MIT-KDC and MIT-client-to-Go-KDC
 exchanges when MIT's `krb5-otp` plugin is installed.
+
+MS-PAC container support is available in `krb5/pac`. PAC headers and aligned
+`PAC_INFO_BUFFER` tables are parsed with strict bounds and overlap checks;
+unknown buffers, including Microsoft logon-info/NDR data, are preserved as
+opaque bytes. The package encodes client-info (type 10), server and KDC
+checksums (types 6 and 7), and MIT's full PAC checksum (type 19), using
+Kerberos application-data checksum usage 17. Ticket checksum type 16 can be
+added after an encoded `EncTicketPart` is available. PAC authorization data
+uses the nested AD-IF-RELEVANT/AD-WIN2K-PAC containers. KDC PAC issuance and
+TGS re-signing are opt-in through `Server.EnablePAC` and the
+`Server.GeneratePAC` opaque logon-info hook; acceptors can use
+`pac.FromTicket` to extract and verify PAC signatures. Service tickets also
+receive MIT's type-16 ticket checksum using the dummy-PAC encoding flow. Full
+NDR logon-info
+marshaling, RC4-HMAC PAC signing, UPN_DNS_INFO generation, and S4U-specific
+client-info policy are intentionally outside this slice.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,

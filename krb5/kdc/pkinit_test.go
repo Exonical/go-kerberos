@@ -44,6 +44,74 @@ func TestServerPKINITASExchange(t *testing.T) {
 	}
 }
 
+func TestServerLegacyPKINITASExchangeWithAgilityKDC(t *testing.T) {
+	now := time.Unix(2000001002, 0).UTC()
+	server, _ := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 12)
+	bodyDER := mustMarshal(t, request.ReqBody)
+	pkClient, err := pkinit.NewClient(clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pa, err := pkClient.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{pa}
+	requestDER := mustMarshal(t, request)
+	var reply protocol.ASRep
+	if err := krb5asn1.Unmarshal(server.HandleMessage(requestDER), &reply); err != nil {
+		t.Fatalf("legacy PKINIT AS response: %v", err)
+	}
+	for _, item := range reply.PAData {
+		if item.PADataType == pkinit.PADataASRep {
+			if _, err := pkClient.VerifyPAASRep(item.PADataValue, roots, reply.EncPart.EType, request.ReqBody.Nonce); err != nil {
+				t.Fatalf("legacy PKINIT reply verification: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatal("legacy PKINIT response omitted PA-PK-AS-REP")
+}
+
+func TestServerCanonicalizedAliasPKINITASExchange(t *testing.T) {
+	now := time.Unix(2000001003, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	if err := db.AddAlias("alice-alias", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice-alias", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	alias := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice-alias"}}
+	withCanonicalize := *kclient
+	withCanonicalize.Canonicalize = true
+	credentials, err := withCanonicalize.ASExchangePKINIT(context.Background(), alias, clientCert, clientKey, roots)
+	if err != nil {
+		t.Fatalf("canonicalized alias PKINIT AS exchange: %v", err)
+	}
+	canonical := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	if !samePrincipal(credentials.Client, canonical) {
+		t.Fatalf("canonicalized PKINIT client = %v, want %v", credentials.Client, canonical)
+	}
+}
+
 func TestServerAnonymousPKINITASExchange(t *testing.T) {
 	now := time.Unix(2000001005, 0).UTC()
 	server, kclient := testServer(t, now)
@@ -210,6 +278,9 @@ func TestServerPKINITFASTASExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap FAST PKINIT request: %v", err)
 	}
+	innerRequest := request
+	innerRequest.PAData = protocol.MethodData{pa}
+	requestDER := mustMarshal(t, innerRequest)
 	request.PAData = protocol.MethodData{fastData}
 	var reply protocol.ASRep
 	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
@@ -230,7 +301,8 @@ func TestServerPKINITFASTASExchange(t *testing.T) {
 	if len(pkReply) == 0 {
 		t.Fatal("FAST response omitted PA-PK-AS-REP")
 	}
-	dhKey, err := pkClient.VerifyPAASRep(pkReply, roots, reply.EncPart.EType, request.ReqBody.Nonce)
+	dhKey, err := pkClient.VerifyPAASRepWithContext(pkReply, roots, reply.EncPart.EType,
+		request.ReqBody.Nonce, user, service, requestDER)
 	if err != nil {
 		t.Fatalf("verify FAST PKINIT reply: %v", err)
 	}
