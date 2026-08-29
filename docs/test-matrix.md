@@ -242,7 +242,13 @@ KERB_VALIDATION_INFO (MS-PAC 2.5) marshal/unmarshal coverage. `pac.FromTicket`
 extracts and verifies PACs for acceptors, including checksum-type matching
 against the supplied keys. KDC service-ticket issuance also emits and
 verifies the MIT type-16 ticket checksum using the dummy-PAC ticket encoding
-flow.
+flow. S4U_DELEGATION_INFO (type 11) uses MIT's NDR constructed-type layout;
+the three AD-2019 captured MIT goldens are decoded and re-encoded
+byte-for-byte. Constrained S4U2Proxy updates the delegation chain, while
+ordinary TGS paths preserve the buffer. PAC_CREDENTIAL_INFO (type 2) has the
+MS-PAC 2.6.1 version/enctype envelope and usage-16 AES encryption helpers;
+the inner credential data remains opaque. `GeneratePACCredentials` is gated
+on a replaced AS reply key and type 2 is preserved through TGS re-signing.
 
 The MIT `t_pac.c` container layout is represented by parser and alignment
 goldens; the installed Go crypto registry currently has AES enctypes but not
@@ -251,9 +257,10 @@ verified by the production checksum implementation. Cross-validation against
 Samba/Windows NDR output and S4U-specific client-info substitution are not
 implemented. Samba bindings, `samba-tool`, and `ndrdump` were unavailable in
 the verification environment, so no independent NDR golden or Samba
-cross-check was possible. The binary container, SID/UPN_DNS_INFO offsets,
-NDR headers, and KDC structured PAC issuance are covered in package and KDC
-tests.
+cross-check was possible. The delegation goldens are MIT-source captures
+rather than an additional Samba cross-check. The binary container,
+SID/UPN_DNS_INFO offsets, NDR headers, delegation goldens, credentials
+envelope, and KDC PAC issuance are covered in package and KDC tests.
 
 The KDB `Store` interface remains compatible with Lookup-only stores.
 Stores may additionally implement `kdb.AliasResolver` to resolve an alias

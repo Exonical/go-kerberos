@@ -229,13 +229,20 @@ added after an encoded `EncTicketPart` is available. PAC authorization data
 uses the nested AD-IF-RELEVANT/AD-WIN2K-PAC containers. KDC PAC issuance and
 TGS re-signing are opt-in through `Server.EnablePAC` and the
 `Server.GeneratePAC` opaque logon-info hook or the structured
-`Server.GeneratePACIdentity` hook; acceptors can use
+`Server.GeneratePACIdentity` hook. S4U delegation-info (type 11) follows
+MIT's NDR constructed-type layout and is updated during constrained
+S4U2Proxy issuance; other TGS paths preserve it. Credentials-info (type 2)
+follows MS-PAC 2.6.1: inner PAC_CREDENTIAL_DATA remains opaque, while the
+optional `Server.GeneratePACCredentials` hook encrypts it with a replaced AS
+reply key using key usage 16. The hook is not called for ordinary
+password-key AS or TGS issuance. Acceptors can use
 `pac.FromTicket` to extract and verify PAC signatures. Service tickets also
 receive MIT's type-16 ticket checksum using the dummy-PAC encoding flow. Full
 cross-implementation NDR validation and S4U-specific client-info policy are
 intentionally outside this slice. The NDR codec follows the NDR32 common and
 private headers, deferred pointers, RPC Unicode strings, group arrays, and
-conditional SID arrays specified by MS-PAC sections 2.5 and 2.10.
+conditional SID arrays specified by MS-PAC sections 2.5, 2.6.1, 2.9, and
+2.10.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,

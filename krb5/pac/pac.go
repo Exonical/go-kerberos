@@ -18,11 +18,13 @@ const (
 	bufferLen  = 16
 	maxBuffers = 4096
 
-	LogonInfoBuffer uint32 = 1
-	ServerChecksum  uint32 = 6
-	KDCChecksum     uint32 = 7
-	ClientInfo      uint32 = 10
-	UPNDNSInfo      uint32 = 12
+	LogonInfoBuffer      uint32 = 1
+	CredentialInfoBuffer uint32 = 2
+	ServerChecksum       uint32 = 6
+	KDCChecksum          uint32 = 7
+	ClientInfo           uint32 = 10
+	DelegationInfoBuffer uint32 = 11
+	UPNDNSInfo           uint32 = 12
 	// TicketChecksum is the signature over the EncTicketPart for service
 	// tickets.  MIT calls this KRB5_PAC_TICKET_CHECKSUM.
 	TicketChecksum uint32 = 16
@@ -200,6 +202,11 @@ func (p *PAC) setBuffer(typ uint32, data []byte) {
 		}
 	}
 	p.Buffers = append(p.Buffers, Buffer{Type: typ, Data: append([]byte(nil), data...)})
+}
+
+// SetBuffer adds or replaces an opaque PAC buffer while preserving its data.
+func (p *PAC) SetBuffer(typ uint32, data []byte) {
+	p.setBuffer(typ, data)
 }
 
 func (p *PAC) signature(typ uint32) ([]byte, bool) {
