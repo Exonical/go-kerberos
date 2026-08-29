@@ -72,6 +72,14 @@ disposable integration test environments.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
   sequence enforcement.
+- **SPNEGO** (RFC 4178): Kerberos mechanism negotiation with the modern and
+  Microsoft legacy Kerberos OIDs, mechListMIC exchange, and transparent
+  Kerberos GSS Wrap/MIC access after establishment. Live MIT-backed gates cover
+  Go and MIT initiators and acceptors.
+- **MS-KKDCP**: HTTPS KDC Proxy Protocol client and `http.Handler` server,
+  including strict DER wrapper and embedded TCP-length validation. Configure
+  an HTTPS `kdc` entry and provide `client.Client.HTTPAnchors` (or a
+  `kkdcp.Client` with a custom `x509.CertPool`) for private proxy CAs.
 
 ### KDC (server)
 - In-memory KDC serving **AS and TGS** over UDP and TCP, verified live
@@ -113,8 +121,10 @@ disposable integration test environments.
   offsets, and the MIT `GET_CRED_LIST`/`REPLACE` extensions. The default
   socket is `/var/run/.heim_org.h5l.kcm-socket`; use `ResolveKCM` for an
   explicit socket, or pass `-` as the socket to disable KCM.
-- **krb5.conf** parsing, DNS SRV **KDC discovery**, UDP/TCP transport with
-  response-too-big failover.
+- **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
+  DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
+  response-too-big failover, and HTTPS KDC Proxy routing for `kdc =
+  https://host:port/path` entries.
 
 ### CLIs
 - `gokinit`, `goklist`, and `gokvno` — drop-in style equivalents of the MIT
@@ -240,6 +250,20 @@ encryption type.
 Cross-realm TGS support currently covers direct single-hop trust. Configure
 matching `krbtgt/TARGET@SOURCE` keys in both KDC stores; capaths and
 transited-policy checking are intentionally out of scope.
+
+Realm discovery follows MIT's profile hostrealm order: exact host, then
+progressively shorter suffixes with and without a leading dot. The optional
+`_kerberos.<hostname>` TXT fallback is exposed through an injectable resolver
+and is gated by `dns_lookup_realm`. URI KDC discovery parses MIT
+`krb5srv:flags:udp|tcp|kkdcp:residual` records, honors priority, and runs
+before SRV when URI lookup is enabled (the MIT default). The separate
+`RealmForHostWithFallback` helper exposes MIT's upper-cased parent-domain
+heuristic after profile lookup.
+
+`config.ParseKDCConf` parses profile-format `[kdcdefaults]` and `[realms]`
+settings while retaining unsupported values for inspection.
+`kdc.Server.ApplyKDCConf` applies supported lifetime and listener-port
+settings without guessing at other KDC policy.
 
 Password history is retained as derived key sets in the in-memory
 `PrincipalRecord` and is never stored as cleartext. When `kadmin/history` is

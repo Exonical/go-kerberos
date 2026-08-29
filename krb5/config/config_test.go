@@ -146,3 +146,84 @@ func TestCapathRealmPathDirect(t *testing.T) {
 		t.Fatalf("direct RealmPath = %#v, %v, %v", path, ok, err)
 	}
 }
+
+func TestRealmForHostMITProfileSearchOrder(t *testing.T) {
+	cfg, err := Parse([]byte(`[domain_realm]
+    app.example.com = EXACT
+    .example.com = PARENT
+    example.com = SUFFIX
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		host, want string
+	}{
+		{"app.example.com", "EXACT"},
+		{"other.example.com", "PARENT"},
+		{"example.com", "SUFFIX"},
+		{"other.invalid", ""},
+		{"APP.EXAMPLE.COM.", "EXACT"},
+	} {
+		got, ok := cfg.RealmForHost(test.host)
+		if (test.want == "") != !ok || got != test.want {
+			t.Errorf("RealmForHost(%q) = %q, %v; want %q", test.host, got, ok, test.want)
+		}
+	}
+	if got, ok := cfg.RealmForHostWithFallback("service.fallback.test"); !ok || got != "FALLBACK.TEST" {
+		t.Fatalf("fallback realm = %q, %v", got, ok)
+	}
+	if _, ok := cfg.RealmForHostWithFallback("127.0.0.1"); ok {
+		t.Fatal("numeric-address fallback unexpectedly matched")
+	}
+}
+
+func TestParseKDCConf(t *testing.T) {
+	cfg, err := ParseKDCConf([]byte(`[kdcdefaults]
+    kdc_ports = 88, 750
+    kdc_tcp_ports = 88
+    max_life = 12h 0m 0s
+[realms]
+    EXAMPLE.COM = {
+        max_renewable_life = 7d 0h 0m 0s
+        master_key_type = aes256-cts-hmac-sha1-96
+        supported_enctypes = aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal
+        database_module = custom
+    }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	realm, ok := cfg.Realm("example.com")
+	if !ok || len(realm.KDCPorts) != 2 || realm.KDCPorts[1] != 750 ||
+		realm.KDCTCPPorts[0] != 88 || realm.MaxLife != 12*time.Hour ||
+		realm.MaxRenewableLife != 7*24*time.Hour ||
+		realm.MasterKeyType != "aes256-cts-hmac-sha1-96" ||
+		len(realm.SupportedEnctypes) != 2 || realm.Values["database_module"][0] != "custom" {
+		t.Fatalf("KDC realm = %#v", realm)
+	}
+	if len(cfg.Defaults["kdc_ports"]) != 2 {
+		t.Fatalf("KDC defaults = %#v", cfg.Defaults)
+	}
+}
+
+func TestDNSURIEnabledMITDefault(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+    dns_uri_lookup = false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DNSURIEnabled() {
+		t.Fatal("explicit dns_uri_lookup=false ignored")
+	}
+	cfg, err = Parse([]byte(`[libdefaults]
+    default_realm = EXAMPLE.COM
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DNSURIEnabled() {
+		t.Fatal("MIT default dns_uri_lookup should be enabled")
+	}
+}

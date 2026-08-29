@@ -24,6 +24,7 @@ when absent.
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
+| SPNEGO (RFC 4178) over Kerberos GSS | Go unit coverage, including DER, legacy OID, and mechListMIC negotiation | `TestGoSPNEGOInitiatorAgainstMIT` (Python GSSAPI linked to MIT) | `TestMITSPNEGOInitiatorAgainstGo` (Python GSSAPI linked to MIT) |
 | PKINIT (RFC 4556), RFC 8636 agility, and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented; SHA-256, SHA-1, and SHA-512 KDF identifiers are advertised in MIT preference order | KDF vectors, wire goldens, Go↔Go, Go client ↔ MIT KDC, and MIT client ↔ Go KDC coverage; MIT trace asserts SHA-256 negotiation | MIT pass |
 | PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
@@ -34,6 +35,13 @@ when absent.
 | MIT iprop GET_UPDATES | Go replica → real MIT `kadmind` live gate; MIT 1.19 `kpropd -S` → Go master live gate; Go master ↔ Go replica unit coverage | MIT master gate bootstraps from a real `ipropx` dump header and verifies `addprinc` + `cpw`; reverse gate loads a Go-written ipropx dump into a disposable MIT replica, then verifies incremental Go-master add and password-change updates with `kadmin.local` | Full-resync dump transfer is implemented in `krb5/kprop`; live full-resync daemon gates require disposable MIT daemon orchestration and are tracked separately |
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
+| MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
+
+The Go-to-MIT and MIT-to-Go KKDCP gates pass using a disposable TLS proxy and
+a real MIT KDC. The reverse gate skips when the installed MIT runtime lacks
+the `k5tls` plugin; Ubuntu provides it through the optional `krb5-k5tls`
+package. MIT 1.22.2's source contains the HTTPS transport and TLS plugin path
+used as the behavioral reference.
 
 KCM uses Heimdal protocol version 2.0 over a Unix-domain stream. Requests and
 replies use four-byte big-endian framing; names are NUL terminated, while
@@ -286,6 +294,26 @@ MIT `kinit` with a FAST armor ccache and the Go KDC hooks. These tests
 require the Ubuntu `krb5-otp` package (the test remains conditional when
 the plugin is unavailable). The Go KDC includes a FAST cookie in the
 initial OTP challenge, as required by MIT's retry processing.
+
+## Realm discovery and KDC configuration
+
+Unit coverage exercises MIT profile `[domain_realm]` matching (exact host,
+case-insensitive parent walking, leading-dot suffixes, and numeric-address
+exclusion), the opt-in upper-cased parent-domain fallback,
+`_kerberos.<host>` TXT fallback, and
+`krb5srv:flags:transport:residual` URI parsing and priority ordering. DNS
+tests use an injectable fake resolver rather than live DNS, so they are
+deterministic in CI. URI lookup is attempted before SRV lookup by default;
+callers can disable it to model `dns_uri_lookup = false`.
+
+`config.ParseKDCConf` is covered against generated MIT profile syntax,
+including `[kdcdefaults]` inheritance into `[realms]`, port lists, ticket
+lifetime values, master-key enctype, supported enctypes, and preservation of
+unknown realm settings. `kdc.Server.ApplyKDCConf` is covered for listener
+ports and lifetime settings that have direct Go server equivalents. The
+integration harness uses the same profile-format KDC configuration with a
+disposable MIT KDC; DNS itself is intentionally not a live integration
+dependency.
 
 ## Testing layers
 
