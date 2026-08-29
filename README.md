@@ -215,19 +215,23 @@ exchanges when MIT's `krb5-otp` plugin is installed.
 
 MS-PAC container support is available in `krb5/pac`. PAC headers and aligned
 `PAC_INFO_BUFFER` tables are parsed with strict bounds and overlap checks;
-unknown buffers, including Microsoft logon-info/NDR data, are preserved as
-opaque bytes. The package encodes client-info (type 10), server and KDC
+unknown buffers are preserved as opaque bytes. The package also provides
+MS-DTYP SID parsing and binary encoding, UPN_DNS_INFO (type 12) generation
+and parsing, and structured KERB_VALIDATION_INFO (type 1) NDR32
+encoding/decoding. The package encodes client-info (type 10), server and KDC
 checksums (types 6 and 7), and MIT's full PAC checksum (type 19), using
 Kerberos application-data checksum usage 17. Ticket checksum type 16 can be
 added after an encoded `EncTicketPart` is available. PAC authorization data
 uses the nested AD-IF-RELEVANT/AD-WIN2K-PAC containers. KDC PAC issuance and
 TGS re-signing are opt-in through `Server.EnablePAC` and the
-`Server.GeneratePAC` opaque logon-info hook; acceptors can use
+`Server.GeneratePAC` opaque logon-info hook or the structured
+`Server.GeneratePACIdentity` hook; acceptors can use
 `pac.FromTicket` to extract and verify PAC signatures. Service tickets also
 receive MIT's type-16 ticket checksum using the dummy-PAC encoding flow. Full
-NDR logon-info
-marshaling, RC4-HMAC PAC signing, UPN_DNS_INFO generation, and S4U-specific
-client-info policy are intentionally outside this slice.
+cross-implementation NDR validation and S4U-specific client-info policy are
+intentionally outside this slice. The NDR codec follows the NDR32 common and
+private headers, deferred pointers, RPC Unicode strings, group arrays, and
+conditional SID arrays specified by MS-PAC sections 2.5 and 2.10.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,

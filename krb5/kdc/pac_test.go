@@ -59,7 +59,7 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, ok := p.Buffer(pac.LogonInfo)
+	data, ok := p.Buffer(pac.LogonInfoBuffer)
 	if !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
 		t.Fatalf("logon-info = %x", data)
 	}
@@ -96,7 +96,7 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data, ok := servicePAC.Buffer(pac.LogonInfo); !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
+	if data, ok := servicePAC.Buffer(pac.LogonInfoBuffer); !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
 		t.Fatalf("TGS logon-info = %x", data)
 	}
 	ticketPAC, ok := servicePAC.Buffer(pac.TicketChecksum)
@@ -111,6 +111,70 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if err := servicePAC.VerifyTicketSignature(marshalDER(dummyPart),
 		pac.Key{EType: privEType, Key: privKey.Key}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStructuredPACIssuance(t *testing.T) {
+	now := time.Unix(2000001900, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.EnablePAC = true
+	sid, err := pac.ParseSID("S-1-5-21-1-2-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.GeneratePACIdentity = func(client, service principal.Principal) (*PACIdentity, error) {
+		return &PACIdentity{
+			LogonInfo: &pac.LogonInfo{EffectiveName: "alice", UserID: 1000},
+			UPN:       "alice@test.realm", DNSDomainName: "test.realm",
+			SAMName: "alice", SID: sid, Flags: pac.UPNDNSInfoHasSAMNameAndSID,
+		}, nil
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	creds, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(creds.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := server.DB.Lookup(ticketPrincipal(ticket))
+	if err != nil || !ok {
+		t.Fatalf("lookup ticket key: %v", err)
+	}
+	key := record.Keys[ticket.EncPart.EType]
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key.Key, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var part protocol.EncTicketPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatal(err)
+	}
+	p, err := pac.FromAuthorizationData(part.AuthorizationData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logon, ok := p.Buffer(pac.LogonInfoBuffer)
+	if !ok {
+		t.Fatal("structured PAC is missing logon-info")
+	}
+	parsedLogon, err := pac.ParseLogonInfo(logon)
+	if err != nil || parsedLogon.EffectiveName != "alice" {
+		t.Fatalf("logon-info = %#v, %v", parsedLogon, err)
+	}
+	upnData, ok := p.Buffer(pac.UPNDNSInfo)
+	if !ok {
+		t.Fatal("structured PAC is missing UPN_DNS_INFO")
+	}
+	upn, err := pac.ParseUPNDNSInfo(upnData)
+	if err != nil || upn.UPN != "alice@test.realm" || upn.SID == nil ||
+		upn.SID.String() != sid.String() {
+		t.Fatalf("UPN_DNS_INFO = %#v, %v", upn, err)
 	}
 }
 

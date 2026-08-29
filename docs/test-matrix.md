@@ -230,7 +230,11 @@ preservation, client-info FILETIME/UTF-16LE encoding, and MIT application-data
 checksum usage 17 for server, KDC, and full PAC signatures. The nested
 AD-IF-RELEVANT/AD-WIN2K-PAC authorization-data form is covered by round-trip
 tests. `Server.EnablePAC` enables Go KDC issuance and TGS re-signing, with
-`Server.GeneratePAC` supplying opaque logon-info bytes. `pac.FromTicket`
+`Server.GeneratePAC` supplying opaque logon-info bytes or
+`Server.GeneratePACIdentity` supplying structured KERB_VALIDATION_INFO and
+UPN_DNS_INFO identity data. `krb5/pac` includes MS-DTYP SID parsing and
+binary encoding, UPN_DNS_INFO (MS-PAC 2.10), and NDR32
+KERB_VALIDATION_INFO (MS-PAC 2.5) marshal/unmarshal coverage. `pac.FromTicket`
 extracts and verifies PACs for acceptors, including checksum-type matching
 against the supplied keys. KDC service-ticket issuance also emits and
 verifies the MIT type-16 ticket checksum using the dummy-PAC ticket encoding
@@ -239,12 +243,13 @@ flow.
 The MIT `t_pac.c` container layout is represented by parser and alignment
 goldens; the installed Go crypto registry currently has AES enctypes but not
 RC4-HMAC, so MIT's legacy RC4 signature vectors are parsed but cannot be
-verified by the production checksum implementation. Full Microsoft NDR
-logon-info marshaling, UPN_DNS_INFO generation, and S4U-specific client-info
-substitution are not implemented. No separate live MIT PAC gate
-is included because MIT's public command-line tooling does not expose a
-portable PAC construction/inspection operation; the binary container and
-checksum behavior are covered in package tests.
+verified by the production checksum implementation. Cross-validation against
+Samba/Windows NDR output and S4U-specific client-info substitution are not
+implemented. Samba bindings, `samba-tool`, and `ndrdump` were unavailable in
+the verification environment, so no independent NDR golden or Samba
+cross-check was possible. The binary container, SID/UPN_DNS_INFO offsets,
+NDR headers, and KDC structured PAC issuance are covered in package and KDC
+tests.
 
 The KDB `Store` interface remains compatible with Lookup-only stores.
 Stores may additionally implement `kdb.AliasResolver` to resolve an alias

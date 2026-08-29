@@ -39,7 +39,7 @@ func TestParseMarshalPAC(t *testing.T) {
 }
 
 func TestMarshalReflectsDirectEditsAfterParse(t *testing.T) {
-	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}).mustMarshal(t)
+	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1}}}}).mustMarshal(t)
 	parsed, err := Parse(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestMITSavedPACVector(t *testing.T) {
 	if len(p.Buffers) != 4 {
 		t.Fatalf("MIT saved PAC buffers = %d, want 4", len(p.Buffers))
 	}
-	if got, ok := p.Buffer(LogonInfo); !ok || len(got) != 472 {
+	if got, ok := p.Buffer(LogonInfoBuffer); !ok || len(got) != 472 {
 		t.Fatalf("MIT logon-info length = %d", len(got))
 	}
 	for _, typ := range []uint32{ClientInfo, ServerChecksum, KDCChecksum} {
@@ -99,7 +99,7 @@ func TestPACSignVerifyAndClientInfo(t *testing.T) {
 	serverKey := Key{EType: etype, Key: bytes.Repeat([]byte{0x11}, etype.KeySize())}
 	privsvrKey := Key{EType: etype, Key: bytes.Repeat([]byte{0x22}, etype.KeySize())}
 	user := principal.Principal{Realm: "EXAMPLE.COM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
-	p := &PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1, 2, 3}}}}
+	p := &PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1, 2, 3}}}}
 	authTime := time.Unix(1700000000, 0).UTC()
 	encoded, err := p.Sign(authTime, &user, serverKey, privsvrKey, true)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestAddTicketSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := Key{EType: etype, Key: bytes.Repeat([]byte{0x41}, etype.KeySize())}
-	p := &PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{9}}}}
+	p := &PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{9}}}}
 	if _, err := p.Sign(time.Unix(1700000000, 0), nil, key, key, false); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestVerifyRejectsChecksumTypeMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := Key{EType: etype, Key: bytes.Repeat([]byte{0x31}, etype.KeySize())}
-	p := &PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}
+	p := &PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1}}}}
 	encoded, err := p.Sign(time.Unix(1700000000, 0), nil, key, key, false)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestParseRejectsOverlapAndDuplicateTypes(t *testing.T) {
 }
 
 func TestAuthorizationDataRoundTrip(t *testing.T) {
-	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1, 2, 3}}}}).mustMarshal(t)
+	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1, 2, 3}}}}).mustMarshal(t)
 	ad, err := AuthorizationData(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -232,14 +232,14 @@ func TestAuthorizationDataRoundTrip(t *testing.T) {
 }
 
 func TestAddAuthorizationDataReplacesAllPACs(t *testing.T) {
-	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{1}}}}).mustMarshal(t)
+	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1}}}}).mustMarshal(t)
 	outer, err := AuthorizationData(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	combined := append(append(protocol.AuthorizationData(nil), outer...),
 		outer...)
-	replacement := (&PAC{Buffers: []Buffer{{Type: LogonInfo, Data: []byte{2}}}}).mustMarshal(t)
+	replacement := (&PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{2}}}}).mustMarshal(t)
 	updated, err := AddAuthorizationData(combined, replacement)
 	if err != nil {
 		t.Fatal(err)
