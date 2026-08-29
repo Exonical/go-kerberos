@@ -116,6 +116,8 @@ type Server struct {
 	// GeneratePAC supplies opaque logon-info bytes for newly issued PACs.
 	// The package deliberately does not interpret the Microsoft NDR payload.
 	GeneratePAC func(client, service principal.Principal) ([]byte, error)
+	// GeneratePACIdentity supplies structured MS-PAC identity data.
+	GeneratePACIdentity func(client, service principal.Principal) (*PACIdentity, error)
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -147,6 +149,16 @@ type Server struct {
 	tcpOrder       uint64
 	spakeCookieKey []byte
 	spakeCookieMu  sync.Mutex
+}
+
+// PACIdentity describes structured PAC logon and UPN/DNS identity fields.
+type PACIdentity struct {
+	LogonInfo     *pac.LogonInfo
+	UPN           string
+	DNSDomainName string
+	SAMName       string
+	SID           pac.SID
+	Flags         uint32
 }
 
 type tcpConnection struct {
@@ -958,14 +970,41 @@ func (s *Server) issuePAC(ticketPart *protocol.EncTicketPart, client, service pr
 			return err
 		}
 	}
-	if len(p.Buffers) == 0 && s.GeneratePAC != nil {
+	if len(p.Buffers) == 0 && s.GeneratePACIdentity != nil {
+		identity, err := s.GeneratePACIdentity(client, service)
+		if err != nil {
+			return err
+		}
+		if identity != nil {
+			if identity.LogonInfo != nil {
+				logonInfo, err := identity.LogonInfo.MarshalBinary()
+				if err != nil {
+					return err
+				}
+				p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfoBuffer, Data: logonInfo})
+			}
+			upn := pac.UPNDNSInfoData{
+				UPN: identity.UPN, DNSDomainName: identity.DNSDomainName,
+				SAMName: identity.SAMName, Flags: identity.Flags,
+			}
+			if identity.Flags&pac.UPNDNSInfoHasSAMNameAndSID != 0 {
+				sid := identity.SID
+				upn.SID = &sid
+			}
+			data, err := upn.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.UPNDNSInfo, Data: data})
+		}
+	} else if len(p.Buffers) == 0 && s.GeneratePAC != nil {
 		logonInfo, err := s.GeneratePAC(client, service)
 		if err != nil {
 			return err
 		}
-		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfo, Data: logonInfo})
+		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfoBuffer, Data: logonInfo})
 	} else if len(p.Buffers) == 0 {
-		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfo})
+		p.Buffers = append(p.Buffers, pac.Buffer{Type: pac.LogonInfoBuffer})
 	}
 	var dummyTicket []byte
 	if serviceTicket {

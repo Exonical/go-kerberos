@@ -18,11 +18,11 @@ const (
 	bufferLen  = 16
 	maxBuffers = 4096
 
-	LogonInfo      uint32 = 1
-	ServerChecksum uint32 = 6
-	KDCChecksum    uint32 = 7
-	ClientInfo     uint32 = 10
-	UPNDNSInfo     uint32 = 12
+	LogonInfoBuffer uint32 = 1
+	ServerChecksum  uint32 = 6
+	KDCChecksum     uint32 = 7
+	ClientInfo      uint32 = 10
+	UPNDNSInfo      uint32 = 12
 	// TicketChecksum is the signature over the EncTicketPart for service
 	// tickets.  MIT calls this KRB5_PAC_TICKET_CHECKSUM.
 	TicketChecksum uint32 = 16
