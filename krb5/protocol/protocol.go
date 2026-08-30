@@ -38,6 +38,18 @@ type CAMMAC struct {
 	OtherVerifiers []VerifierMAC     `krb5:"tag:3,optional"`
 }
 
+// AlgorithmIdentifier is the RFC 5280 algorithm identifier used by PKINIT
+// and OTP. Algorithm contains the DER OBJECT IDENTIFIER value octets.
+type AlgorithmIdentifier struct {
+	Algorithm  types.ObjectIdentifier `krb5:"tag:0,bare"`
+	Parameters *types.RawDER          `krb5:"tag:1,optional,bare"`
+}
+
+// SupportedKDF identifies a PKINIT KDF algorithm.
+type SupportedKDF struct {
+	KDF types.ObjectIdentifier `krb5:"tag:0"`
+}
+
 type PAData struct {
 	PADataType  int32  `krb5:"tag:1"`
 	PADataValue []byte `krb5:"tag:2"`
@@ -45,14 +57,15 @@ type PAData struct {
 
 // OTPTokenInfo describes an RFC 6560 token accepted by the KDC.
 type OTPTokenInfo struct {
-	Flags          int32             `krb5:"tag:0,implicit"`
-	Vendor         *types.UTF8String `krb5:"tag:1,optional,implicit"`
-	Challenge      []byte            `krb5:"tag:2,optional,implicit"`
-	Length         *int32            `krb5:"tag:3,optional,implicit"`
-	Format         *int32            `krb5:"tag:4,optional,implicit"`
-	TokenID        []byte            `krb5:"tag:5,optional,implicit"`
-	AlgID          *types.UTF8String `krb5:"tag:6,optional,implicit"`
-	IterationCount *int32            `krb5:"tag:8,optional,implicit"`
+	Flags            types.OTPFlags        `krb5:"tag:0,implicit"`
+	Vendor           *types.UTF8String     `krb5:"tag:1,optional,implicit"`
+	Challenge        []byte                `krb5:"tag:2,optional,implicit"`
+	Length           *int32                `krb5:"tag:3,optional,implicit"`
+	Format           *int32                `krb5:"tag:4,optional,implicit"`
+	TokenID          []byte                `krb5:"tag:5,optional,implicit"`
+	AlgID            *types.UTF8String     `krb5:"tag:6,optional,implicit"`
+	SupportedHashAlg []AlgorithmIdentifier `krb5:"tag:7,optional,implicit"`
+	IterationCount   *int32                `krb5:"tag:8,optional,implicit"`
 }
 
 // PAOTPChallenge is the PA-OTP-CHALLENGE payload.
@@ -66,19 +79,20 @@ type PAOTPChallenge struct {
 
 // PAOTPRequest is the PA-OTP-REQUEST payload.
 type PAOTPRequest struct {
-	Flags          int32               `krb5:"tag:0,implicit"`
-	Nonce          []byte              `krb5:"tag:1,optional,implicit"`
-	EncData        EncryptedData       `krb5:"tag:2,implicit"`
-	IterationCount *int32              `krb5:"tag:4,optional,implicit"`
-	OTPValue       []byte              `krb5:"tag:5,optional,implicit"`
-	PIN            *types.UTF8String   `krb5:"tag:6,optional,implicit"`
-	Challenge      []byte              `krb5:"tag:7,optional,implicit"`
-	Time           *types.KerberosTime `krb5:"tag:8,optional,implicit"`
-	Counter        []byte              `krb5:"tag:9,optional,implicit"`
-	Format         *int32              `krb5:"tag:10,optional,implicit"`
-	TokenID        []byte              `krb5:"tag:11,optional,implicit"`
-	AlgID          *types.UTF8String   `krb5:"tag:12,optional,implicit"`
-	Vendor         *types.UTF8String   `krb5:"tag:13,optional,implicit"`
+	Flags          types.OTPFlags       `krb5:"tag:0,implicit"`
+	Nonce          []byte               `krb5:"tag:1,optional,implicit"`
+	EncData        EncryptedData        `krb5:"tag:2,implicit"`
+	HashAlg        *AlgorithmIdentifier `krb5:"tag:3,optional,implicit"`
+	IterationCount *int32               `krb5:"tag:4,optional,implicit"`
+	OTPValue       []byte               `krb5:"tag:5,optional,implicit"`
+	PIN            *types.UTF8String    `krb5:"tag:6,optional,implicit"`
+	Challenge      []byte               `krb5:"tag:7,optional,implicit"`
+	Time           *types.KerberosTime  `krb5:"tag:8,optional,implicit"`
+	Counter        []byte               `krb5:"tag:9,optional,implicit"`
+	Format         *int32               `krb5:"tag:10,optional,implicit"`
+	TokenID        []byte               `krb5:"tag:11,optional,implicit"`
+	AlgID          *types.UTF8String    `krb5:"tag:12,optional,implicit"`
+	Vendor         *types.UTF8String    `krb5:"tag:13,optional,implicit"`
 }
 
 // PAOTPEncRequest is the encrypted nonce wrapper used by MIT.
@@ -131,7 +145,7 @@ type PASPAKE struct {
 
 type EncryptedData struct {
 	EType  int32   `krb5:"tag:0"`
-	KVNO   *uint32 `krb5:"tag:1,optional"`
+	KVNO   *uint32 `krb5:"tag:1,optional,signed"`
 	Cipher []byte  `krb5:"tag:2"`
 }
 
@@ -574,15 +588,18 @@ const (
 // PKAuthenticator is the Kerberos PKINIT authenticator. Its fields are
 // context-tagged by the repository ASN.1 codec.
 type PKAuthenticator struct {
-	Cusec      int32              `krb5:"tag:0"`
-	CTime      types.KerberosTime `krb5:"tag:1"`
-	Nonce      int32              `krb5:"tag:2"`
-	PAChecksum []byte             `krb5:"tag:3,optional"`
+	Cusec          int32              `krb5:"tag:0"`
+	CTime          types.KerberosTime `krb5:"tag:1"`
+	Nonce          int32              `krb5:"tag:2"`
+	PAChecksum     []byte             `krb5:"tag:3,optional"`
+	FreshnessToken []byte             `krb5:"tag:4,optional"`
 }
 
 // AuthPack is the Kerberos portion of a PKINIT request.
 type AuthPack struct {
-	PKAuthenticator   PKAuthenticator `krb5:"tag:0"`
-	ClientPublicValue []byte          `krb5:"tag:1,optional"`
-	ClientDHNonce     []byte          `krb5:"tag:3,optional"`
+	PKAuthenticator   PKAuthenticator       `krb5:"tag:0"`
+	ClientPublicValue []byte                `krb5:"tag:1,optional"`
+	SupportedCMSTypes []AlgorithmIdentifier `krb5:"tag:2,optional"`
+	ClientDHNonce     []byte                `krb5:"tag:3,optional"`
+	SupportedKDFs     []SupportedKDF        `krb5:"tag:4,optional"`
 }

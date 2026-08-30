@@ -69,8 +69,11 @@ var (
 type AuthPack struct {
 	Authenticator PKAuthenticator
 	PublicValue   []byte
-	DHNonce       []byte
-	SupportedKDFs [][]byte
+	// SupportedCMSTypes contains the complete DER AlgorithmIdentifier values
+	// advertised by the client, retained for round-trip fidelity.
+	SupportedCMSTypes [][]byte
+	DHNonce           []byte
+	SupportedKDFs     [][]byte
 }
 
 // PKAuthenticator authenticates an AS-REQ body to the KDC.
@@ -350,7 +353,49 @@ func ParseAuthPack(data []byte) (AuthPack, error) {
 	if err != nil {
 		return AuthPack{}, err
 	}
-	return AuthPack{Authenticator: auth, PublicValue: pub, SupportedKDFs: supportedKDFs}, nil
+	cmsTypes, dhNonce, err := parseAuthPackOptionals(data)
+	if err != nil {
+		return AuthPack{}, err
+	}
+	return AuthPack{Authenticator: auth, PublicValue: pub,
+		SupportedCMSTypes: cmsTypes, DHNonce: dhNonce,
+		SupportedKDFs: supportedKDFs}, nil
+}
+
+func parseAuthPackOptionals(data []byte) ([][]byte, []byte, error) {
+	fields, err := sequenceFields(data)
+	if err != nil {
+		return nil, nil, errors.New("pkinit: malformed AuthPack")
+	}
+	var cmsTypes [][]byte
+	var dhNonce []byte
+	for _, field := range fields[1:] {
+		switch field[0] {
+		case 0xa2:
+			content, err := tlvContent(field)
+			if err != nil {
+				return nil, nil, err
+			}
+			elements, err := sequenceFields(content)
+			if err != nil {
+				return nil, nil, errors.New("pkinit: malformed supportedCMSTypes")
+			}
+			for _, element := range elements {
+				cmsTypes = append(cmsTypes, append([]byte(nil), element...))
+			}
+		case 0xa3:
+			content, err := tlvContent(field)
+			if err != nil {
+				return nil, nil, err
+			}
+			dhNonce, err = tlvContent(content)
+			if err != nil {
+				return nil, nil, err
+			}
+			dhNonce = append([]byte(nil), dhNonce...)
+		}
+	}
+	return cmsTypes, dhNonce, nil
 }
 
 // SharedKey derives the RFC 4556 reply key from the KDC DH public value.
