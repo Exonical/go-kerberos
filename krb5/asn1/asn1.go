@@ -837,7 +837,8 @@ func isLaterContextSpecificTag(typ reflect.Type, index int, nextTag byte) bool {
 			if tag.implicit {
 				expectedTag = 0x80 | byte(tag.number)
 			}
-			if nextTag == expectedTag {
+			if nextTag == expectedTag ||
+				(tag.implicit && nextTag == 0xa0|byte(tag.number)) {
 				return true
 			}
 		}
