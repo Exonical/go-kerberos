@@ -28,6 +28,7 @@ func TestKRBErrorClassificationCodes(t *testing.T) {
 		target error
 	}{
 		{KDCErrTktExpired, ErrTicketExpired},
+		{KRBAPErrTktNYV, ErrTicketNotYetValid},
 		{KDCErrEtypeNosp, ErrUnsupportedEType},
 		{KRBAPErrBadIntegrity, ErrIntegrity},
 		{KDCErrPreauthFailed, ErrIntegrity},
