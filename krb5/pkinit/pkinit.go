@@ -24,6 +24,11 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
+// ErrClientSANNotFound indicates that a certificate has no id-pkinit-san
+// principal SAN.  It is distinct from malformed SAN data so certauth callers
+// can pass certificates without a SAN to another authorization module.
+var ErrClientSANNotFound = errors.New("pkinit: client certificate has no id-pkinit-san SAN")
+
 const (
 	PADataASReq = 16
 	PADataASRep = 17
@@ -267,29 +272,13 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 // ValidateClientCertificate verifies a PKINIT client certificate chain,
 // id-pkinit-KPClientAuth EKU, and its id-pkinit-san principal.
 func ValidateClientCertificate(cert *x509.Certificate, anchors *x509.CertPool, realm string, components []string) error {
-	if cert == nil {
-		return errors.New("pkinit: missing client certificate")
+	if err := VerifyClientCertificateTrust(cert, anchors); err != nil {
+		return err
 	}
-	if anchors == nil {
-		return errors.New("pkinit: client certificate trust roots are required")
-	}
-	if _, err := cert.Verify(x509.VerifyOptions{
-		Roots: anchors, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	}); err != nil {
-		return errors.New("pkinit: client certificate is not trusted")
-	}
-	clientEKU := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4}
-	hasClientEKU := false
-	for _, oid := range cert.UnknownExtKeyUsage {
-		if oid.Equal(clientEKU) {
-			hasClientEKU = true
-			break
-		}
-	}
-	if !hasClientEKU {
+	if !HasClientAuthEKU(cert) {
 		return errors.New("pkinit: client certificate lacks id-pkinit-KPClientAuth EKU")
 	}
-	gotRealm, gotComponents, err := clientSAN(cert)
+	gotRealm, gotComponents, err := ClientSAN(cert)
 	if err != nil {
 		return err
 	}
@@ -302,6 +291,42 @@ func ValidateClientCertificate(cert *x509.Certificate, anchors *x509.CertPool, r
 		}
 	}
 	return nil
+}
+
+// VerifyClientCertificateTrust verifies the certificate against anchors
+// without applying PKINIT authorization policy.
+func VerifyClientCertificateTrust(cert *x509.Certificate, anchors *x509.CertPool) error {
+	if cert == nil {
+		return errors.New("pkinit: missing client certificate")
+	}
+	if anchors == nil {
+		return errors.New("pkinit: client certificate trust roots are required")
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots: anchors, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return errors.New("pkinit: client certificate is not trusted")
+	}
+	return nil
+}
+
+// HasClientAuthEKU reports whether cert contains id-pkinit-KPClientAuth.
+func HasClientAuthEKU(cert *x509.Certificate) bool {
+	if cert == nil {
+		return false
+	}
+	clientEKU := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4}
+	for _, oid := range cert.UnknownExtKeyUsage {
+		if oid.Equal(clientEKU) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientSAN returns the Kerberos principal encoded in id-pkinit-san.
+func ClientSAN(cert *x509.Certificate) (string, []string, error) {
+	return clientSAN(cert)
 }
 
 func clientSAN(cert *x509.Certificate) (string, []string, error) {
@@ -341,7 +366,7 @@ func clientSAN(cert *x509.Certificate) (string, []string, error) {
 			return principal[len(principal)-1], principal[:len(principal)-1], nil
 		}
 	}
-	return "", nil, errors.New("pkinit: client certificate has no id-pkinit-san SAN")
+	return "", nil, ErrClientSANNotFound
 }
 
 // ParseAuthPack decodes an AuthPack DER value.

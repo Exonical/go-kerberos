@@ -107,6 +107,9 @@ type Server struct {
 	PKINITSigner      stdcrypto.Signer
 	// PKINITClientCAs trusts client certificates for PKINIT authentication.
 	PKINITClientCAs *x509.CertPool
+	// CertAuthModules are additional PKINIT certificate authorization modules.
+	// Built-in modules always run before these modules.
+	CertAuthModules []CertAuthModule
 	// PKINITRequireFreshness requires RFC 8070 freshness tokens on signed
 	// PKINIT requests. Clients which advertise freshness receive an opaque
 	// token in PREAUTH_REQUIRED and must echo it in PKAuthenticator.
@@ -789,6 +792,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.pkinitFreshnessError(request, armor,
 				kdcErrPreauthFailed)
 		}
+		var hwauth bool
+		var accepted bool
+		var certIndicators []string
 		if anonymousRequest {
 			if verified.Signed {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -797,8 +803,21 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			if !verified.Signed {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			if err := pkinit.ValidateClientCertificate(verified.Certificate, s.PKINITClientCAs,
-				requestClientName.Realm, requestClientName.Components); err != nil {
+			if err := pkinit.VerifyClientCertificateTrust(verified.Certificate,
+				s.PKINITClientCAs); err != nil {
+				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
+			}
+			accepted, hwauth, certIndicators, err = s.authorizeCertificate(
+				verified.Certificate, requestClientName, &clientRecord)
+			if err != nil {
+				code := int32(kdcErrClientNotTrusted)
+				var certErr *CertAuthError
+				if stderrors.As(err, &certErr) {
+					code = certErr.Code
+				}
+				return s.errorResponse(code, request.ReqBody.SName)
+			}
+			if !accepted {
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 		}
@@ -826,14 +845,14 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
 		replyPAs := protocol.MethodData{paRep}
-		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+		return s.buildASRepWithHWAuth(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs,
 			func() []string {
 				if anonymousRequest {
 					return nil
 				}
-				return append([]string(nil), s.PKINITIndicators...)
-			}())
+				return append(append([]string(nil), s.PKINITIndicators...), certIndicators...)
+			}(), hwauth)
 	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
@@ -1306,6 +1325,12 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 }
 
 func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string) []byte {
+	return s.buildASRepWithHWAuth(request, clientName, clientRecord, serviceName,
+		serviceRecord, etypeID, clientKey, serviceKey, armor, preauthenticated,
+		replyEncryptionKey, replyPAs, assertedIndicators, false)
+}
+
+func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool) []byte {
 	if response := s.requireAuthError(serviceRecord, assertedIndicators, armor, request.ReqBody.SName); response != nil {
 		return response
 	}
@@ -1323,6 +1348,9 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	flags := types.TicketInitial
 	if preauthenticated {
 		flags |= types.TicketPreAuthent
+	}
+	if hwAuthenticated {
+		flags |= types.TicketHWAuthent
 	}
 	if request.ReqBody.KDCOptions&types.KDCRequestAnonymous != 0 {
 		flags |= types.TicketAnonymous
