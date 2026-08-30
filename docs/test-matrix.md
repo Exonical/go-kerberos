@@ -367,6 +367,12 @@ integration harness uses the same profile-format KDC configuration with a
 disposable MIT KDC; DNS itself is intentionally not a live integration
 dependency.
 
+KDC account expiration, password expiration, disabled-principal handling,
+and per-principal ticket and renewable-lifetime caps are covered by focused
+Go KDC tests. The current MIT integration fixture does not expose a stable
+per-principal expiration/disable setup and teardown interface, so these cases
+do not have a separate live MIT gate.
+
 ## Testing layers
 
 Each major subsystem will use several complementary layers:

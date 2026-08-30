@@ -56,6 +56,21 @@ type PrincipalRecord struct {
 	TLData             []TLData
 }
 
+// Principal attribute flags from MIT's kdb.h.
+const (
+	DisallowPostdated   uint32 = 0x00000001
+	DisallowForwardable uint32 = 0x00000002
+	DisallowTGTBased    uint32 = 0x00000004
+	DisallowRenewable   uint32 = 0x00000008
+	DisallowProxiable   uint32 = 0x00000010
+	DisallowAllTickets  uint32 = 0x00000040
+	RequiresPreAuth     uint32 = 0x00000080
+	RequiresHWAuth      uint32 = 0x00000100
+	RequiresPWChange    uint32 = 0x00000200
+	DisallowServer      uint32 = 0x00001000
+	PWChangeService     uint32 = 0x00002000
+)
+
 // PolicyRecord contains the mutable policy fields used by kadmind.
 type PolicyRecord struct {
 	Name                 string
