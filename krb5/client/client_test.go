@@ -913,7 +913,8 @@ func TestTGSExchangeFollowsConfiguredCapath(t *testing.T) {
 	}
 	var requests []string
 	cfg := &config.Config{
-		CapathOptions: map[string]map[string][]string{"HOME": {"OTHER": {"MIDDLE"}}},
+		DNSCanonicalizeHostname: "false",
+		CapathOptions:           map[string]map[string][]string{"HOME": {"OTHER": {"MIDDLE"}}},
 	}
 	c := &Client{
 		Config: cfg, Now: func() time.Time { return now },
