@@ -10,6 +10,10 @@ The crypto registry includes Camellia-128 and Camellia-256 CTS-CMAC enctypes
 (25 and 26), grounded in RFC 3713 and RFC 6803. Their pure-Go block cipher,
 CMAC, feedback-CMAC derivation, string-to-key, and Kerberos CTS implementations
 are covered by RFC and MIT vectors.
+When Go runs in FIPS 140 mode (`GODEBUG=fips140=on`), Camellia enctypes are
+disabled as non-FIPS-approved algorithms regardless of configuration; AES
+enctypes remain available. This is a RHEL-style policy for Go FIPS
+deployments; upstream MIT krb5 does not apply this gate.
 
 ## Features
 

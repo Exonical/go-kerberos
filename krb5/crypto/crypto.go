@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"crypto/cipher"
+	"crypto/fips140"
 	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha1"
@@ -57,6 +58,10 @@ type StatefulEType interface {
 // RandomSource supplies confounders for encryption. Tests may replace it with
 // a deterministic reader; production code leaves it as rand.Reader.
 var RandomSource types.RandomSource = cryptorand.Reader
+
+// fipsEnabled is a variable so the Camellia policy can be unit tested without
+// changing the process-wide Go FIPS setting.
+var fipsEnabled = fips140.Enabled
 
 // SetRandomSource replaces the confounder source and returns a restore hook.
 func SetRandomSource(source types.RandomSource) func() {
@@ -730,8 +735,14 @@ func (r *Registry) Get(id int32) (EType, error) {
 	case EnctypeAES256SHA384:
 		return aesEType{id: id, keySize: 32, checksumSize: 24, sha2: true, hash: sha512.New384, etypeName: "aes256-cts-hmac-sha384-192", defaultRounds: 32768}, nil
 	case EnctypeCamellia128:
+		if fipsEnabled() {
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+		}
 		return camelliaEType{id: id, keySize: 16}, nil
 	case EnctypeCamellia256:
+		if fipsEnabled() {
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+		}
 		return camelliaEType{id: id, keySize: 32}, nil
 	default:
 		return nil, krberrors.ErrUnsupportedEType

@@ -5,6 +5,11 @@ fixtures are now checked in; parser assertions remain RED until their
 implementations land. Packet captures are still deferred and skip explicitly
 when absent.
 
+Go FIPS 140 mode (`GODEBUG=fips140=on`) rejects Camellia enctypes 25 and 26
+as non-FIPS-approved algorithms regardless of configuration, while retaining
+AES support. This is a RHEL-style policy; upstream MIT krb5 has no equivalent
+registry gate.
+
 | Feature | Go client -> MIT KDC | MIT-generated fixture -> Go | Go-generated artifact -> MIT |
 | --- | --- | --- | --- |
 | Principal parsing | RED | RED | RED |
@@ -13,8 +18,8 @@ when absent.
 | AES256 SHA1 | RED | RED | RED |
 | AES128 SHA256 | RED | RED | RED |
 | AES256 SHA384 | RED | RED | RED |
-| Camellia128 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; Go client/KDC crypto coverage | MIT client → Go KDC live gate; no MIT KDC reverse-direction gate is configured for this enctype | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors |
-| Camellia256 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; Go client/KDC crypto coverage | MIT client → Go KDC live gate passes; Go client → MIT KDC passes with a dedicated MIT fixture configured for `camellia256-cts` (MIT's alias for `camellia256-cts-cmac`) and a Camellia principal key | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors |
+| Camellia128 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; disabled in Go FIPS 140 mode | MIT client → Go KDC live gate; no MIT KDC reverse-direction gate is configured for this enctype | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors; FIPS registry rejection |
+| Camellia256 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; disabled in Go FIPS 140 mode | MIT client → Go KDC live gate passes; Go client → MIT KDC passes with a dedicated MIT fixture configured for `camellia256-cts` (MIT's alias for `camellia256-cts-cmac`) and a Camellia principal key | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors; FIPS registry rejection |
 | keytab | RED | RED | RED |
 | FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
 | DIR, MEMORY, and KCM ccache types | Go resolver, DIR primary/collection, MEMORY concurrency, and KCM v2 framing/server tests | MIT KCM test-server round trips and Go KCM server against MIT CLI where available | MIT KCM protocol operations, UUID fallback, default-cache ordering, and `GET_CRED_LIST`/`REPLACE` |
