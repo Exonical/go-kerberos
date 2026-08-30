@@ -66,6 +66,18 @@ The exact MIT enctype-expression parser from `t_etypes.c`, the standalone
 4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c`, and
 `t_expand_path.c` are not implemented as equivalent Go APIs and are skipped.
 
+The live-KDC Python-suite adaptations cover the implemented portions of
+`t_ccache.py`, `t_alias.py`, `t_crossrealm.py`, `t_authdata.py`, and
+`gssapi/t_s4u.py` through the integration suite.  The adapted scenarios are:
+
+| MIT suite | Ported scenario groups | Skipped scenario groups and reason |
+| --- | --- | --- |
+| `t_ccache.py` | MIT DIR collection creation, multiple default principals, Go collection enumeration, and MIT `klist -A` interoperability; existing KCM tests cover both directions | MIT `KEYRING` collection tests are runtime/platform dependent and remain covered by the Go resolver tests when available; parameter-expansion and negative-command cases require the Python harness's expected-failure runner |
+| `t_alias.py` | Existing Go KDC alias creation, MIT client service/client alias use, and `kinit -C` canonicalization tests | MIT KDC-side alias creation cannot run in the current `testenv`: the installed MIT `kadmin.local` lacks the `alias`/`add_alias` command; alias administrative mutation, key purge, string attributes, and alias-chain management are not exposed by the Go integration API |
+| `t_crossrealm.py` | Existing direct cross-realm Go-client-to-MIT-KDC exchange and ccache interoperability | Hierarchical walks, multi-hop client/KDC `capaths`, transited-policy toggles, and four-realm setups require a multi-MIT-realm harness not provided by `testenv` |
+| `t_authdata.py` | Existing Go KDC PAC/CAMMAC and authentication-indicator integration/unit coverage | MIT `adata` plus `greet_server`, test-preauth, and test-KDB plugin scenarios require MIT test plugins and helper binaries unavailable in the Go harness |
+| `gssapi/t_s4u.py` | Existing MIT KDC S4U2Self/S4U2Proxy tests and Go KDC MIT-client S4U tests | MIT test-KDB constrained-delegation, resource-based delegation, certificate S4U, and krbtgt-rollover scenarios require plugin-backed databases or multi-realm orchestration outside the current harness |
+
 PA-ENCRYPTED-CHALLENGE support is FAST-only. Authentication indicators are
 selected per successful preauthentication mechanism through the KDC's
 `EncryptedChallengeIndicator`, `SPAKEPreauthIndicators`, `PKINITIndicators`,
