@@ -352,10 +352,13 @@ callers can disable it to model `dns_uri_lookup = false`.
 
 Host-based service principal expansion is covered by `krb5/hostrealm` unit
 tests for `qualify_shortname`, DNS canonicalization modes, optional reverse
-lookup, domain-realm parent walking, DNS TXT lookup ordering, and fallback
-realms. DNS behavior uses injected resolvers and has no live-network unit-test
-dependency. The installed MIT runtime does not expose a stable standalone
-`krb5_sname_to_principal` oracle, so this slice has no live MIT gate.
+lookup, domain-realm parent walking, DNS TXT lookup ordering, fallback
+realms, `realm_try_domains`, explicit RDNS defaults, and empty search-domain
+overrides. DNS behavior uses injected resolvers and has no live-network
+unit-test dependency. Client AS/TGS/U2U/FAST paths perform the MIT
+fallback-mode retry after `KDC_ERR_S_PRINCIPAL_UNKNOWN`. The installed MIT
+runtime does not expose a stable standalone `krb5_sname_to_principal` oracle,
+so this slice has no live MIT gate.
 
 `config.ParseKDCConf` is covered against generated MIT profile syntax,
 including `[kdcdefaults]` inheritance into `[realms]`, port lists, ticket

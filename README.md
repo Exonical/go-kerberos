@@ -350,6 +350,12 @@ service principals. `qualify_shortname` qualifies single-component names,
 Forward, reverse, TXT, and search-domain inputs are injectable for hermetic
 tests; the default hostrealm module order is profile, DNS TXT, then the
 upper-cased parent-domain/default-realm fallback.
+In `fallback` mode, service-ticket operations first use the qualified,
+non-DNS-canonicalized hostname and retry with forward canonicalization only
+after `KDC_ERR_S_PRINCIPAL_UNKNOWN`. `realm_try_domains` controls injectable
+KDC-realm probing (`-1` disables probing, while zero and positive values
+bound the parent-label walk); an explicitly empty search-domain list disables
+system resolver search domains.
 
 `config.ParseKDCConf` parses profile-format `[kdcdefaults]` and `[realms]`
 settings while retaining unsupported values for inspection, including the

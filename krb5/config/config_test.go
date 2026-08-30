@@ -62,6 +62,7 @@ rdns = false
 	}
 	if cfg.QualifyShortname != "EXAMPLE.TEST" || !cfg.QualifyShortnameSet ||
 		cfg.DNSCanonicalizeHostname != "fallback" || cfg.RealmTryDomains != 2 ||
+		!cfg.RealmTryDomainsSet ||
 		cfg.RDNS || !cfg.RDNSSet {
 		t.Fatalf("hostrealm options = %#v", cfg)
 	}
