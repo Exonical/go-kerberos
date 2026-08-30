@@ -1078,6 +1078,10 @@ func TestServerS4UX509UsesAuthenticatorSubkey(t *testing.T) {
 	now := time.Unix(2000001817, 0).UTC()
 	server, kclient := testServer(t, now)
 	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	required := "pkinit"
+	if err := server.DB.(*kdb.Database).SetString(service, "require_auth", &required); err != nil {
+		t.Fatalf("set service require_auth: %v", err)
+	}
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
 	tgt, err := kclient.ASExchange(context.Background(), service, "host-password")
 	if err != nil {

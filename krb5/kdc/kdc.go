@@ -1280,7 +1280,7 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 			return nil
 		}
 	}
-	kdcKey, ok := s.freshnessKey([]int32{serviceKey.Enctype})
+	kdcKey, ok := s.freshnessKey(nil)
 	if !ok {
 		return fmt.Errorf("CAMMAC: no usable local krbtgt key")
 	}
@@ -1685,18 +1685,23 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		}
 	}
 	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
-	if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
-		protocol.EncryptionKey{KeyType: ticketKey.Enctype, KeyValue: ticketKey.Key}); err != nil &&
-		!stderrors.Is(err, cammac.ErrNotFound) {
-		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
-	}
 	var verifiedHeaderCAMMACElements protocol.AuthorizationData
-	if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
-		protocol.EncryptionKey{KeyType: ticketKey.Enctype, KeyValue: ticketKey.Key}); err == nil {
-		verifiedHeaderCAMMACElements, err = cammac.ProtectedElements(ticketPart.AuthorizationData)
-		if err != nil {
+	if elements, elementsErr := cammac.ProtectedElements(ticketPart.AuthorizationData); elementsErr != nil {
+		if !stderrors.Is(elementsErr, cammac.ErrNotFound) {
 			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 		}
+	} else if localKDCKey, ok := s.freshnessKey(nil); ok {
+		verifyErr := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
+			protocol.EncryptionKey{KeyType: localKDCKey.Enctype, KeyValue: localKDCKey.Key})
+		if verifyErr == nil {
+			verifiedHeaderCAMMACElements = elements
+		} else if !stderrors.Is(verifyErr, krberrors.ErrIntegrity) {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		} else if ticketPart.AuthorizationData, err = stripCAMMAC(ticketPart.AuthorizationData); err != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+	} else if ticketPart.AuthorizationData, err = stripCAMMAC(ticketPart.AuthorizationData); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	options := request.ReqBody.KDCOptions
 	if options&types.KDCEncTktInSkey != 0 {
@@ -1911,7 +1916,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 		}
 		evidenceKDCKey := protocol.EncryptionKey{}
-		if key, ok := s.freshnessKey([]int32{evidence.EncPart.EType}); ok {
+		if key, ok := s.freshnessKey(nil); ok {
 			evidenceKDCKey = protocol.EncryptionKey{KeyType: key.Enctype, KeyValue: key.Key}
 		}
 		if verifyErr := cammac.VerifyKDC(evidencePart.AuthorizationData,
@@ -2274,7 +2279,8 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		// MIT's optional-zero KVNO encoder omits a zero value on U2U tickets.
 		ticketKVNOPtr = nil
 	}
-	if findPA(request.PAData, protocol.PADataForUser) == nil {
+	if findPA(request.PAData, protocol.PADataForUser) == nil &&
+		findPA(request.PAData, protocol.PADataS4UX509User) == nil {
 		authIndicators, err := authIndicatorsFromElements(verifiedCAMMACElements)
 		if err != nil {
 			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
@@ -2371,6 +2377,16 @@ func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
 	if err != nil || !ok {
 		return kdb.Key{}, false
 	}
+	if len(enctypes) == 0 {
+		enctypes = []int32{
+			crypto.EnctypeAES256SHA1,
+			crypto.EnctypeAES128SHA1,
+			crypto.EnctypeAES256SHA384,
+			crypto.EnctypeAES128SHA256,
+			crypto.EnctypeCamellia128,
+			crypto.EnctypeCamellia256,
+		}
+	}
 	for _, enctype := range enctypes {
 		if key, ok := record.Keys[enctype]; ok {
 			if _, err := crypto.NewRegistry().Get(enctype); err != nil {
@@ -2380,7 +2396,15 @@ func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
 			return key, true
 		}
 	}
-	for enctype, key := range record.Keys {
+	// Keep a usable key fallback for principals containing an enctype outside
+	// the preferred list, but do not let map iteration choose unpredictably.
+	available := make([]int32, 0, len(record.Keys))
+	for enctype := range record.Keys {
+		available = append(available, enctype)
+	}
+	sort.Slice(available, func(i, j int) bool { return available[i] < available[j] })
+	for _, enctype := range available {
+		key := record.Keys[enctype]
 		if _, err := crypto.NewRegistry().Get(enctype); err == nil {
 			key.Enctype = enctype
 			return key, true
