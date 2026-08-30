@@ -214,11 +214,12 @@ the built-in `pkinit_san`, `pkinit_eku`, and `dbmatch` modules run in that
 order, followed by optional Go modules. `dbmatch` evaluates the
 `pkinit_cert_match` principal string attribute with MIT's `&&`/`||` relation
 prefixes, subject/issuer/SAN regular expressions, and EKU/KU lists. Subject
-and issuer matching uses Go's RFC2253-style `pkix.Name.String()` rendering;
-UPN otherName SANs and multiple certificate selection are not exposed by the
-Go `x509` API and are not implemented. Client-side certificate selection via
-the `pkinit_cert_match` profile option remains unsupported because the Go
-client does not expose MIT's multi-certificate identity store.
+and issuer matching preserves the certificate RDN order and uses the comma
+and plus separators emitted by MIT's `X509_NAME_print_ex`. PKINIT principal
+SANs and UPN otherName SANs are supported; arbitrary non-PKINIT SAN forms are
+not considered by `<SAN>`. Client-side certificate selection via the
+`pkinit_cert_match` profile option remains unsupported because the Go client
+does not expose MIT's multi-certificate identity store.
 
 The client and server implement RFC 3244 password changes and set-password requests
 against MIT `kadmind` on the kpasswd service port (464 by default; the isolated

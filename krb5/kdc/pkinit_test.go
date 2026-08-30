@@ -86,8 +86,8 @@ func TestServerPKINITDBMatchCertAuth(t *testing.T) {
 	}
 	if _, err := kclient.ASExchangePKINIT(
 		context.Background(), user, clientCert, clientKey, roots); err == nil ||
-		!hasKRBCode(err, 89) {
-		t.Fatalf("dbmatch mismatch error = %v, want KDC error 89", err)
+		!hasKRBCode(err, 66) {
+		t.Fatalf("dbmatch mismatch error = %v, want KDC error 66", err)
 	}
 }
 

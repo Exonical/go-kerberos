@@ -3,6 +3,7 @@ package kdc
 import (
 	"crypto/x509"
 	"crypto/x509/pkix"
+	stdasn1 "encoding/asn1"
 	"errors"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestCertAuthChainSemantics(t *testing.T) {
 	}{
 		{"pass does not authorize", []CertAuthModule{
 			certAuthTestModule{decision: CertAuthPass, indicators: []string{"pass"}},
-		}, false, false, []string{"pass"}, 62, true},
+		}, false, false, []string{"pass"}, 75, true},
 		{"accept authorizes", []CertAuthModule{
 			certAuthTestModule{decision: CertAuthPass, indicators: []string{"one"}},
 			certAuthTestModule{decision: CertAuthAccept, indicators: []string{"two"}},
@@ -51,7 +52,7 @@ func TestCertAuthChainSemantics(t *testing.T) {
 		}, true, true, []string{"hardware"}, 0, false},
 		{"hardware pass still needs accept", []CertAuthModule{
 			certAuthTestModule{decision: CertAuthHWAuthPass, indicators: []string{"hardware"}},
-		}, false, true, []string{"hardware"}, 62, true},
+		}, false, true, []string{"hardware"}, 75, true},
 		{"module error rejects", []CertAuthModule{
 			certAuthTestModule{decision: CertAuthAccept, indicators: []string{"one"}},
 			certAuthTestModule{err: &CertAuthError{Code: 89, Err: errors.New("mismatch")}},
@@ -106,12 +107,12 @@ func TestMatchCertificateMITComponents(t *testing.T) {
 	}{
 		{"<SUBJECT>CN=alice", true},
 		{"<ISSUER>CN=Example CA", true},
-		{"<SAN>alice\\.example", true},
+		{"<SAN>alice\\.example", false},
 		{"<KU>digitalSignature,keyEncipherment", true},
 		{"<EKU>clientAuth", true},
 		{"<SUBJECT>CN=alice<KU>keyEncipherment", true},
 		{"&&<SUBJECT>CN=alice<EKU>CLIENTAUTH", true},
-		{"||<SUBJECT>CN=missing<SAN>alice\\.example", true},
+		{"||<SUBJECT>CN=missing<SAN>alice\\.example", false},
 		{"<SUBJECT>CN=missing", false},
 		{"<KU>digitalSignature<EKU>emailProtection", false},
 	}
@@ -124,9 +125,78 @@ func TestMatchCertificateMITComponents(t *testing.T) {
 			t.Errorf("MatchCertificate(%q) = %v, want %v", test.rule, got, test.want)
 		}
 	}
+	_, _, principalCert, _ := makePKINITTestCertificate(
+		t, "alice", "TEST.REALM", false)
+	if got, err := MatchCertificate(principalCert,
+		`<SAN>alice@TEST\.REALM`); err != nil || !got {
+		t.Fatalf("pkinit SAN match = %v, %v, want true", got, err)
+	}
+	upnCert := &x509.Certificate{Extensions: []pkix.Extension{
+		{Id: stdasn1.ObjectIdentifier{2, 5, 29, 17},
+			Value: makeUPNSANExtension(t, "alice@TEST.REALM")},
+	}}
+	if got, err := MatchCertificate(upnCert,
+		`<SAN>alice@TEST\.REALM`); err != nil || !got {
+		t.Fatalf("UPN SAN match = %v, %v, want true", got, err)
+	}
 	if _, err := MatchCertificate(cert, "<SUBJECT>["); err == nil {
 		t.Fatal("invalid regexp accepted")
 	}
+}
+
+func TestCertificateNameUsesMITRDNOrder(t *testing.T) {
+	raw, err := stdasn1.Marshal(pkix.RDNSequence{
+		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 6}, Value: "US"}},
+		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 10}, Value: "Example"}},
+		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 3}, Value: "alice"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &x509.Certificate{RawSubject: raw, RawIssuer: raw}
+	const want = "C=US,O=Example,CN=alice"
+	if got := certificateName(cert.Subject, cert.RawSubject); got != want {
+		t.Fatalf("subject = %q, want %q", got, want)
+	}
+	if got, err := MatchCertificate(cert, "<SUBJECT>^"+want+"$"); err != nil || !got {
+		t.Fatalf("MIT-order subject match = %v, %v", got, err)
+	}
+}
+
+func makeUPNSANExtension(t *testing.T, upn string) []byte {
+	t.Helper()
+	oid, err := stdasn1.Marshal(stdasn1.ObjectIdentifier{
+		1, 3, 6, 1, 4, 1, 311, 20, 2, 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stringValue, err := stdasn1.Marshal(stdasn1.RawValue{
+		Tag: 12, Bytes: []byte(upn),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicitValue, err := stdasn1.Marshal(stdasn1.RawValue{
+		Class: 2, Tag: 0, IsCompound: true, Bytes: stringValue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherName := append(oid, explicitValue...)
+	generalName, err := stdasn1.Marshal(stdasn1.RawValue{
+		Class: 2, Tag: 0, IsCompound: true, Bytes: otherName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extension, err := stdasn1.Marshal(stdasn1.RawValue{
+		Tag: 16, IsCompound: true, Bytes: generalName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return extension
 }
 
 func TestBuiltinCertAuthModules(t *testing.T) {
@@ -138,13 +208,13 @@ func TestBuiltinCertAuthModules(t *testing.T) {
 	_, _, cert, _ := makePKINITTestCertificate(t, "bob", "TEST.REALM", false)
 	decision, _, err := (pkinitSANModule{}).Authorize(cert, client, nil)
 	var certErr *CertAuthError
-	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != 62 {
-		t.Fatalf("mismatching PKINIT SAN = %v, %v, want code 62", decision, err)
+	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != 75 {
+		t.Fatalf("mismatching PKINIT SAN = %v, %v, want code 75", decision, err)
 	}
 	decision, _, err = (pkinitEKUModule{}).Authorize(
 		&x509.Certificate{}, client, nil)
 	certErr = nil
-	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != 77 {
+	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != certAuthInconsistentKeyPurpose {
 		t.Fatalf("missing PKINIT EKU = %v, %v, want code 77", decision, err)
 	}
 }
@@ -162,8 +232,8 @@ func TestDBMatchModule(t *testing.T) {
 	entry.Strings["pkinit_cert_match"] = "<SUBJECT>CN=bob"
 	decision, _, err = (dbMatchModule{}).Authorize(cert, client, entry)
 	var certErr *CertAuthError
-	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != 89 {
-		t.Fatalf("dbmatch mismatch = %v, %v, want code 89", decision, err)
+	if decision != CertAuthPass || !errors.As(err, &certErr) || certErr.Code != 66 {
+		t.Fatalf("dbmatch mismatch = %v, %v, want code 66", decision, err)
 	}
 }
 
