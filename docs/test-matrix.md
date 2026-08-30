@@ -415,8 +415,11 @@ conversation checksum uses key usage 41 and the authenticator subkey.
 Unit coverage includes header and finished DER goldens, malformed framing,
 conversation checksum tamper detection, cookie-preserving proxy tokens, and
 existing-ticket AP handoff. The proxy uses the configured Go KDC transport.
-The requested live MIT initiator gate was not added because this environment
-does not have the `python3-gssapi` module (`No module named 'gssapi'`), and no
-other installed binding exposes a password-backed IAKERB mechanism harness.
-Reverse MIT acceptor/proxy interoperability is likewise not enabled. SPNEGO
-remains unchanged: callers select IAKERB directly by mechanism OID.
+The live MIT initiator gate uses `python3-gssapi` raw credentials acquired
+with a password and selects mechanism OID `1.3.6.1.5.2.5`; it proxies AS/TGS
+traffic through the Go acceptor and verifies a Go `Wrap`/MIT `Unwrap`
+round-trip. Older MIT runtimes whose IAKERB implementation predates the
+current protocol return `KRB5_BAD_MSIZE` and are skipped by the gate; the
+CI image installs the MIT GSS Python binding. Reverse MIT acceptor/proxy
+interoperability is not enabled.
+SPNEGO remains unchanged: callers select IAKERB directly by mechanism OID.
