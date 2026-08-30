@@ -26,6 +26,7 @@ when absent.
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange | RED | RED | RED |
 | GSS credential delegation (RFC 4121 / KRB-CRED) | Go initiator and acceptor round trips, including encrypted usage-14 and plaintext compatibility | `TestMITGSSDelegationAgainstGo` uses live `python3-gssapi` delegation and verifies the forwarded TGT can obtain a service ticket | KRB-CRED golden DER, forwarded-TGT request construction, and delegated-context flag coverage |
+| CAMMAC authorization data (RFC 7751) | Go KDC issuance and AP service-verifier acceptance | No live gate; the fixture does not configure MIT authentication indicators | CAMMAC golden DER, usage-64 KDC/service verification, protected-element extraction, and tamper rejection |
 | SPNEGO (RFC 4178) over Kerberos GSS | Go unit coverage, including DER, legacy OID, and mechListMIC negotiation | `TestGoSPNEGOInitiatorAgainstMIT` (Python GSSAPI linked to MIT) | `TestMITSPNEGOInitiatorAgainstGo` (Python GSSAPI linked to MIT) |
 | PKINIT (RFC 4556), RFC 8636 agility, and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented; SHA-256, SHA-1, and SHA-512 KDF identifiers are advertised in MIT preference order | KDF vectors, wire goldens, Go↔Go, Go client ↔ MIT KDC, and MIT client ↔ Go KDC coverage; MIT trace asserts SHA-256 negotiation | MIT pass |
 | PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
@@ -369,3 +370,14 @@ The planned corpus will include valid MIT packets, valid RFC vectors,
 truncated messages, and malformed historical regression cases. Each
 regression receives a reproducer before its fix and remains permanently in
 the suite.
+
+## RFC 7751 CAMMAC authorization data
+
+CAMMAC protocol golden tests cover the RFC 7751 elements and verifier-mac
+structure. Go unit tests cover KDC/service checksum generation, protected
+element extraction, KDC and service verification, and tamper rejection.
+`kdc.Server.AuthIndicators` emits authentication indicators inside
+AD-IF-RELEVANT/AD-CAMMAC with key usage 64, and AP acceptance verifies the
+service verifier before exposing the protected authorization data. No live MIT
+CAMMAC gate is enabled yet: the integration fixture does not configure MIT
+authentication indicators, so a live test would not exercise CAMMAC semantics.

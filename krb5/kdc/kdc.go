@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
@@ -130,6 +131,9 @@ type Server struct {
 	// the data with that key using the MS-PAC usage 16.
 	GeneratePACCredentials func(client, service principal.Principal,
 		replacedReplyKey kdb.Key) ([]byte, int32, error)
+	// AuthIndicators causes the KDC to issue RFC 7751 CAMMAC authorization
+	// data containing these authentication-indicator strings.
+	AuthIndicators []string
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -1126,6 +1130,83 @@ func (s *Server) issuePACWithOptions(ticketPart *protocol.EncTicketPart, client,
 	return nil
 }
 
+func stripCAMMAC(data protocol.AuthorizationData) (protocol.AuthorizationData, error) {
+	out := make(protocol.AuthorizationData, 0, len(data))
+	for _, outer := range data {
+		if outer.ADType != protocol.ADIfRelevant {
+			out = append(out, outer)
+			continue
+		}
+		var inner protocol.AuthorizationData
+		if err := asn1.Unmarshal(outer.ADData, &inner); err != nil {
+			return nil, fmt.Errorf("CAMMAC IF-RELEVANT: %w", err)
+		}
+		filtered := make(protocol.AuthorizationData, 0, len(inner))
+		for _, entry := range inner {
+			if entry.ADType != protocol.ADCAMMAC {
+				filtered = append(filtered, entry)
+			}
+		}
+		if len(filtered) == len(inner) {
+			out = append(out, outer)
+			continue
+		}
+		if len(filtered) != 0 {
+			encoded, err := asn1.Marshal(filtered)
+			if err != nil {
+				return nil, fmt.Errorf("CAMMAC IF-RELEVANT: %w", err)
+			}
+			out = append(out, protocol.AuthorizationDataEntry{
+				ADType: protocol.ADIfRelevant, ADData: encoded,
+			})
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.Key) error {
+	var elements protocol.AuthorizationData
+	var err error
+	if len(s.AuthIndicators) > 0 {
+		indicators := make([]types.UTF8String, len(s.AuthIndicators))
+		for i, indicator := range s.AuthIndicators {
+			indicators[i] = types.UTF8String(indicator)
+		}
+		encodedIndicators, marshalErr := asn1.Marshal(indicators)
+		if marshalErr != nil {
+			return fmt.Errorf("CAMMAC auth indicators: %w", marshalErr)
+		}
+		elements = protocol.AuthorizationData{{
+			ADType: protocol.ADAuthIndicator, ADData: encodedIndicators,
+		}}
+	} else if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
+		elements, err = cammac.ProtectedElements(ticketPart.AuthorizationData)
+		if err != nil {
+			return err
+		}
+	} else {
+		return nil
+	}
+	kdcKey, ok := s.freshnessKey([]int32{serviceKey.Enctype})
+	if !ok {
+		return fmt.Errorf("CAMMAC: no usable local krbtgt key")
+	}
+	base, err := stripCAMMAC(ticketPart.AuthorizationData)
+	if err != nil {
+		return err
+	}
+	ticketPart.AuthorizationData = base
+	wrapped, err := cammac.Marshal(elements, *ticketPart,
+		protocol.EncryptionKey{KeyType: kdcKey.Enctype, KeyValue: kdcKey.Key},
+		protocol.EncryptionKey{KeyType: serviceKey.Enctype, KeyValue: serviceKey.Key},
+		kdcKey.KVNO)
+	if err != nil {
+		return err
+	}
+	ticketPart.AuthorizationData = append(ticketPart.AuthorizationData, wrapped...)
+	return nil
+}
+
 func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
@@ -1192,6 +1273,9 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 	}
 	if err := s.issuePACWithOptions(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false,
 		replyEncryptionKey, nil, nil); err != nil {
+		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
+	if err := s.issueCAMMAC(&ticketPart, serviceKey); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketPlain := marshalDER(ticketPart)
@@ -1950,6 +2034,12 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 	}
+	if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
+		if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
+			protocol.EncryptionKey{KeyType: headerKey.Enctype, KeyValue: headerKey.Key}); err != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+	}
 	sessionValue := make([]byte, etype.KeySize())
 	if _, err := io.ReadFull(crypto.RandomSource, sessionValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
@@ -2044,6 +2134,9 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if err := s.issuePACWithOptions(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
 		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
 		issuedClient != nil, nil, delegationEvidence, pacVerifyKey); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if err := s.issueCAMMAC(&ticketPart, serviceKey); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketEncryptionKey := serviceKey

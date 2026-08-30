@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
@@ -54,6 +55,36 @@ func TestAPReqRoundTripAndMutualAuth(t *testing.T) {
 	}
 	if err := VerifyAPRep(request, apRep); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifyAPReqExposesVerifiedCAMMACElements(t *testing.T) {
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	ticket := decodeTicket(t, creds.Ticket)
+	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	key := protocol.EncryptionKey{KeyType: apEtype, KeyValue: kt.Entries[0].Key}
+	elements := protocol.AuthorizationData{{
+		ADType: protocol.ADAuthIndicator, ADData: []byte("password"),
+	}}
+	protected, err := cammac.Marshal(elements, part, key, key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part.AuthorizationData = protected
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	creds.Ticket = mustMarshalAP(t, ticket)
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := VerifyAPReq(kt, der, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("VerifyAPReq: %v", err)
+	}
+	if !cammac.EqualElements(verified.AuthorizationData, elements) {
+		t.Fatalf("verified CAMMAC elements = %#v, want %#v",
+			verified.AuthorizationData, elements)
 	}
 }
 

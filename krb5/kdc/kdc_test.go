@@ -14,6 +14,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
@@ -49,6 +50,56 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 	if !samePrincipal(credentials.Server, service) {
 		t.Fatalf("service server = %v, want %v", credentials.Server, service)
+	}
+}
+
+func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
+	now := time.Unix(2000000005, 0).UTC()
+	server, _ := testServer(t, now)
+	server.AuthIndicators = []string{"password"}
+	db := server.DB.(*kdb.Database)
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	record, ok, err := db.Lookup(service)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	serviceKey := record.Keys[crypto.EnctypeAES256SHA1]
+	serviceKey.Enctype = crypto.EnctypeAES256SHA1
+	part := protocol.EncTicketPart{
+		Flags: types.TicketInitial,
+		Key: protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1,
+			KeyValue: bytes.Repeat([]byte{0x33}, 32)},
+		CRealm:   "TEST.REALM",
+		CName:    protocol.PrincipalName{NameType: 1, NameString: []string{"alice"}},
+		AuthTime: types.KerberosTime{Time: now, Present: true},
+		EndTime:  types.KerberosTime{Time: now.Add(time.Hour), Present: true},
+	}
+	if err := server.issueCAMMAC(&part, serviceKey); err != nil {
+		t.Fatalf("issueCAMMAC: %v", err)
+	}
+	protected, err := cammac.VerifyService(part.AuthorizationData,
+		protocol.EncryptionKey{KeyType: serviceKey.Enctype, KeyValue: serviceKey.Key})
+	if err != nil {
+		t.Fatalf("VerifyService: %v", err)
+	}
+	if len(protected) != 1 || protected[0].ADType != protocol.ADAuthIndicator {
+		t.Fatalf("protected authorization data = %#v", protected)
+	}
+	var indicators []types.UTF8String
+	if err := asn1.Unmarshal(protected[0].ADData, &indicators); err != nil {
+		t.Fatalf("decode auth indicators: %v", err)
+	}
+	if len(indicators) != 1 || indicators[0] != types.UTF8String("password") {
+		t.Fatalf("auth indicators = %#v", indicators)
+	}
+	kdcKey, ok := server.freshnessKey([]int32{serviceKey.Enctype})
+	if !ok {
+		t.Fatal("missing local krbtgt key")
+	}
+	if err := cammac.VerifyKDC(part.AuthorizationData, part,
+		protocol.EncryptionKey{KeyType: kdcKey.Enctype, KeyValue: kdcKey.Key}); err != nil {
+		t.Fatalf("VerifyKDC: %v", err)
 	}
 }
 

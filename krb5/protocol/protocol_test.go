@@ -88,6 +88,36 @@ func TestEncKrbCredPartGolden(t *testing.T) {
 	}
 }
 
+func TestCAMMACGolden(t *testing.T) {
+	kvno := uint32(7)
+	encoded, err := asn1.Marshal(CAMMAC{
+		Elements: AuthorizationData{{ADType: ADAuthIndicator, ADData: []byte{1, 2}}},
+		KDCVerifier: &VerifierMAC{
+			KVNO:     &kvno,
+			Checksum: Checksum{ChecksumType: 15, Checksum: []byte{3, 4}},
+		},
+		SVCVerifier: &VerifierMAC{
+			Checksum: Checksum{ChecksumType: 15, Checksum: []byte{5, 6}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := hex.DecodeString("303ca00f300d300ba003020161a10404020102a1163014a103020107a30d300ba00302010fa10404020304a211300fa30d300ba00302010fa10404020506")
+	if !bytes.Equal(encoded, want) {
+		t.Fatalf("CAMMAC DER = %x, want %x", encoded, want)
+	}
+	var decoded CAMMAC
+	if err := asn1.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Elements) != 1 || decoded.KDCVerifier == nil ||
+		decoded.KDCVerifier.KVNO == nil || *decoded.KDCVerifier.KVNO != kvno ||
+		decoded.SVCVerifier == nil {
+		t.Fatalf("decoded CAMMAC = %#v", decoded)
+	}
+}
+
 func TestFASTStructuresRoundTrip(t *testing.T) {
 	value := KrbFastReq{
 		FastOptions: 0,
