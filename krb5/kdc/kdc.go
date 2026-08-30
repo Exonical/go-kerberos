@@ -2136,6 +2136,9 @@ func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
 	}
 	for _, enctype := range enctypes {
 		if key, ok := record.Keys[enctype]; ok {
+			if _, err := crypto.NewRegistry().Get(enctype); err != nil {
+				continue
+			}
 			key.Enctype = enctype
 			return key, true
 		}
