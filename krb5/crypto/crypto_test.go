@@ -60,6 +60,26 @@ func TestCF2UsesDistinctPepperInputs(t *testing.T) {
 	}
 }
 
+func TestCF2SupportsDifferentKeyEnctypes(t *testing.T) {
+	armor, err := NewRegistry().Get(EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewRegistry().Get(EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key1 := bytes.Repeat([]byte{0x11}, armor.KeySize())
+	key2 := bytes.Repeat([]byte{0x22}, client.KeySize())
+	got, err := CF2WithKeyEType(armor, key1, client, key2, []byte("a"), []byte("b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != armor.KeySize() {
+		t.Fatalf("CF2 key length = %d, want %d", len(got), armor.KeySize())
+	}
+}
+
 func TestCF2RFC6113Vectors(t *testing.T) {
 	vectors := []struct {
 		etype int32

@@ -21,6 +21,7 @@ when absent.
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
+| PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | Conditional MIT `kinit -T` gate when `encrypted_challenge.so` is installed; the current Ubuntu runtime lacks this client/KDC plugin, so the live gate skips; existing Go FAST-to-MIT coverage exercises fallback when MIT does not advertise type 138 | Usage-54/55 CF2 crypto and response verification |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
@@ -39,6 +40,14 @@ when absent.
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
 | MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
+
+PA-ENCRYPTED-CHALLENGE support is FAST-only. The optional MIT
+`encrypted_challenge_indicator` realm setting is not implemented; the Go KDC
+continues to expose explicit `Server.AuthIndicators` for deployments that
+need CAMMAC authentication indicators. The installed Ubuntu MIT runtime does
+not ship the `encrypted_challenge.so` client/KDC preauthentication plugin, so
+the live MIT encrypted-challenge test is conditional and skips there rather
+than claiming an unsupported interoperability direction.
 
 The Go-to-MIT and MIT-to-Go KKDCP gates pass using a disposable TLS proxy and
 a real MIT KDC. The reverse gate skips when the installed MIT runtime lacks

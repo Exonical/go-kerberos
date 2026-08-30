@@ -93,6 +93,8 @@ const (
 	PADataFXCookie int32 = 133
 	// PADataASFreshness is the RFC 8070 freshness-token padata type.
 	PADataASFreshness int32 = 150
+	// PADataEncryptedChallenge is the RFC 6113 encrypted-challenge padata type.
+	PADataEncryptedChallenge int32 = 138
 )
 
 // SPAKESecondFactor is the RFC PA-SPAKE second-factor choice.

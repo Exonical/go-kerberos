@@ -290,6 +290,28 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	}
 }
 
+func TestMITClientEncryptedChallengeAgainstGoKDC(t *testing.T) {
+	const plugin = "/usr/lib/x86_64-linux-gnu/krb5/plugins/preauth/encrypted_challenge.so"
+	if _, err := os.Stat(plugin); err != nil {
+		t.Skipf("MIT encrypted-challenge plugin unavailable: %s", plugin)
+	}
+	k := startGoKDC(t)
+	armorCache := filepath.Join(filepath.Dir(k.cache), "encrypted-challenge-armor.ccache")
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-c", armorCache, "alice")
+	markFASTAvailable(t, armorCache)
+	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "-T", armorCache, "alice")
+	if err != nil {
+		t.Fatalf("MIT FAST kinit against Go KDC: %v\n%s", err, output)
+	}
+	t.Logf("MIT encrypted-challenge FAST trace:\n%s", output)
+	trace := strings.ToLower(output)
+	if !strings.Contains(trace, "encrypted challenge") &&
+		!strings.Contains(trace, "padata type 138") &&
+		!strings.Contains(trace, "138") {
+		t.Fatalf("MIT FAST trace did not demonstrate encrypted challenge padata:\n%s", output)
+	}
+}
+
 func TestMITClientSPAKEAgainstGoKDC(t *testing.T) {
 	k := startGoSPAKEKDC(t)
 	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")

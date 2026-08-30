@@ -249,21 +249,28 @@ func PRF(etype EType, key, input []byte) ([]byte, error) {
 
 // CF2 combines two keys using the RFC 6113 KRB-FX-CF2 construction.
 func CF2(etype EType, key1, key2, pepper1, pepper2 []byte) ([]byte, error) {
-	if etype == nil {
+	return CF2WithKeyEType(etype, key1, etype, key2, pepper1, pepper2)
+}
+
+// CF2WithKeyEType combines keys using RFC 6113 KRB-FX-CF2 when the
+// contribution keys have different enctypes. The result has the enctype and
+// key length of etype1, matching krb5_c_fx_cf2_simple.
+func CF2WithKeyEType(etype1 EType, key1 []byte, etype2 EType, key2, pepper1, pepper2 []byte) ([]byte, error) {
+	if etype1 == nil || etype2 == nil {
 		return nil, fmt.Errorf("CF2: nil enctype")
 	}
-	if len(key1) != etype.KeySize() || len(key2) != etype.KeySize() {
+	if len(key1) != etype1.KeySize() || len(key2) != etype2.KeySize() {
 		return nil, fmt.Errorf("CF2: invalid key length")
 	}
-	first, err := prfPlus(etype, key1, pepper1, etype.KeySize())
+	first, err := prfPlus(etype1, key1, pepper1, etype1.KeySize())
 	if err != nil {
 		return nil, err
 	}
-	second, err := prfPlus(etype, key2, pepper2, etype.KeySize())
+	second, err := prfPlus(etype2, key2, pepper2, etype1.KeySize())
 	if err != nil {
 		return nil, err
 	}
-	if len(first) != len(second) || len(first) != etype.KeySize() {
+	if len(first) != len(second) || len(first) != etype1.KeySize() {
 		return nil, fmt.Errorf("CF2: invalid PRF output length")
 	}
 	out := make([]byte, len(first))

@@ -45,6 +45,7 @@ const (
 	spakeCookieLifetime    = 10 * time.Minute
 	paTGSReq               = 1
 	paEncTimestamp         = 2
+	paEncryptedChallenge   = protocol.PADataEncryptedChallenge
 	paFXCookie             = 133
 	paSPAKE                = 151
 	kdcErrCPrincipal       = 6
@@ -553,6 +554,72 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if otpEnabled && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
+	encryptedChallengePA := findPA(request.PAData, paEncryptedChallenge)
+	if encryptedChallengePA != nil {
+		if armor == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		candidates := make([]kdb.Key, 0, len(clientRecord.Keys))
+		seen := make(map[int32]bool, len(clientRecord.Keys))
+		for _, requestedEType := range request.ReqBody.EType {
+			if key, exists := clientRecord.Keys[requestedEType]; exists {
+				key.Enctype = requestedEType
+				candidates = append(candidates, key)
+				seen[requestedEType] = true
+			}
+		}
+		for enctype, key := range clientRecord.Keys {
+			if seen[enctype] {
+				continue
+			}
+			key.Enctype = enctype
+			candidates = append(candidates, key)
+		}
+		var matchedKey kdb.Key
+		var matchedKeyEType crypto.EType
+		var timestamp time.Time
+		for _, candidate := range candidates {
+			candidateEType, candidateErr := crypto.NewRegistry().Get(candidate.Enctype)
+			if candidateErr != nil {
+				continue
+			}
+			candidateTimestamp, candidateErr := preauth.DecryptEncryptedChallengeWithKeyEType(
+				armor.etype, armor.key, candidateEType, candidate.Key,
+				encryptedChallengePA.PADataValue)
+			if candidateErr == nil {
+				matchedKey = candidate
+				matchedKeyEType = candidateEType
+				timestamp = candidateTimestamp
+				break
+			}
+		}
+		if matchedKey.Enctype == 0 {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if !s.withinSkew(timestamp) {
+			return s.fastErrorResponse(krbAPErrSkew, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		clientKey = matchedKey
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if s.passwordExpired(clientRecord) {
+			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
+			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
+		if replyErr != nil {
+			return s.fastErrorResponse(kdcErrGeneric, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA})
+	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
@@ -768,6 +835,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 					Salt:  stringPointer(principalSalt(clientKey, clientName)),
 				}}),
 			})
+		}
+		if armor != nil && clientKey.Enctype != 0 {
+			methodData = append(methodData, protocol.PAData{PADataType: paEncryptedChallenge})
 		}
 		if s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
 			methodData = append(methodData, protocol.PAData{PADataType: protocol.PADataPKASReq})
