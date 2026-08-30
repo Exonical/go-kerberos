@@ -1,8 +1,15 @@
 package crypto
 
 import (
+	"bufio"
 	"bytes"
+	stdcrypto "crypto/aes"
 	"encoding/hex"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -167,5 +174,70 @@ func TestMITShortCiphertextSemantics(t *testing.T) {
 				t.Fatalf("MIT short ciphertext etype %d length %d unexpectedly succeeded", id, length)
 			}
 		}
+	}
+}
+
+func TestMITAESVariableTextAndKeyVectors(t *testing.T) {
+	testMITAESBlockVectors(t, "expect-vt.txt")
+	testMITAESBlockVectors(t, "expect-vk.txt")
+}
+
+func testMITAESBlockVectors(t *testing.T, name string) {
+	t.Helper()
+	_, source, _, _ := runtime.Caller(0)
+	file, err := os.Open(filepath.Join(filepath.Dir(source), "..", "..", "testdata", "mit", "crypto", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	var key, plaintext, ciphertext []byte
+	keySize := 0
+	check := func() {
+		if len(key) == 0 || len(plaintext) == 0 || len(ciphertext) == 0 {
+			return
+		}
+		if len(key) != keySize/8 {
+			t.Fatalf("MIT AES %s key length = %d, want %d", name, len(key), keySize/8)
+		}
+		block, err := stdcrypto.NewCipher(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, stdcrypto.BlockSize)
+		block.Encrypt(got, plaintext)
+		if !bytes.Equal(got, ciphertext) {
+			t.Fatalf("MIT AES %s keysize %d plaintext %x = %x, want %x",
+				name, keySize, plaintext, got, ciphertext)
+		}
+	}
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "=") || strings.HasPrefix(line, "I=") {
+			continue
+		}
+		var value string
+		switch {
+		case strings.HasPrefix(line, "KEYSIZE="):
+			keySize, err = strconv.Atoi(strings.TrimPrefix(line, "KEYSIZE="))
+			if err != nil {
+				t.Fatalf("invalid MIT AES key size: %v", err)
+			}
+		case strings.HasPrefix(line, "KEY="):
+			value = strings.TrimPrefix(line, "KEY=")
+			key = mitHex(t, value)
+		case strings.HasPrefix(line, "PT="):
+			value = strings.TrimPrefix(line, "PT=")
+			plaintext = mitHex(t, value)
+		case strings.HasPrefix(line, "CT="):
+			value = strings.TrimPrefix(line, "CT=")
+			ciphertext = mitHex(t, value)
+			check()
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
