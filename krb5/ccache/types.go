@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/localauth"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 // Type identifies a credential cache backend.
@@ -355,6 +359,65 @@ func Collection(name string) ([]*Handle, error) {
 	}
 	defer resolved.Close()
 	return resolved.Collection()
+}
+
+// SelectForServer applies the MIT .k5identity rules to a cache collection.
+// It returns the matching cache and client principal. If no rule matches,
+// the collection's primary cache is selected.
+func SelectForServer(name string, cfg *config.Config, server principal.Principal) (*Handle, principal.Principal, error) {
+	resolved, err := Resolve(name)
+	if err != nil {
+		return nil, principal.Principal{}, err
+	}
+	defer resolved.Close()
+	caches, err := resolved.Collection()
+	if err != nil {
+		return nil, principal.Principal{}, err
+	}
+	identityPath := localauth.IdentityPath(cfg)
+	if identityPath == "" {
+		return firstCache(caches)
+	}
+	selected, matched, err := localauth.SelectIdentity(identityPath, server)
+	if err != nil {
+		return nil, principal.Principal{}, err
+	}
+	if !matched {
+		return firstCache(caches)
+	}
+	for _, cache := range caches {
+		value, readErr := cache.Read()
+		if readErr != nil {
+			continue
+		}
+		if principalsEqual(value.DefaultPrincipal, selected) {
+			return cache, selected, nil
+		}
+	}
+	return nil, selected, localauth.ErrNoCache
+}
+
+func firstCache(caches []*Handle) (*Handle, principal.Principal, error) {
+	if len(caches) == 0 {
+		return nil, principal.Principal{}, localauth.ErrNoCache
+	}
+	value, err := caches[0].Read()
+	if err != nil {
+		return nil, principal.Principal{}, err
+	}
+	return caches[0], value.DefaultPrincipal, nil
+}
+
+func principalsEqual(a, b principal.Principal) bool {
+	if a.Realm != b.Realm || len(a.Components) != len(b.Components) {
+		return false
+	}
+	for i := range a.Components {
+		if a.Components[i] != b.Components[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func dirPrimaryPath(dir string) (string, error) {
