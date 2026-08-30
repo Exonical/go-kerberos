@@ -111,6 +111,54 @@ func TestParseAuthPackPreservesOptionalCMSAndDHNonce(t *testing.T) {
 	}
 }
 
+func TestParseAuthPackRejectsDuplicateAndOutOfOrderOptionals(t *testing.T) {
+	auth := PKAuthenticator{
+		Cusec: 1, CTime: time.Unix(1700000000, 0).UTC(), Nonce: 2,
+		PAChecksum: []byte("checksum"),
+	}
+	base := mustContent(authPackDER(auth, nil))
+	cms := derSeq(derSeq(derOID(asn1.ObjectIdentifier{1, 2, 3}), derNull()))
+	dhNonce := derOctet([]byte{4, 5, 6, 7})
+	tests := []struct {
+		name   string
+		fields []byte
+	}{
+		{
+			name: "duplicate supported CMS types",
+			fields: append(append([]byte(nil), base...),
+				derExplicit(2, cms)...),
+		},
+		{
+			name: "duplicate DH nonce",
+			fields: append(append([]byte(nil), base...),
+				derExplicit(3, dhNonce)...),
+		},
+		{
+			name: "optionals out of order",
+			fields: append(append(append([]byte(nil), base...),
+				derExplicit(3, dhNonce)...),
+				derExplicit(2, cms)...),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var duplicate []byte
+			switch test.name {
+			case "duplicate supported CMS types":
+				duplicate = derExplicit(2, cms)
+			case "duplicate DH nonce":
+				duplicate = derExplicit(3, dhNonce)
+			}
+			if duplicate != nil {
+				test.fields = append(test.fields, duplicate...)
+			}
+			if _, err := ParseAuthPack(der(0x30, test.fields)); err == nil {
+				t.Fatal("ParseAuthPack accepted duplicate or out-of-order optional fields")
+			}
+		})
+	}
+}
+
 func TestAuthPackFreshnessTokenWireEncoding(t *testing.T) {
 	token := []byte{0xde, 0xad, 0xbe, 0xef}
 	auth := PKAuthenticator{
