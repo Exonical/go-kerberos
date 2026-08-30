@@ -206,6 +206,13 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 			},
 		},
 		{
+			name: "start at clock skew boundary",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1300, 0).UTC()),
+				EndTime: present(1500),
+			},
+		},
+		{
 			name: "start beyond clock skew",
 			part: protocol.EncTicketPart{
 				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1400, 0).UTC()),
@@ -218,6 +225,13 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 			part: protocol.EncTicketPart{
 				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
 				EndTime: present(800),
+			},
+		},
+		{
+			name: "end at clock skew boundary",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
+				EndTime: present(700),
 			},
 		},
 		{
