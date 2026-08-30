@@ -174,17 +174,11 @@ func TestGoClientASExchange(t *testing.T) {
 }
 
 func TestGoClientCamelliaAgainstMITKDC(t *testing.T) {
-	realm := testenv.Start(t)
-	realm.Run(t, "", "/usr/sbin/kadmin.local", "-q",
-		"cpw -e camellia256-cts-cmac -pw alice-password alice")
+	realm := testenv.StartWithCamellia(t)
 	configData, err := os.ReadFile(realm.Config)
 	if err != nil {
 		t.Fatalf("read realm config: %v", err)
 	}
-	configData = []byte(strings.Replace(string(configData),
-		" dns_lookup_realm = false\n",
-		" dns_lookup_realm = false\n permitted_enctypes = camellia256-cts-cmac\n default_tkt_enctypes = camellia256-cts-cmac\n",
-		1))
 	cfg, err := config.Parse(configData)
 	if err != nil {
 		t.Fatalf("parse Camellia config: %v", err)

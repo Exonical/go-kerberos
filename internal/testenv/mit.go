@@ -54,6 +54,12 @@ func Start(t *testing.T) *Realm {
 	return start(t, "", false, "")
 }
 
+// StartWithCamellia creates and starts an MIT realm configured to issue
+// Camellia keys for the alice test principal.
+func StartWithCamellia(t *testing.T) *Realm {
+	return startWithOptions(t, "", false, "", "", "", true)
+}
+
 // StartWithSPAKE creates and starts an MIT realm with SPAKE enabled for the
 // client and KDC.
 func StartWithSPAKE(t *testing.T) *Realm {
@@ -85,11 +91,16 @@ func StartWithOTP(t *testing.T, radiusServer, radiusSecret string) *Realm {
 }
 
 func start(t *testing.T, masterEType string, iprop bool, spakeGroup string) *Realm {
-	return startWithOTP(t, masterEType, iprop, spakeGroup, "", "")
+	return startWithOptions(t, masterEType, iprop, spakeGroup, "", "", false)
 }
 
 func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
 	radiusServer, radiusSecret string) *Realm {
+	return startWithOptions(t, masterEType, iprop, spakeGroup, radiusServer, radiusSecret, false)
+}
+
+func startWithOptions(t *testing.T, masterEType string, iprop bool, spakeGroup,
+	radiusServer, radiusSecret string, camellia bool) *Realm {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("MIT interoperability harness skipped in short mode")
@@ -147,7 +158,7 @@ func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
  rdns = false
  ticket_lifetime = 24h
  forwardable = true
-%s
+%s%s
 
 [realms]
  %s = {
@@ -158,6 +169,11 @@ func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
 `, RealmName, func() string {
 		if spakeGroup != "" {
 			return " spake_preauth_groups = " + spakeGroup + "\n"
+		}
+		return ""
+	}(), func() string {
+		if camellia {
+			return " permitted_enctypes = camellia256-cts aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96\n default_tkt_enctypes = camellia256-cts\n"
 		}
 		return ""
 	}(), RealmName, port, adminPort, kpasswdPort))
@@ -175,13 +191,19 @@ func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
   acl_file = %s/kadm5.acl
   key_stash_file = %s/.k5.%s
 %s
+%s
  }
 `, port, port, RealmName, func() string {
 		if spakeGroup != "" {
 			return "  spake_preauth_groups = " + spakeGroup + "\n"
 		}
 		return ""
-	}(), dir, dir, dir, dir, dir, dir, RealmName, ipropKDCConfig)+otpKDCConfig)
+	}(), dir, dir, dir, dir, dir, dir, RealmName, func() string {
+		if camellia {
+			return "  supported_enctypes = camellia256-cts:normal aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal\n"
+		}
+		return ""
+	}(), ipropKDCConfig)+otpKDCConfig)
 	acl := "admin/admin@" + RealmName + " sxe\n"
 	if iprop {
 		acl += "kiprop/replica@" + RealmName + " p\n"
@@ -193,10 +215,14 @@ func startWithOTP(t *testing.T, masterEType string, iprop bool, spakeGroup,
 	}
 	createArgs = append(createArgs, "-P", MasterKey)
 	run(t, r.env(), "", "/usr/sbin/kdb5_util", createArgs...)
+	aliceCommand := "addprinc -pw alice-password alice"
+	if camellia {
+		aliceCommand = "addprinc -e camellia256-cts:normal -pw alice-password alice"
+	}
 	for _, command := range []string{
 		"ktadd -k " + filepath.Join(dir, "kadm5.keytab") + " kadmin/admin kadmin/changepw",
 		"addprinc -pw admin-password admin/admin",
-		"addprinc -pw alice-password alice",
+		aliceCommand,
 		"addprinc -pw bob-password bob",
 		"addprinc -pw host-password host/server.test",
 		"addprinc -pw http-password HTTP/server.test",
