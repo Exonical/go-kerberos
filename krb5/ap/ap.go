@@ -332,7 +332,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
 	}
 	if persistentCache != nil {
-		tag := rcache.TagFromCiphertext(request.Authenticator.Cipher)
+		tag := rcache.TagFromCiphertext(request.Authenticator.Cipher, sessionEType.ChecksumSize())
 		if err := persistentCache.Store(tag, authenticator.Ctime.Time, skew); err != nil {
 			if errors.Is(err, krberrors.ErrReplay) {
 				return nil, fmt.Errorf("verify AP-REQ: %w", krberrors.ErrReplay)

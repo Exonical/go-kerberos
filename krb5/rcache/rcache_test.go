@@ -36,6 +36,30 @@ func TestSipHashMITVectors(t *testing.T) {
 	}
 }
 
+func TestTagFromCiphertextUsesChecksumTrailer(t *testing.T) {
+	ciphertext := make([]byte, 40)
+	for i := range ciphertext {
+		ciphertext[i] = byte(i)
+	}
+	tests := []struct {
+		name       string
+		trailerLen int
+		want       []byte
+	}{
+		{name: "aes-sha1", trailerLen: 12, want: ciphertext[28:40]},
+		{name: "aes128-sha256", trailerLen: 16, want: ciphertext[24:36]},
+		{name: "aes256-sha384", trailerLen: 24, want: ciphertext[16:28]},
+		{name: "camellia", trailerLen: 16, want: ciphertext[24:36]},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TagFromCiphertext(ciphertext, test.trailerLen); !bytes.Equal(got, test.want) {
+				t.Fatalf("tag = %x, want %x", got, test.want)
+			}
+		})
+	}
+}
+
 func TestFile2SeedAndExactRecordLayout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replay.rcache2")
 	seed := make([]byte, hashSeedLen)

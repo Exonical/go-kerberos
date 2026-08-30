@@ -66,12 +66,19 @@ func Resolve(name string) (Cache, error) {
 	}
 }
 
-// TagFromCiphertext returns the replay tag used by MIT's file2 cache. The
-// checksum is the trailing portion of the encrypted authenticator; tags
-// shorter than twelve bytes are zero-padded by Store.
-func TagFromCiphertext(ciphertext []byte) []byte {
+// TagFromCiphertext returns the replay tag used by MIT's file2 cache. MIT
+// takes the trailing checksum trailer from the encrypted authenticator, then
+// file2 keeps the first 12 bytes of that value.
+func TagFromCiphertext(ciphertext []byte, trailerLen int) []byte {
+	if trailerLen < 0 {
+		trailerLen = 0
+	}
+	if trailerLen > len(ciphertext) {
+		trailerLen = len(ciphertext)
+	}
+	ciphertext = ciphertext[len(ciphertext)-trailerLen:]
 	if len(ciphertext) > tagLen {
-		ciphertext = ciphertext[len(ciphertext)-tagLen:]
+		ciphertext = ciphertext[:tagLen]
 	}
 	return append([]byte(nil), ciphertext...)
 }
@@ -126,16 +133,6 @@ func (c *File2) Store(tag []byte, now time.Time, skew time.Duration) error {
 		skewSeconds = uint32(skew / time.Second)
 	}
 	return store(file, seed, normalized, nowSeconds, skewSeconds)
-}
-
-// StoreCiphertext derives the MIT replay tag from the trailing checksum bytes
-// of an encrypted authenticator and stores it.
-func (c *File2) StoreCiphertext(ciphertext []byte, now time.Time, skew time.Duration) error {
-	tag := ciphertext
-	if len(tag) > tagLen {
-		tag = tag[len(tag)-tagLen:]
-	}
-	return c.Store(tag, now, skew)
 }
 
 func store(file *os.File, seed [hashSeedLen]byte, tag [tagLen]byte, now, skew uint32) error {
