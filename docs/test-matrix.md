@@ -403,3 +403,20 @@ failure returns `KDC_ERR_POLICY` with
 does not assert PKINIT indicators. No live MIT indicator gate is enabled yet:
 the fixture does not configure SPAKE indicators and `require_auth` together,
 so a live test would not exercise this parity slice.
+
+## IAKERB GSS mechanism
+
+IAKERB proxy framing uses the MIT mechanism OID (`1.3.6.1.5.2.5`), proxy
+token ID `0x0501`, strict DER IAKERB-HEADER encoding, opaque cookie echo, and
+stepwise realm-discovery, AS, and TGS exchanges. The final AP-REQ is a normal
+Kerberos GSS token and carries the MIT IAKERB-FINISHED extension, whose
+conversation checksum uses key usage 41 and the authenticator subkey.
+
+Unit coverage includes header and finished DER goldens, malformed framing,
+conversation checksum tamper detection, cookie-preserving proxy tokens, and
+existing-ticket AP handoff. The proxy uses the configured Go KDC transport.
+The requested live MIT initiator gate was not added because this environment
+does not have the `python3-gssapi` module (`No module named 'gssapi'`), and no
+other installed binding exposes a password-backed IAKERB mechanism harness.
+Reverse MIT acceptor/proxy interoperability is likewise not enabled. SPNEGO
+remains unchanged: callers select IAKERB directly by mechanism OID.

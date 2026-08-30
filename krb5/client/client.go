@@ -1150,19 +1150,33 @@ func (c *Client) exchangePayload(ctx context.Context, realm string, request any,
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
+	return c.exchangeRawPayload(ctx, realm, payload, label)
+}
+
+// ExchangeRaw forwards an already encoded Kerberos request to the configured
+// KDC. It is used by protocol adapters such as IAKERB which carry KDC
+// messages inside another exchange.
+func (c *Client) ExchangeRaw(ctx context.Context, realm string, payload []byte) ([]byte, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("KDC exchange: empty request")
+	}
+	return c.exchangeRawPayload(ctx, realm, payload, "KDC exchange request")
+}
+
+func (c *Client) exchangeRawPayload(ctx context.Context, realm string, payload []byte, label string) ([]byte, error) {
 	if c.Exchange != nil {
 		response, err := c.Exchange(ctx, realm, payload)
 		if err != nil {
-			return nil, fmt.Errorf("TGS exchange transport: %w", err)
+			return nil, fmt.Errorf("%s transport: %w", label, err)
 		}
 		return response, nil
 	}
 	if c.Config == nil {
-		return nil, fmt.Errorf("TGS exchange: no configuration or exchange function")
+		return nil, fmt.Errorf("%s: no configuration or exchange function", label)
 	}
 	endpoint, ok := configuredKDC(c.Config, realm)
 	if !ok {
-		return nil, fmt.Errorf("TGS exchange: no KDC configured for realm %q", realm)
+		return nil, fmt.Errorf("%s: no KDC configured for realm %q", label, realm)
 	}
 	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
 		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
@@ -1183,6 +1197,44 @@ func (c *Client) exchangePayload(ctx context.Context, realm string, request any,
 		exchange.UDPPreferenceLimit = c.Config.UDPPreferenceLimit
 	}
 	return exchange.Request(ctx, conn, address, payload)
+}
+
+// BuildASRequest constructs an AS-REQ without sending it.
+func (c *Client) BuildASRequest(clientPrincipal principal.Principal, now time.Time) (protocol.ASReq, error) {
+	return c.newASReq(clientPrincipal, now)
+}
+
+// DecodeASResponse validates and decrypts an AS-REP.
+func (c *Client) DecodeASResponse(data []byte, clientPrincipal principal.Principal,
+	nonce uint32, etypeID int32, key []byte, now time.Time) (*Credentials, error) {
+	return c.decodeASRep(data, clientPrincipal, nonce, etypeID, key, now)
+}
+
+// BuildTGSRequest constructs a TGS-REQ without sending it.
+func (c *Client) BuildTGSRequest(tgt *Credentials, service principal.Principal,
+	now time.Time) (protocol.TGSReq, uint32, error) {
+	realm := service.Realm
+	if realm == "" && tgt != nil {
+		realm = tgt.Server.Realm
+	}
+	return c.newTGSReq(tgt, service, realm, now, false)
+}
+
+// DecodeTGSResponse validates and decrypts a TGS-REP.
+func (c *Client) DecodeTGSResponse(data []byte, tgt *Credentials,
+	service principal.Principal, nonce uint32, now time.Time) (*Credentials, error) {
+	if tgt == nil {
+		return nil, fmt.Errorf("TGS response: nil TGT")
+	}
+	result, referral, err := c.decodeTGSRepForExchange(data, tgt.Client, service, service,
+		true, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+	if err != nil {
+		return nil, err
+	}
+	if referral {
+		return nil, fmt.Errorf("TGS response: unexpected referral")
+	}
+	return result, nil
 }
 
 func (c *Client) ticketLifetime() time.Duration {

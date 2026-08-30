@@ -278,6 +278,10 @@ func (a *Acceptor) AcceptWithPrincipal(token []byte, now time.Time) (*Context, p
 }
 
 func (a *Acceptor) accept(token []byte, now time.Time) (*Context, principal.Principal, []byte, error) {
+	return a.acceptWithConversation(token, now, nil)
+}
+
+func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversation []byte) (*Context, principal.Principal, []byte, error) {
 	if a == nil || a.keytab == nil {
 		return nil, principal.Principal{}, nil, fmt.Errorf("GSS acceptor: incomplete keytab")
 	}
@@ -288,6 +292,22 @@ func (a *Acceptor) accept(token []byte, now time.Time) (*Context, principal.Prin
 	verified, err := ap.VerifyAPReq(a.keytab, inner, now, 5*time.Minute)
 	if err != nil {
 		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
+	}
+	if conversation != nil {
+		finished, ok, err := checksumFinished(verified.Checksum)
+		if err != nil {
+			return nil, principal.Principal{}, nil, err
+		}
+		if !ok {
+			return nil, principal.Principal{}, nil, fmt.Errorf("IAKERB authenticator: missing finished checksum")
+		}
+		key := verified.SessionKey
+		if verified.SubKey != nil {
+			key = *verified.SubKey
+		}
+		if err := VerifyIAKERBFinished(key, conversation, finished); err != nil {
+			return nil, principal.Principal{}, nil, err
+		}
 	}
 	flags, delegation, err := checksumData(verified.Checksum)
 	if err != nil {
@@ -650,8 +670,13 @@ func checksumFlags(checksum *protocol.Checksum) (uint32, error) {
 }
 
 func checksumData(checksum *protocol.Checksum) (uint32, []byte, error) {
+	flags, delegation, _, err := checksumDataWithExtensions(checksum)
+	return flags, delegation, err
+}
+
+func checksumDataWithExtensions(checksum *protocol.Checksum) (uint32, []byte, []byte, error) {
 	if checksum == nil || checksum.ChecksumType != 0x8003 || len(checksum.Checksum) < 20 {
-		return 0, nil, fmt.Errorf("GSS authenticator: missing RFC 4121 checksum")
+		return 0, nil, nil, fmt.Errorf("GSS authenticator: missing RFC 4121 checksum")
 	}
 	offset := 20
 	if len(checksum.Checksum) >= 24 && binary.LittleEndian.Uint32(checksum.Checksum[:4]) == 16 {
@@ -659,20 +684,46 @@ func checksumData(checksum *protocol.Checksum) (uint32, []byte, error) {
 	}
 	flags := binary.LittleEndian.Uint32(checksum.Checksum[offset-4 : offset])
 	if flags&GSSDelegFlag == 0 {
-		if len(checksum.Checksum) != offset {
-			return 0, nil, fmt.Errorf("GSS authenticator: unexpected delegation option")
+		if len(checksum.Checksum) == offset {
+			return flags, nil, nil, nil
 		}
-		return flags, nil, nil
+		finished, err := parseChecksumExtension(checksum.Checksum[offset:])
+		return flags, nil, finished, err
 	}
 	if len(checksum.Checksum) < offset+4 {
-		return 0, nil, fmt.Errorf("GSS authenticator: truncated delegation option")
+		return 0, nil, nil, fmt.Errorf("GSS authenticator: truncated delegation option")
 	}
 	optionID := binary.LittleEndian.Uint16(checksum.Checksum[offset:])
 	optionLength := int(binary.LittleEndian.Uint16(checksum.Checksum[offset+2:]))
-	if optionID != 1 || optionLength == 0 || len(checksum.Checksum) != offset+4+optionLength {
-		return 0, nil, fmt.Errorf("GSS authenticator: invalid delegation option")
+	if optionID != 1 || optionLength == 0 || len(checksum.Checksum) < offset+4+optionLength {
+		return 0, nil, nil, fmt.Errorf("GSS authenticator: invalid delegation option")
 	}
-	return flags, append([]byte(nil), checksum.Checksum[offset+4:offset+4+optionLength]...), nil
+	delegation := append([]byte(nil), checksum.Checksum[offset+4:offset+4+optionLength]...)
+	if len(checksum.Checksum) == offset+4+optionLength {
+		return flags, delegation, nil, nil
+	}
+	finished, err := parseChecksumExtension(checksum.Checksum[offset+4+optionLength:])
+	return flags, delegation, finished, err
+}
+
+func parseChecksumExtension(data []byte) ([]byte, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("GSS authenticator: truncated checksum extension")
+	}
+	id := binary.BigEndian.Uint32(data)
+	length := int(binary.BigEndian.Uint32(data[4:]))
+	if id != iakerbFinishedExtension || length == 0 || len(data) != length+8 {
+		return nil, fmt.Errorf("GSS authenticator: invalid checksum extension")
+	}
+	return append([]byte(nil), data[8:]...), nil
+}
+
+func checksumFinished(checksum *protocol.Checksum) ([]byte, bool, error) {
+	_, _, finished, err := checksumDataWithExtensions(checksum)
+	if err != nil {
+		return nil, false, err
+	}
+	return finished, finished != nil, nil
 }
 
 func sequenceValue(value *uint32) uint64 {
