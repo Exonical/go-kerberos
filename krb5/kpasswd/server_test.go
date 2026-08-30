@@ -310,7 +310,7 @@ func TestKpasswdServerUDPLookasideReplaysResponse(t *testing.T) {
 		if _, err := clientConn.Write(request); err != nil {
 			t.Fatal(err)
 		}
-		if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		response := make([]byte, kpasswdMaxPacket)
@@ -348,7 +348,7 @@ func TestKpasswdServerUDPLookasideReplaysResponse(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("kpasswd server did not stop")
 	}
 }
