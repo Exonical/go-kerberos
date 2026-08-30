@@ -85,8 +85,11 @@ type InitiatorOptions struct {
 // Context is an established Kerberos GSS security context.
 type Context struct {
 	key                  protocol.EncryptionKey
+	prfPartial           protocol.EncryptionKey
+	prfFull              protocol.EncryptionKey
 	initiator            bool
 	flags                uint32
+	dceStyle             bool
 	DelegatedCredentials []*client.Credentials
 	acceptorSubkey       bool
 	sendSeq              uint64
@@ -290,10 +293,12 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 	}
 	i.state = state
 	i.ctx = &Context{
-		key:       contextKey(state.SessionKey, state.SubKey),
-		initiator: true,
-		flags:     i.flags &^ GSSChannelBoundFlag,
-		sendSeq:   sequenceValue(state.SeqNumber),
+		key:        contextKey(state.SessionKey, state.SubKey),
+		prfPartial: contextKey(state.SessionKey, state.SubKey),
+		prfFull:    contextKey(state.SessionKey, state.SubKey),
+		initiator:  true,
+		flags:      i.flags &^ GSSChannelBoundFlag,
+		sendSeq:    sequenceValue(state.SeqNumber),
 	}
 	if legacy {
 		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
@@ -316,6 +321,7 @@ func (i *Initiator) VerifyToken(token []byte) error {
 	}
 	if details.SubKey != nil {
 		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
+		i.ctx.prfFull = contextKey(i.state.SessionKey, details.SubKey)
 		i.ctx.acceptorSubkey = true
 	}
 	if details.SeqNumber != nil {
@@ -412,9 +418,11 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 		}
 	}
 	ctx := &Context{
-		key:     contextKey(verified.SessionKey, verified.SubKey),
-		flags:   flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
-		recvSeq: sequenceValue(verified.SeqNumber),
+		key:        contextKey(verified.SessionKey, verified.SubKey),
+		prfPartial: contextKey(verified.SessionKey, verified.SubKey),
+		prfFull:    contextKey(verified.SessionKey, verified.SubKey),
+		flags:      flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
+		recvSeq:    sequenceValue(verified.SeqNumber),
 	}
 	if len(delegation) != 0 {
 		var delegated []*client.Credentials
@@ -470,6 +478,30 @@ func (i *Initiator) VerifyMIC(data, token []byte) error {
 		return fmt.Errorf("GSS initiator: context is not established")
 	}
 	return i.ctx.verifyMIC(data, token)
+}
+
+// WrapIOV protects fragmented application data with an RFC 4121 IOV token.
+func (i *Initiator) WrapIOV(iov []IOVBuffer, sealed bool) error {
+	if i == nil || i.ctx == nil {
+		return fmt.Errorf("GSS initiator: context is not established")
+	}
+	return i.ctx.WrapIOV(iov, sealed)
+}
+
+// UnwrapIOV verifies and decodes a fragmented RFC 4121 IOV token.
+func (i *Initiator) UnwrapIOV(iov []IOVBuffer) error {
+	if i == nil || i.ctx == nil {
+		return fmt.Errorf("GSS initiator: context is not established")
+	}
+	return i.ctx.UnwrapIOV(iov)
+}
+
+// WrapIOVLength reports the buffers required for an IOV wrap token.
+func (i *Initiator) WrapIOVLength(iov []IOVBuffer, sealed bool) (IOVLengths, error) {
+	if i == nil || i.ctx == nil {
+		return IOVLengths{}, fmt.Errorf("GSS initiator: context is not established")
+	}
+	return i.ctx.WrapIOVLength(iov, sealed)
 }
 
 // Context returns the established security context for protocol adapters that
@@ -529,6 +561,14 @@ func (c *Context) SetSendSequence(sequence uint64) {
 func (c *Context) SetReceiveSequence(sequence uint64) {
 	if c != nil {
 		c.recvSeq = sequence
+	}
+}
+
+// SetDCEStyle enables the DCE-style IOV framing mode for callers interoperating
+// with Windows GSS implementations.
+func (c *Context) SetDCEStyle(enabled bool) {
+	if c != nil {
+		c.dceStyle = enabled
 	}
 }
 
@@ -642,6 +682,16 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 		}
 		body := plain[:len(plain)-16]
+		// RFC 4121 DCE-style IOV tokens carry the block-size EC marker
+		// outside the encrypted payload; unlike CTS padding, it is not
+		// present in body and must not be removed here.
+		if ec != 0 {
+			if ec != 16 {
+				return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+			}
+			c.recvSeq++
+			return body, nil
+		}
 		if ec > len(body) {
 			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 		}

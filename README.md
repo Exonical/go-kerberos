@@ -86,7 +86,8 @@ deployments; upstream MIT krb5 does not apply this gate.
   token recorded by an MIT `python3-gssapi` acceptor.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
-  sequence enforcement, and credential delegation with RFC 4120 KRB-CRED
+  sequence enforcement, typed IOV wrapping/unwrapping (HEADER, DATA, PADDING,
+  TRAILER, SIGN_ONLY, and STREAM), RFC 4402 pseudo-random output, and credential delegation with RFC 4120 KRB-CRED
   forwarded-TGT credentials. Both encrypted (key usage 14) and legacy
   unencrypted KRB-CRED forms are accepted.
 - **IAKERB GSS mechanism** (MIT-compatible): proxy-token realm discovery,
@@ -316,6 +317,20 @@ Kerberos mechanism. The local test suite covers encoding, token placement,
 matching, mismatch, and MIT-compatible absent/zero-binding cases, while the
 MIT integration suite exercises both initiator and acceptor directions using
 Python GSSAPI channel bindings.
+
+GSS IOV operations are exposed by `Context.WrapIOV`, `Context.UnwrapIOV`, and
+`Context.WrapIOVLength`.  Confidentiality and integrity-only CFX tokens use
+the same RFC 4121 framing as the flat `Wrap` API; DATA buffers are distributed
+across caller-supplied fragments, SIGN_ONLY buffers are authenticated without
+being encrypted for integrity-only tokens, and STREAM unwrap accepts a
+complete token in one buffer.  RFC 4402 PRF output is available through
+`Context.PseudoRandom` with `GSS_C_PRF_KEY_FULL` and
+`GSS_C_PRF_KEY_PARTIAL`.  AES-SHA1, AES-SHA2, and enabled Camellia enctypes
+use the existing RFC 3961/RFC 8009 crypto implementations.  `/usr/bin/python3`
+with `python3-gssapi` exposes the raw IOV entry points
+(`gssapi.raw.wrap_iov` and `gssapi.raw.unwrap_iov`); the Go integration harness
+uses them when available.  The binding does not expose a raw PRF entry point,
+so deterministic MIT PRF vectors provide the PRF gate.
 
 RFC 7751 CAMMAC authorization data is available through the `krb5/cammac`
 package. It encodes KDC and service verifiers with checksum key usage 64,
