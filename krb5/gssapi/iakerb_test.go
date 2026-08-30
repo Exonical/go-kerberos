@@ -249,4 +249,27 @@ func TestIAKERBExistingCredentialsHandoff(t *testing.T) {
 	if _, err := acceptCtx.Unwrap(wrapped); err != nil {
 		t.Fatal(err)
 	}
+	exportedAcceptor, err := ExportSecContext(acceptCtx)
+	if err != nil {
+		t.Fatalf("export IAKERB acceptor context: %v", err)
+	}
+	importedAcceptor, err := ImportSecContext(exportedAcceptor)
+	if err != nil {
+		t.Fatalf("import IAKERB acceptor context: %v", err)
+	}
+	exportedInitiator, err := ExportSecContext(ctx)
+	if err != nil {
+		t.Fatalf("export IAKERB initiator context: %v", err)
+	}
+	importedInitiator, err := ImportSecContext(exportedInitiator)
+	if err != nil {
+		t.Fatalf("import IAKERB initiator context: %v", err)
+	}
+	wrapped, err = importedInitiator.Wrap([]byte("transferred"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := importedAcceptor.Unwrap(wrapped); err != nil || string(plain) != "transferred" {
+		t.Fatalf("transferred IAKERB unwrap = %q, %v", plain, err)
+	}
 }

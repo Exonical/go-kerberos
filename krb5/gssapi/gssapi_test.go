@@ -3,9 +3,12 @@ package gssapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -61,6 +65,223 @@ func TestInitialTokenFraming(t *testing.T) {
 	}
 	if len(mutual) == 0 || !bytes.Contains(mutual, []byte{0x02, 0x00}) {
 		t.Fatalf("missing AP-REP token id: %x", mutual)
+	}
+}
+
+func TestContextExportImportPreservesMessageState(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700000000, 0).UTC()
+	initiator, err := NewInitiator(creds, GSSMutualFlag|GSSIntegrityFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptorContext, mutual, err := NewAcceptor(kt).Accept(token, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.Wrap([]byte("first"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acceptorContext.Unwrap(first); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := ExportSecContext(acceptorContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := ImportSecContext(exported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := initiator.Wrap([]byte("second"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := imported.Unwrap(second)
+	if err != nil {
+		t.Fatalf("unwrap after context transfer: %v", err)
+	}
+	if string(plain) != "second" {
+		t.Fatalf("transferred context plaintext = %q", plain)
+	}
+	third, err := initiator.Wrap([]byte("third"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := imported.Unwrap(third); err != nil {
+		t.Fatalf("second transferred unwrap: %v", err)
+	}
+	if _, err := acceptorContext.Unwrap(third); err == nil {
+		t.Fatal("original context accepted a token after transferred sequence state")
+	}
+}
+
+func TestContextExportRejectsPartialContext(t *testing.T) {
+	if _, err := ExportSecContext(&Context{}); err == nil {
+		t.Fatal("partial context export unexpectedly succeeded")
+	}
+	if _, err := ImportSecContext([]byte(`{"Magic":"GO-KERBEROS-GSS-CONTEXT","Version":1}`)); err == nil {
+		t.Fatal("partial context import unexpectedly succeeded")
+	}
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	wire := contextTransfer{
+		Magic: "GO-KERBEROS-GSS-CONTEXT", Version: 1,
+		KeyType: crypto.EnctypeAES256SHA1, Key: key,
+		PartialKeyType: crypto.EnctypeAES256SHA1, PartialKey: key,
+		FullKeyType: crypto.EnctypeAES256SHA1, FullKey: key,
+	}
+	wire.Key = base64.StdEncoding.EncodeToString([]byte{1})
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportSecContext(encoded); err == nil {
+		t.Fatal("short context key unexpectedly imported")
+	}
+	wire.Key = key
+	wire.KeyType = 999
+	encoded, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportSecContext(encoded); err == nil {
+		t.Fatal("unknown context enctype unexpectedly imported")
+	}
+	wire.KeyType = crypto.EnctypeAES256SHA1
+	wire.AcceptorSubkey = true
+	wire.AcceptorSubkeyType = crypto.EnctypeAES256SHA1
+	wire.AcceptorSubkeyKey = base64.StdEncoding.EncodeToString([]byte{1})
+	encoded, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportSecContext(encoded); err == nil {
+		t.Fatal("short acceptor subkey unexpectedly imported")
+	}
+}
+
+func TestLucidContextExportsCFXState(t *testing.T) {
+	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	original := creds.Key
+	negotiated := creds.Key
+	negotiated.KeyValue = append([]byte(nil), negotiated.KeyValue...)
+	negotiated.KeyValue[0] ^= 0xff
+	ctx := &Context{
+		key: original, prfPartial: original, prfFull: negotiated,
+		initiator: true, acceptorSubkey: true, acceptorSubkeyKey: &negotiated,
+		sendSeq: 7, recvSeq: 9,
+	}
+	lucid, err := ctx.ExportLucidContext(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lucid.Version != 1 || !lucid.Initiate || lucid.Protocol != 1 ||
+		lucid.SendSeq != 7 || lucid.RecvSeq != 9 ||
+		!bytes.Equal(lucid.Key.Value, original.KeyValue) ||
+		lucid.AcceptorSubkey == nil ||
+		bytes.Equal(lucid.Key.Value, lucid.AcceptorSubkey.Value) ||
+		!bytes.Equal(lucid.AcceptorSubkey.Value, negotiated.KeyValue) {
+		t.Fatalf("lucid context = %#v", lucid)
+	}
+}
+
+func TestCredentialAcquisitionKeytabMatching(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	acceptorCred, err := AcquireAcceptorCredential(kt, &creds.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptor, err := acceptorCred.Acceptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := NewInitiator(creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := token.InitialToken(time.Unix(1700000000, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptor.Accept(initial, time.Unix(1700000000, 0).UTC()); err != nil {
+		t.Fatalf("keytab credential accept: %v", err)
+	}
+	wrong := creds.Server
+	wrong.Components = append([]string(nil), wrong.Components...)
+	wrong.Components[0] = "other"
+	if _, err := AcquireAcceptorCredential(kt, &wrong); err == nil {
+		t.Fatal("missing acceptor principal unexpectedly succeeded")
+	}
+	any, err := AcquireAcceptorCredential(kt, nil)
+	if err != nil {
+		t.Fatalf("unspecified acceptor credential: %v", err)
+	}
+	anyAcceptor, err := any.Acceptor()
+	if err != nil {
+		t.Fatalf("unspecified acceptor: %v", err)
+	}
+	otherInitiator, err := NewInitiator(creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial2, err := otherInitiator.InitialToken(time.Unix(1700000001, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := anyAcceptor.Accept(initial2, time.Unix(1700000001, 0).UTC()); err != nil {
+		t.Fatalf("unspecified acceptor rejected keytab principal: %v", err)
+	}
+	advisory := creds.Server
+	advisory.NameType = principal.NTPrincipal
+	advisoryAcceptor := NewAcceptorWithPrincipal(kt, &advisory)
+	otherInitiator, err = NewInitiator(creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial3, err := otherInitiator.InitialToken(time.Unix(1700000002, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := advisoryAcceptor.Accept(initial3, time.Unix(1700000002, 0).UTC()); err != nil {
+		t.Fatalf("advisory name type rejected matching principal: %v", err)
+	}
+}
+
+func TestRestrictedAcceptorChecksNameBeforeReplayCache(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700000100, 0).UTC()
+	initiator, err := NewInitiator(creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := rcache.Resolve("file2:" + filepath.Join(t.TempDir(), "replay"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := creds.Server
+	wrong.Components = append([]string(nil), wrong.Components...)
+	wrong.Components[1] = "other.test"
+	wrongAcceptor := NewAcceptorWithPrincipal(kt, &wrong)
+	wrongAcceptor.replayCache = cache
+	if _, _, err := wrongAcceptor.Accept(token, now); err == nil {
+		t.Fatal("wrong restricted acceptor accepted token")
+	}
+	rightAcceptor := NewAcceptorWithPrincipal(kt, &creds.Server)
+	rightAcceptor.replayCache = cache
+	if _, _, err := rightAcceptor.Accept(token, now); err != nil {
+		t.Fatalf("right restricted acceptor rejected token after wrong peer: %v", err)
 	}
 }
 

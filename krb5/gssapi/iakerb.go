@@ -537,8 +537,12 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 				return nil, err
 			}
 			i.context = &Context{key: contextKey(i.apState.SessionKey, i.apState.SubKey),
-				initiator: true, flags: i.Flags | channelBoundFlag(i.channelBindings),
-				sendSeq: sequenceValue(i.apState.SeqNumber)}
+				prfPartial: contextKey(i.apState.SessionKey, i.apState.SubKey),
+				prfFull:    contextKey(i.apState.SessionKey, i.apState.SubKey),
+				initiator:  true, flags: i.Flags | channelBoundFlag(i.channelBindings),
+				sendSeq: sequenceValue(i.apState.SeqNumber),
+				source:  i.Service.Client, target: i.Service.Server,
+				endtime: i.Service.EndTime.Time}
 			if i.Flags&GSSMutualFlag == 0 {
 				i.state = iakerbStateDone
 			}
@@ -583,7 +587,9 @@ func (i *IAKERBInitiator) verifyAPReply(token []byte) error {
 	}
 	if details.SubKey != nil {
 		i.context.key = contextKey(i.apState.SessionKey, details.SubKey)
+		i.context.prfFull = contextKey(i.apState.SessionKey, details.SubKey)
 		i.context.acceptorSubkey = true
+		i.context.acceptorSubkeyKey = cloneEncryptionKey(details.SubKey)
 	}
 	if details.SeqNumber != nil {
 		i.context.recvSeq = sequenceValue(details.SeqNumber)

@@ -53,6 +53,159 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestGSSPasswordCredentialAgainstServer(t *testing.T) {
+	now := time.Unix(2000000002, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	key := record.Keys[crypto.EnctypeAES256SHA1]
+	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: service, KVNO: key.KVNO, Enctype: key.Enctype,
+		Key: append([]byte(nil), key.Key...),
+	}}}
+
+	credential, err := gssapi.AcquireInitiatorCredentialWithPassword(
+		context.Background(), kclient, user, "alice-password")
+	if err != nil {
+		t.Fatalf("acquire password credential: %v", err)
+	}
+	initiator, err := credential.NewInitiatorForService(
+		context.Background(), service, gssapi.GSSMutualFlag|gssapi.GSSIntegrityFlag)
+	if err != nil {
+		t.Fatalf("resolve service credential: %v", err)
+	}
+	initial, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("initial GSS token: %v", err)
+	}
+	acceptor, err := gssapi.AcquireAcceptorCredential(kt, &service)
+	if err != nil {
+		t.Fatalf("acquire keytab credential: %v", err)
+	}
+	acceptorMechanism, err := acceptor.Acceptor()
+	if err != nil {
+		t.Fatalf("create acceptor: %v", err)
+	}
+	serverContext, mutual, err := acceptorMechanism.Accept(initial, now)
+	if err != nil {
+		t.Fatalf("accept password-acquired token: %v", err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatalf("verify mutual token: %v", err)
+	}
+	wrapped, err := initiator.Wrap([]byte("password credential"), true)
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+	plain, err := serverContext.Unwrap(wrapped)
+	if err != nil || string(plain) != "password credential" {
+		t.Fatalf("unwrap = %q, %v", plain, err)
+	}
+	delegating, err := credential.NewInitiatorForService(
+		context.Background(), service, gssapi.GSSDelegFlag)
+	if err != nil {
+		t.Fatalf("resolve delegated service credential: %v", err)
+	}
+	delegationToken, err := delegating.InitialToken(now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("delegation initial token: %v", err)
+	}
+	delegationAcceptor, err := gssapi.AcquireAcceptorCredential(kt, &service)
+	if err != nil {
+		t.Fatalf("acquire delegation acceptor: %v", err)
+	}
+	delegationMechanism, err := delegationAcceptor.Acceptor()
+	if err != nil {
+		t.Fatalf("create delegation acceptor: %v", err)
+	}
+	delegatedContext, _, err := delegationMechanism.Accept(
+		delegationToken, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("accept delegated token: %v", err)
+	}
+	if len(delegatedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("delegated credentials = %d, want 1",
+			len(delegatedContext.DelegatedCredentials))
+	}
+}
+
+func TestGSSImpersonatedCredentialAgainstServer(t *testing.T) {
+	now := time.Unix(2000000003, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.CheckAllowedToDelegate = func(_ *principal.Principal, _ principal.Principal, _ *principal.Principal) error {
+		return nil
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	backend := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"HTTP", "backend.test"}}
+	if err := server.DB.(*kdb.Database).AddPrincipal("HTTP/backend.test", "backend-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	impersonator, err := gssapi.AcquireInitiatorCredentialWithPassword(
+		context.Background(), kclient, service, "host-password")
+	if err != nil {
+		t.Fatalf("acquire impersonator credential: %v", err)
+	}
+	impersonated, err := gssapi.AcquireImpersonatedCredential(
+		context.Background(), impersonator, user)
+	if err != nil {
+		t.Fatalf("acquire impersonated credential: %v", err)
+	}
+	proxyCredential, err := impersonated.S4U2Proxy(context.Background(), backend)
+	if err != nil {
+		t.Fatalf("acquire S4U2Proxy credential: %v", err)
+	}
+	initiator, err := proxyCredential.NewInitiatorForCredential(
+		gssapi.GSSMutualFlag | gssapi.GSSIntegrityFlag)
+	if err != nil {
+		t.Fatalf("create impersonated initiator: %v", err)
+	}
+	record, ok, err := server.DB.Lookup(backend)
+	if err != nil || !ok {
+		t.Fatalf("backend lookup: %v, %v", err, ok)
+	}
+	key := record.Keys[crypto.EnctypeAES256SHA1]
+	acceptor, err := gssapi.AcquireAcceptorCredential(&keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: backend, KVNO: key.KVNO, Enctype: key.Enctype,
+		Key: append([]byte(nil), key.Key...),
+	}}}, &backend)
+	if err != nil {
+		t.Fatalf("acquire backend credential: %v", err)
+	}
+	acceptorMechanism, err := acceptor.Acceptor()
+	if err != nil {
+		t.Fatalf("create backend acceptor: %v", err)
+	}
+	initial, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatalf("impersonated initial token: %v", err)
+	}
+	serverContext, mutual, err := acceptorMechanism.Accept(initial, now)
+	if err != nil {
+		t.Fatalf("accept impersonated token: %v", err)
+	}
+	if err := initiator.VerifyToken(mutual); err != nil {
+		t.Fatalf("verify impersonated mutual token: %v", err)
+	}
+	wrapped, err := initiator.Wrap([]byte("impersonated"), true)
+	if err != nil {
+		t.Fatalf("wrap impersonated token: %v", err)
+	}
+	plain, err := serverContext.Unwrap(wrapped)
+	if err != nil || string(plain) != "impersonated" {
+		t.Fatalf("unwrap impersonated token = %q, %v", plain, err)
+	}
+}
+
 func TestServerVerifyInitCreds(t *testing.T) {
 	now := time.Unix(2000000001, 0).UTC()
 	server, kclient := testServer(t, now)
