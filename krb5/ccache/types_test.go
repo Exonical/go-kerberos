@@ -163,8 +163,18 @@ func TestCacheDestroyFileAndMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	second, err := Resolve("MEMORY:destroy-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := memory.Write(testCache()); err != nil {
+		t.Fatalf("write memory cache: %v", err)
+	}
 	if err := memory.Destroy(); err != nil {
 		t.Fatalf("destroy memory cache: %v", err)
+	}
+	if _, err := second.Read(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale memory handle read = %v", err)
 	}
 	again, err := Resolve("MEMORY:destroy-test")
 	if err != nil {
@@ -172,6 +182,16 @@ func TestCacheDestroyFileAndMemory(t *testing.T) {
 	}
 	if _, err := again.Read(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("destroyed memory cache read = %v", err)
+	}
+	if err := second.Write(testCache()); err != nil {
+		t.Fatalf("recreate memory cache through old handle: %v", err)
+	}
+	fresh, err := Resolve("MEMORY:destroy-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.Read(); err != nil {
+		t.Fatalf("fresh memory handle read after recreate = %v", err)
 	}
 }
 

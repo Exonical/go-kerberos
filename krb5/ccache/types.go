@@ -29,18 +29,20 @@ const (
 // Handle is a resolved credential cache. DIR handles refer to either a
 // collection (DIR:/path) or one of its subsidiary FILE caches (DIR::/path).
 type Handle struct {
-	typ     Type
-	name    string
-	path    string
-	dir     string
-	memory  *memoryCache
-	kcm     *kcmHandle
-	keyring *keyringHandle
+	typ            Type
+	name           string
+	path           string
+	dir            string
+	memory         *memoryCache
+	memoryHandleMu sync.RWMutex
+	kcm            *kcmHandle
+	keyring        *keyringHandle
 }
 
 type memoryCache struct {
-	mu    sync.RWMutex
-	cache *Cache
+	mu        sync.RWMutex
+	cache     *Cache
+	destroyed bool
 }
 
 var (
@@ -179,12 +181,13 @@ func (h *Handle) Read() (*Cache, error) {
 		return nil, errors.New("ccache: nil handle")
 	}
 	if h.typ == TypeMemory {
-		h.memory.mu.RLock()
-		defer h.memory.mu.RUnlock()
-		if h.memory.cache == nil {
+		memory := h.memoryRef()
+		memory.mu.RLock()
+		defer memory.mu.RUnlock()
+		if memory.destroyed || memory.cache == nil {
 			return nil, os.ErrNotExist
 		}
-		return cloneCache(h.memory.cache), nil
+		return cloneCache(memory.cache), nil
 	}
 	if h.typ == TypeKCM {
 		return h.kcm.read()
@@ -210,9 +213,23 @@ func (h *Handle) Write(cache *Cache) error {
 		return errors.New("ccache: nil cache")
 	}
 	if h.typ == TypeMemory {
-		h.memory.mu.Lock()
-		h.memory.cache = cloneCache(cache)
-		h.memory.mu.Unlock()
+		residual := strings.TrimPrefix(h.name, "MEMORY:")
+		memoryMu.Lock()
+		h.memoryHandleMu.Lock()
+		memory := h.memory
+		memory.mu.Lock()
+		if memory.destroyed {
+			memory.mu.Unlock()
+			memory = &memoryCache{}
+			h.memory = memory
+			memoryCaches[residual] = memory
+			memory.mu.Lock()
+		}
+		memory.cache = cloneCache(cache)
+		memory.destroyed = false
+		memory.mu.Unlock()
+		h.memoryHandleMu.Unlock()
+		memoryMu.Unlock()
 		return nil
 	}
 	if h.typ == TypeKCM {
@@ -230,6 +247,12 @@ func (h *Handle) Write(cache *Cache) error {
 		return err
 	}
 	return file.Close()
+}
+
+func (h *Handle) memoryRef() *memoryCache {
+	h.memoryHandleMu.RLock()
+	defer h.memoryHandleMu.RUnlock()
+	return h.memory
 }
 
 // Primary resolves the current primary subsidiary of a DIR collection.

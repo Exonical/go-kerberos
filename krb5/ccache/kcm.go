@@ -656,7 +656,14 @@ func (h *Handle) Destroy() error {
 	case TypeMemory:
 		residual := strings.TrimPrefix(h.name, "MEMORY:")
 		memoryMu.Lock()
-		if current := memoryCaches[residual]; current == h.memory {
+		h.memoryHandleMu.RLock()
+		memory := h.memory
+		h.memoryHandleMu.RUnlock()
+		if current := memoryCaches[residual]; current == memory {
+			memory.mu.Lock()
+			memory.cache = nil
+			memory.destroyed = true
+			memory.mu.Unlock()
 			delete(memoryCaches, residual)
 		}
 		memoryMu.Unlock()
