@@ -20,6 +20,7 @@ const (
 
 	FlagNextOTP int32 = 1
 
+	FormatDecimal      int32 = 0
 	FormatHexadecimal  int32 = 1
 	FormatAlphanumeric int32 = 2
 	FormatBinary       int32 = 3

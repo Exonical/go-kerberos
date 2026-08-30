@@ -380,6 +380,13 @@ authentication-indicator relations `encrypted_challenge_indicator`,
 settings plus these authentication-indicator settings without guessing at
 other KDC policy.
 
+KDC account expiration and disabled-principal state are enforced with MIT
+error mappings (`KDC_ERR_NAME_EXP`, `KDC_ERR_KEY_EXP`,
+`KDC_ERR_SERVICE_EXP`, and `KDC_ERR_CLIENT_REVOKED`). Per-principal
+`MaxLife` and `MaxRenew` limits are applied together with the client,
+service, and realm-wide ticket lifetime limits. RFC 6560 decimal OTP
+format is represented by `otp.FormatDecimal`.
+
 Password history is retained as derived key sets in the in-memory
 `PrincipalRecord` and is never stored as cleartext. When `kadmin/history` is
 present, MIT version-7 dumps encode that history in `KRB5_TL_KADM_DATA` with

@@ -1956,6 +1956,147 @@ func TestASAndTGSApplyDefaultTicketLife(t *testing.T) {
 	}
 }
 
+func TestASAccountStateErrors(t *testing.T) {
+	now := time.Unix(2000000300, 0).UTC()
+	tests := []struct {
+		name string
+		edit func(*kdb.PrincipalRecord, *kdb.PrincipalRecord)
+		want int32
+	}{
+		{
+			name: "client expiration",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				client.Expiration = now.Add(-time.Second)
+			},
+			want: kdcErrNameExpired,
+		},
+		{
+			name: "service expiration",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				service.Expiration = now.Add(-time.Second)
+			},
+			want: kdcErrServiceExpired,
+		},
+		{
+			name: "password expiration",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				client.PasswordExpiration = now.Add(-time.Second)
+			},
+			want: kdcErrKeyExpired,
+		},
+		{
+			name: "client disabled",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				client.Flags |= kdb.DisallowAllTickets
+			},
+			want: kdcErrClientRevoked,
+		},
+		{
+			name: "service disabled",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				service.Flags |= kdb.DisallowAllTickets
+			},
+			want: kdcErrSPrincipal,
+		},
+		{
+			name: "service user2user only",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				service.Flags |= kdb.DisallowServer
+			},
+			want: kdcErrMustUseUser2User,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := testServer(t, now)
+			db := server.DB.(*kdb.Database)
+			clientName := principal.Principal{Realm: server.Realm,
+				NameType: principal.NTPrincipal, Components: []string{"alice"}}
+			serviceName := principal.Principal{Realm: server.Realm,
+				NameType: principal.NTSrvInstance, Components: []string{"krbtgt", server.Realm}}
+			clientRecord, ok, err := db.Lookup(clientName)
+			if err != nil || !ok {
+				t.Fatalf("client lookup: %v, %v", err, ok)
+			}
+			serviceRecord, ok, err := db.Lookup(serviceName)
+			if err != nil || !ok {
+				t.Fatalf("service lookup: %v, %v", err, ok)
+			}
+			test.edit(&clientRecord, &serviceRecord)
+			if err := db.UpdatePrincipal(clientRecord); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpdatePrincipal(serviceRecord); err != nil {
+				t.Fatal(err)
+			}
+			request := asRequest(clientName, serviceName, 300)
+			addPreauth(t, &request, now)
+			var response protocol.KRBError
+			if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response.ErrorCode != test.want {
+				t.Fatalf("error code = %d, want %d", response.ErrorCode, test.want)
+			}
+		})
+	}
+}
+
+func TestTGSRejectsDisallowedServerWithoutU2U(t *testing.T) {
+	now := time.Unix(2000000325, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	serviceName := principal.Principal{
+		Realm: server.Realm, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	}
+	serviceRecord, ok, err := db.Lookup(serviceName)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	serviceRecord.Flags |= kdb.DisallowServer
+	if err := db.UpdatePrincipal(serviceRecord); err != nil {
+		t.Fatal(err)
+	}
+	user := principal.Principal{
+		Realm: server.Realm, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("AS exchange: %v", err)
+	}
+	response := server.HandleMessage(rawTGSRequestWithTill(t, tgt, serviceName, now,
+		kerberosTime(now.Add(time.Hour)), 0))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("decode TGS error: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrMustUseUser2User {
+		t.Fatalf("TGS error code = %d, want %d", kerberosError.ErrorCode, kdcErrMustUseUser2User)
+	}
+}
+
+func TestPerPrincipalTicketLifetimeCaps(t *testing.T) {
+	now := time.Unix(2000000350, 0).UTC()
+	server := &Server{MaxTicketLife: 12 * time.Hour, MaxRenewableLife: 24 * time.Hour}
+	client := kdb.PrincipalRecord{MaxLife: 3 * time.Hour, MaxRenew: 7 * time.Hour}
+	service := kdb.PrincipalRecord{MaxLife: 5 * time.Hour, MaxRenew: 4 * time.Hour}
+	end := server.ticketEndFromRecords(kerberosTime(now.Add(10*time.Hour)), now, &client, &service)
+	if want := now.Add(3 * time.Hour); !end.Time.Equal(want) {
+		t.Fatalf("ticket end = %v, want %v", end.Time, want)
+	}
+	requestedRenew := kerberosTime(now.Add(20 * time.Hour))
+	renew := server.renewTillRecords(types.KDCRenewable, &requestedRenew,
+		kerberosTime(now.Add(10*time.Hour)), now, end.Time, &client, &service)
+	if renew == nil {
+		t.Fatal("renew till is nil")
+	}
+	if want := now.Add(4 * time.Hour); !renew.Time.Equal(want) {
+		t.Fatalf("renew till = %v, want %v", renew.Time, want)
+	}
+}
+
 func TestServerPolicyClearsDisallowedFlags(t *testing.T) {
 	now := time.Unix(2000000180, 0).UTC()
 	server, _ := testServer(t, now)

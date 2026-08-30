@@ -50,6 +50,8 @@ const (
 	paSPAKE                = 151
 	kdcErrCPrincipal       = 6
 	kdcErrSPrincipal       = 7
+	kdcErrNameExpired      = 1
+	kdcErrServiceExpired   = 2
 	kdcErrPreauthFailed    = 24
 	kdcErrPreauthRequired  = 25
 	kdcErrMorePreauth      = 91
@@ -60,6 +62,7 @@ const (
 	kdcErrCannotPostdate   = 10
 	kdcErrClientRevoked    = 18
 	kdcErrKeyExpired       = 23
+	kdcErrMustUseUser2User = 27
 	kdcErrClientNotTrusted = 62
 	kdcErrPreauthExpired   = 90
 	krbAPErrBadIntegrity   = 31
@@ -468,6 +471,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
+	if code := s.validateASAccount(clientRecord, serviceRecord, request.ReqBody.KDCOptions); code != 0 {
+		return s.errorResponse(code, request.ReqBody.SName)
+	}
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
@@ -612,7 +618,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		clientKey = matchedKey
 		s.recordPreauthSuccess(clientName, &clientRecord)
-		if s.passwordExpired(clientRecord) {
+		if s.passwordExpiredForService(clientRecord, serviceRecord) {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
@@ -749,7 +755,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
 			s.recordPreauthSuccess(clientName, &clientRecord)
-			if s.passwordExpired(clientRecord) {
+			if s.passwordExpiredForService(clientRecord, serviceRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
@@ -796,7 +802,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 		}
-		if s.passwordExpired(clientRecord) {
+		if s.passwordExpiredForService(clientRecord, serviceRecord) {
 			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 		}
 		s.recordPreauthSuccess(clientName, &clientRecord)
@@ -831,7 +837,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
-			if s.passwordExpired(clientRecord) {
+			if s.passwordExpiredForService(clientRecord, serviceRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
@@ -905,8 +911,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
 	s.recordPreauthSuccess(clientName, &clientRecord)
-	if !clientRecord.PasswordExpiration.IsZero() &&
-		!s.now().Before(clientRecord.PasswordExpiration) {
+	if s.passwordExpiredForService(clientRecord, serviceRecord) {
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
 		}
@@ -1342,8 +1347,10 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		startTime = *request.ReqBody.From
 		flags |= types.TicketPostdated | types.TicketInvalid
 	}
-	endTime := s.ticketEndFrom(request.ReqBody.Till, startTime.Time)
-	renewTill := s.renewTill(request.ReqBody.KDCOptions, request.ReqBody.RTime, request.ReqBody.Till, startTime.Time, endTime.Time)
+	endTime := s.ticketEndFromRecords(request.ReqBody.Till, startTime.Time,
+		&clientRecord, &serviceRecord)
+	renewTill := s.renewTillRecords(request.ReqBody.KDCOptions, request.ReqBody.RTime,
+		request.ReqBody.Till, startTime.Time, endTime.Time, &clientRecord, &serviceRecord)
 	if s.Policy != nil && !s.Policy.AllowRenewable {
 		renewTill = nil
 	}
@@ -1735,6 +1742,16 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 	}
 	ticketClient := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
+	if record, exists, lookupErr := s.DB.Lookup(ticketClient); lookupErr != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	} else if exists {
+		if !record.Expiration.IsZero() && s.now().After(record.Expiration) {
+			return s.tgsErrorResponse(armor, kdcErrNameExpired, request.ReqBody.SName)
+		}
+		if record.Flags&kdb.DisallowAllTickets != 0 {
+			return s.tgsErrorResponse(armor, kdcErrClientRevoked, request.ReqBody.SName)
+		}
+	}
 	if response := s.authorizationError(ticketClient, requestedServiceName, false, armor); response != nil {
 		return response
 	}
@@ -1786,6 +1803,16 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	if !ok {
 		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
+	}
+	if !serviceRecord.Expiration.IsZero() && s.now().After(serviceRecord.Expiration) {
+		return s.tgsErrorResponse(armor, kdcErrServiceExpired, request.ReqBody.SName)
+	}
+	if serviceRecord.Flags&kdb.DisallowAllTickets != 0 {
+		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
+	}
+	if serviceRecord.Flags&kdb.DisallowServer != 0 &&
+		options&types.KDCEncTktInSkey == 0 {
+		return s.tgsErrorResponse(armor, kdcErrMustUseUser2User, request.ReqBody.SName)
 	}
 	requester := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
 	var s4uUser *protocol.S4UUserID
@@ -2184,6 +2211,14 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	now := s.now().UTC().Truncate(time.Second)
+	var clientRecord *kdb.PrincipalRecord
+	ticketClient := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
+	if issuedClient != nil {
+		ticketClient = *issuedClient
+	}
+	if record, ok, err := s.DB.Lookup(ticketClient); err == nil && ok {
+		clientRecord = &record
+	}
 	authTime := ticketPart.AuthTime
 	if !authTime.Present {
 		authTime = types.KerberosTime{Time: now, Present: true}
@@ -2221,8 +2256,10 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		} else {
 			startTime = nil
 		}
-		endTime = s.ticketEndFrom(request.ReqBody.Till, start)
-		renewTill = s.renewTill(request.ReqBody.KDCOptions, request.ReqBody.RTime, request.ReqBody.Till, start, endTime.Time)
+		endTime = s.ticketEndFromRecords(request.ReqBody.Till, start,
+			clientRecord, &serviceRecord)
+		renewTill = s.renewTillRecords(request.ReqBody.KDCOptions, request.ReqBody.RTime,
+			request.ReqBody.Till, start, endTime.Time, clientRecord, &serviceRecord)
 		if request.ReqBody.KDCOptions&(types.KDCRenewable|types.KDCRenewableOK) != 0 {
 			if ticketPart.RenewTill == nil {
 				renewTill = nil
@@ -2700,6 +2737,38 @@ func (s *Server) passwordExpired(record kdb.PrincipalRecord) bool {
 	return !record.PasswordExpiration.IsZero() && !s.now().Before(record.PasswordExpiration)
 }
 
+func (s *Server) passwordExpiredForService(client, service kdb.PrincipalRecord) bool {
+	return s.passwordExpired(client) && service.Flags&kdb.PWChangeService == 0
+}
+
+func (s *Server) validateASAccount(client, service kdb.PrincipalRecord, options types.KDCOptions) int32 {
+	now := s.now()
+	if !client.Expiration.IsZero() && now.After(client.Expiration) {
+		return kdcErrNameExpired
+	}
+	if !service.Expiration.IsZero() && now.After(service.Expiration) {
+		return kdcErrServiceExpired
+	}
+	if client.Flags&kdb.DisallowAllTickets != 0 {
+		return kdcErrClientRevoked
+	}
+	if service.Flags&kdb.DisallowAllTickets != 0 {
+		return kdcErrSPrincipal
+	}
+	if service.Flags&kdb.DisallowServer != 0 {
+		return kdcErrMustUseUser2User
+	}
+	if client.Flags&kdb.RequiresPWChange != 0 &&
+		service.Flags&kdb.PWChangeService == 0 {
+		return kdcErrKeyExpired
+	}
+	if options&(types.KDCAllowPostdate|types.KDCPostdated) != 0 &&
+		(client.Flags&kdb.DisallowPostdated != 0 || service.Flags&kdb.DisallowPostdated != 0) {
+		return kdcErrCannotPostdate
+	}
+	return 0
+}
+
 // ticketValidity reports whether a presented ticket is usable now, returning
 // the KRB_ERROR code to send when it is not.
 func (s *Server) ticketValidity(ticket protocol.EncTicketPart) (int32, bool) {
@@ -2745,9 +2814,20 @@ func (s *Server) withinSkew(value time.Time) bool {
 }
 
 func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.KerberosTime {
+	return s.ticketEndFromRecords(till, start, nil, nil)
+}
+
+func (s *Server) ticketEndFromRecords(till types.KerberosTime, start time.Time,
+	client, service *kdb.PrincipalRecord) types.KerberosTime {
 	maxLife := s.MaxTicketLife
 	if maxLife <= 0 {
 		maxLife = 10 * time.Hour
+	}
+	if client != nil && client.MaxLife > 0 && client.MaxLife < maxLife {
+		maxLife = client.MaxLife
+	}
+	if service != nil && service.MaxLife > 0 && service.MaxLife < maxLife {
+		maxLife = service.MaxLife
 	}
 	end := start.Add(maxLife)
 	if !ticketTillSet(till) {
@@ -2764,6 +2844,12 @@ func (s *Server) ticketEndFrom(till types.KerberosTime, start time.Time) types.K
 }
 
 func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTime, till types.KerberosTime, start, end time.Time) *types.KerberosTime {
+	return s.renewTillRecords(options, requested, till, start, end, nil, nil)
+}
+
+func (s *Server) renewTillRecords(options types.KDCOptions, requested *types.KerberosTime,
+	till types.KerberosTime, start, end time.Time,
+	client, service *kdb.PrincipalRecord) *types.KerberosTime {
 	renewable := options&types.KDCRenewable != 0
 	hasTill := ticketTillSet(till)
 	hasRequested := requested != nil && ticketTillSet(*requested)
@@ -2788,10 +2874,17 @@ func (s *Server) renewTill(options types.KDCOptions, requested *types.KerberosTi
 	if !target.After(end) && !renewable {
 		return nil
 	}
-	if s.MaxRenewableLife <= 0 {
+	maxRenewableLife := s.MaxRenewableLife
+	if client != nil && client.MaxRenew > 0 && client.MaxRenew < maxRenewableLife {
+		maxRenewableLife = client.MaxRenew
+	}
+	if service != nil && service.MaxRenew > 0 && service.MaxRenew < maxRenewableLife {
+		maxRenewableLife = service.MaxRenew
+	}
+	if maxRenewableLife <= 0 {
 		return nil
 	}
-	capTime := start.Add(s.MaxRenewableLife)
+	capTime := start.Add(maxRenewableLife)
 	if target.After(capTime) {
 		target = capTime
 	}
