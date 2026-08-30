@@ -1998,6 +1998,13 @@ func TestASAccountStateErrors(t *testing.T) {
 			},
 			want: kdcErrSPrincipal,
 		},
+		{
+			name: "service user2user only",
+			edit: func(client, service *kdb.PrincipalRecord) {
+				service.Flags |= kdb.DisallowServer
+			},
+			want: kdcErrMustUseUser2User,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2032,6 +2039,41 @@ func TestASAccountStateErrors(t *testing.T) {
 				t.Fatalf("error code = %d, want %d", response.ErrorCode, test.want)
 			}
 		})
+	}
+}
+
+func TestTGSRejectsDisallowedServerWithoutU2U(t *testing.T) {
+	now := time.Unix(2000000325, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	serviceName := principal.Principal{
+		Realm: server.Realm, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	}
+	serviceRecord, ok, err := db.Lookup(serviceName)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	serviceRecord.Flags |= kdb.DisallowServer
+	if err := db.UpdatePrincipal(serviceRecord); err != nil {
+		t.Fatal(err)
+	}
+	user := principal.Principal{
+		Realm: server.Realm, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("AS exchange: %v", err)
+	}
+	response := server.HandleMessage(rawTGSRequestWithTill(t, tgt, serviceName, now,
+		kerberosTime(now.Add(time.Hour)), 0))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("decode TGS error: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrMustUseUser2User {
+		t.Fatalf("TGS error code = %d, want %d", kerberosError.ErrorCode, kdcErrMustUseUser2User)
 	}
 }
 

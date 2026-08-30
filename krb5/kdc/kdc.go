@@ -61,7 +61,8 @@ const (
 	kdcErrServerNoMatch    = 26
 	kdcErrCannotPostdate   = 10
 	kdcErrClientRevoked    = 18
-	kdcErrKeyExpired       = 3
+	kdcErrKeyExpired       = 23
+	kdcErrMustUseUser2User = 27
 	kdcErrClientNotTrusted = 62
 	kdcErrPreauthExpired   = 90
 	krbAPErrBadIntegrity   = 31
@@ -1811,7 +1812,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	}
 	if serviceRecord.Flags&kdb.DisallowServer != 0 &&
 		options&types.KDCEncTktInSkey == 0 {
-		return s.tgsErrorResponse(armor, 6, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrMustUseUser2User, request.ReqBody.SName)
 	}
 	requester := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
 	var s4uUser *protocol.S4UUserID
@@ -2755,7 +2756,7 @@ func (s *Server) validateASAccount(client, service kdb.PrincipalRecord, options 
 		return kdcErrSPrincipal
 	}
 	if service.Flags&kdb.DisallowServer != 0 {
-		return 6
+		return kdcErrMustUseUser2User
 	}
 	if client.Flags&kdb.RequiresPWChange != 0 &&
 		service.Flags&kdb.PWChangeService == 0 {
