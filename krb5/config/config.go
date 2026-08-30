@@ -24,6 +24,10 @@ type Config struct {
 	DefaultCCacheName       string
 	DefaultKeytabName       string
 	DefaultClientKeytabName string
+	K5LoginDirectory        string
+	K5LoginAuthoritative    bool
+	K5LoginAuthoritativeSet bool
+	K5IdentityPath          string
 	KCMSocket               string
 	UDPPreferenceLimit      int
 	PermittedEnctypes       []int32
@@ -34,6 +38,10 @@ type Config struct {
 	Capaths                 map[string][]string
 	RealmOptions            map[string]map[string][]string
 	CapathOptions           map[string]map[string][]string
+	// RealmAuthToLocal contains ordered auth_to_local mappings for each
+	// realm. RealmAuthToLocalNames contains explicit principal-name mappings.
+	RealmAuthToLocal      map[string][]string
+	RealmAuthToLocalNames map[string]map[string][]string
 	// Options retains profile relations which are not interpreted by the
 	// client-side configuration parser, including kdc.conf defaults.
 	Options map[string]map[string][]string
@@ -103,17 +111,21 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse krb5.conf: input exceeds %d bytes", maxConfigSize)
 	}
 	cfg := &Config{
-		Realms:        make(map[string][]string),
-		DomainRealm:   make(map[string]string),
-		Capaths:       make(map[string][]string),
-		RealmOptions:  make(map[string]map[string][]string),
-		CapathOptions: make(map[string]map[string][]string),
-		Options:       make(map[string]map[string][]string),
-		DNSURILookup:  true,
+		Realms:                make(map[string][]string),
+		DomainRealm:           make(map[string]string),
+		Capaths:               make(map[string][]string),
+		RealmOptions:          make(map[string]map[string][]string),
+		CapathOptions:         make(map[string]map[string][]string),
+		RealmAuthToLocal:      make(map[string][]string),
+		RealmAuthToLocalNames: make(map[string]map[string][]string),
+		Options:               make(map[string]map[string][]string),
+		DNSURILookup:          true,
 	}
 	section := ""
 	subsection := ""
+	nestedSubsection := ""
 	pendingSubsection := ""
+	pendingNestedSubsection := ""
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	scanner.Buffer(make([]byte, 1024), maxConfigSize)
 	lineNumber := 0
@@ -124,7 +136,8 @@ func Parse(data []byte) (*Config, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			if subsection != "" || pendingSubsection != "" {
+			if subsection != "" || nestedSubsection != "" || pendingSubsection != "" ||
+				pendingNestedSubsection != "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: unclosed subsection", lineNumber)
 			}
 			if !strings.HasSuffix(line, "]") || strings.Count(line, "[") != 1 ||
@@ -141,6 +154,11 @@ func Parse(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("parse krb5.conf line %d: relation before section", lineNumber)
 		}
 		if line == "{" {
+			if pendingNestedSubsection != "" {
+				nestedSubsection = pendingNestedSubsection
+				pendingNestedSubsection = ""
+				continue
+			}
 			if pendingSubsection == "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: unexpected opening brace", lineNumber)
 			}
@@ -149,6 +167,10 @@ func Parse(data []byte) (*Config, error) {
 			continue
 		}
 		if line == "}" {
+			if nestedSubsection != "" {
+				nestedSubsection = ""
+				continue
+			}
 			if subsection == "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: unexpected closing brace", lineNumber)
 			}
@@ -167,16 +189,30 @@ func Parse(data []byte) (*Config, error) {
 		if pendingSubsection != "" {
 			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
 		}
+		if pendingNestedSubsection != "" {
+			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
+		}
 		if strings.HasSuffix(value, "{") {
-			if strings.TrimSpace(strings.TrimSuffix(value, "{")) != "" ||
-				subsection != "" {
+			if strings.TrimSpace(strings.TrimSuffix(value, "{")) != "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: malformed subsection", lineNumber)
 			}
-			subsection = strings.TrimSpace(rawKey)
+			if subsection != "" {
+				if strings.ToLower(strings.TrimSpace(rawKey)) != "auth_to_local_names" {
+					return nil, fmt.Errorf("parse krb5.conf line %d: nested subsection %q unsupported", lineNumber, rawKey)
+				}
+				nestedSubsection = strings.TrimSpace(rawKey)
+			} else {
+				subsection = strings.TrimSpace(rawKey)
+			}
 			continue
 		}
 		if value == "" {
 			if subsection != "" {
+				if nestedSubsection == "" &&
+					strings.EqualFold(rawKey, "auth_to_local_names") {
+					pendingNestedSubsection = rawKey
+					continue
+				}
 				return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
 			}
 			pendingSubsection = strings.TrimSpace(rawKey)
@@ -185,6 +221,10 @@ func Parse(data []byte) (*Config, error) {
 		values := splitValues(value)
 		if len(values) == 0 {
 			return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
+		}
+		if nestedSubsection != "" {
+			addNestedSubsection(cfg, subsection, nestedSubsection, rawKey, values)
+			continue
 		}
 		if subsection != "" {
 			addSubsection(cfg, section, subsection, key, values)
@@ -197,7 +237,7 @@ func Parse(data []byte) (*Config, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("parse krb5.conf: %w", err)
 	}
-	if subsection != "" || pendingSubsection != "" {
+	if subsection != "" || pendingSubsection != "" || pendingNestedSubsection != "" {
 		return nil, fmt.Errorf("parse krb5.conf: unclosed subsection")
 	}
 	return cfg, nil
@@ -336,6 +376,13 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DefaultKeytabName = value
 		case "default_client_keytab_name":
 			cfg.DefaultClientKeytabName = value
+		case "k5login_directory":
+			cfg.K5LoginDirectory = value
+		case "k5login_authoritative":
+			cfg.K5LoginAuthoritative = parseBool(value)
+			cfg.K5LoginAuthoritativeSet = true
+		case "k5identity":
+			cfg.K5IdentityPath = value
 		case "kcm_socket":
 			cfg.KCMSocket = value
 		case "udp_preference_limit":
@@ -370,9 +417,24 @@ func addSubsection(cfg *Config, section, subsection, key string, values []string
 	target[subsection][key] = append(target[subsection][key], values...)
 	if section == "realms" {
 		cfg.Realms[subsection] = append(cfg.Realms[subsection], values...)
+		if strings.EqualFold(key, "auth_to_local") {
+			cfg.RealmAuthToLocal[subsection] =
+				append(cfg.RealmAuthToLocal[subsection], values...)
+		}
 	} else if section == "capaths" {
 		cfg.Capaths[subsection] = append(cfg.Capaths[subsection], values...)
 	}
+}
+
+func addNestedSubsection(cfg *Config, subsection, nested, key string, values []string) {
+	if !strings.EqualFold(nested, "auth_to_local_names") {
+		return
+	}
+	if cfg.RealmAuthToLocalNames[subsection] == nil {
+		cfg.RealmAuthToLocalNames[subsection] = make(map[string][]string)
+	}
+	cfg.RealmAuthToLocalNames[subsection][key] =
+		append(cfg.RealmAuthToLocalNames[subsection][key], values...)
 }
 
 func parseBool(value string) bool {

@@ -136,6 +136,35 @@ func TestKCMSocketSetting(t *testing.T) {
 	}
 }
 
+func TestParseLocalAuthorizationSettings(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+    default_realm = EXAMPLE.COM
+    k5login_directory = /etc/krb5/k5login
+    k5login_authoritative = false
+    k5identity = /tmp/test.k5identity
+[realms]
+    EXAMPLE.COM = {
+        auth_to_local = RULE:[1:$1](.*)s/^/user-/
+        auth_to_local_names =
+        {
+            Alice = deploy
+        }
+    }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.K5LoginDirectory != "/etc/krb5/k5login" ||
+		cfg.K5LoginAuthoritative || !cfg.K5LoginAuthoritativeSet ||
+		cfg.K5IdentityPath != "/tmp/test.k5identity" {
+		t.Fatalf("local authorization settings = %#v", cfg)
+	}
+	if len(cfg.RealmAuthToLocal["EXAMPLE.COM"]) != 1 ||
+		cfg.RealmAuthToLocalNames["EXAMPLE.COM"]["Alice"][0] != "deploy" {
+		t.Fatalf("local authorization mappings = %#v/%#v", cfg.RealmAuthToLocal, cfg.RealmAuthToLocalNames)
+	}
+}
+
 func TestCapathRealmPathRejectsLoopsAndExcessHops(t *testing.T) {
 	cfg := &Config{CapathOptions: map[string]map[string][]string{
 		"A": {"C": {"B", "A"}},
