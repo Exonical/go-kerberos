@@ -369,9 +369,14 @@ func parseAuthPackOptionals(data []byte) ([][]byte, []byte, error) {
 	}
 	var cmsTypes [][]byte
 	var dhNonce []byte
+	lastOptionalTag := -1
 	for _, field := range fields[1:] {
 		switch field[0] {
 		case 0xa2:
+			if lastOptionalTag >= 2 {
+				return nil, nil, errors.New("pkinit: duplicate or out-of-order AuthPack optional")
+			}
+			lastOptionalTag = 2
 			content, err := tlvContent(field)
 			if err != nil {
 				return nil, nil, err
@@ -384,6 +389,10 @@ func parseAuthPackOptionals(data []byte) ([][]byte, []byte, error) {
 				cmsTypes = append(cmsTypes, append([]byte(nil), element...))
 			}
 		case 0xa3:
+			if lastOptionalTag >= 3 {
+				return nil, nil, errors.New("pkinit: duplicate or out-of-order AuthPack optional")
+			}
+			lastOptionalTag = 3
 			content, err := tlvContent(field)
 			if err != nil {
 				return nil, nil, err

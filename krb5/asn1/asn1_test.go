@@ -58,6 +58,153 @@ func TestPrimitiveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRawDERAlgorithmIdentifierParameters(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  protocol.AlgorithmIdentifier
+		expect []byte
+	}{
+		{
+			name: "NULL",
+			value: protocol.AlgorithmIdentifier{
+				Algorithm:  types.ObjectIdentifier{0x2a, 0x03},
+				Parameters: rawDERPtr([]byte{0x05, 0x00}),
+			},
+			expect: []byte{0x30, 0x06, 0x06, 0x02, 0x2a, 0x03, 0x05, 0x00},
+		},
+		{
+			name: "SEQUENCE",
+			value: protocol.AlgorithmIdentifier{
+				Algorithm:  types.ObjectIdentifier{0x2a, 0x03},
+				Parameters: rawDERPtr([]byte{0x30, 0x00}),
+			},
+			expect: []byte{0x30, 0x06, 0x06, 0x02, 0x2a, 0x03, 0x30, 0x00},
+		},
+		{
+			name: "absent",
+			value: protocol.AlgorithmIdentifier{
+				Algorithm: types.ObjectIdentifier{0x2a, 0x03},
+			},
+			expect: []byte{0x30, 0x04, 0x06, 0x02, 0x2a, 0x03},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := Marshal(test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(encoded, test.expect) {
+				t.Fatalf("encoded = %x, want %x", encoded, test.expect)
+			}
+			var decoded protocol.AlgorithmIdentifier
+			if err := Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := Marshal(decoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(roundTrip, encoded) {
+				t.Fatalf("round trip = %x, want %x", roundTrip, encoded)
+			}
+			if (test.value.Parameters == nil) != (decoded.Parameters == nil) {
+				t.Fatalf("parameters presence = %v, want %v",
+					decoded.Parameters != nil, test.value.Parameters != nil)
+			}
+			if decoded.Parameters != nil &&
+				!bytes.Equal(*decoded.Parameters, *test.value.Parameters) {
+				t.Fatalf("parameters = %x, want %x",
+					*decoded.Parameters, *test.value.Parameters)
+			}
+		})
+	}
+}
+
+func TestRawDEROTPTokenInfoAlgorithmParameters(t *testing.T) {
+	value := protocol.OTPTokenInfo{
+		Flags: types.OTPFlags(0),
+		SupportedHashAlg: []protocol.AlgorithmIdentifier{{
+			Algorithm:  types.ObjectIdentifier{0x2a, 0x03},
+			Parameters: rawDERPtr([]byte{0x05, 0x00}),
+		}},
+	}
+	encoded, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded protocol.OTPTokenInfo
+	if err := Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(roundTrip, encoded) {
+		t.Fatalf("round trip = %x, want %x", roundTrip, encoded)
+	}
+	if len(decoded.SupportedHashAlg) != 1 ||
+		decoded.SupportedHashAlg[0].Parameters == nil ||
+		!bytes.Equal(*decoded.SupportedHashAlg[0].Parameters, []byte{0x05, 0x00}) {
+		t.Fatalf("decoded supported hash algorithm = %#v", decoded.SupportedHashAlg)
+	}
+}
+
+func TestOptionalRawDERDoesNotConsumeFollowingContextField(t *testing.T) {
+	type value struct {
+		Parameters *types.RawDER `krb5:"tag:1,optional,bare"`
+		Count      int32         `krb5:"tag:2"`
+	}
+	input := []byte{0x30, 0x05, 0xa2, 0x03, 0x02, 0x01, 0x07}
+	var decoded value
+	if err := Unmarshal(input, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Parameters != nil || decoded.Count != 7 {
+		t.Fatalf("decoded value = %#v", decoded)
+	}
+}
+
+func TestObjectIdentifierDERValidation(t *testing.T) {
+	valid := []types.ObjectIdentifier{
+		{0x2a, 0x03},
+		{0x2a, 0x81, 0x00},
+	}
+	for _, value := range valid {
+		encoded, err := Marshal(value)
+		if err != nil {
+			t.Fatalf("Marshal(%x): %v", value, err)
+		}
+		var decoded types.ObjectIdentifier
+		if err := Unmarshal(encoded, &decoded); err != nil {
+			t.Fatalf("Unmarshal(%x): %v", encoded, err)
+		}
+		if !bytes.Equal(decoded, value) {
+			t.Fatalf("decoded OID = %x, want %x", decoded, value)
+		}
+	}
+	for _, content := range [][]byte{
+		{0x2a, 0x80, 0x01},
+		{0x2a, 0x80, 0x00},
+		{0x2a, 0x81},
+	} {
+		if _, err := Marshal(types.ObjectIdentifier(content)); err == nil {
+			t.Fatalf("Marshal accepted malformed OID content %x", content)
+		}
+		input := append([]byte{0x06, byte(len(content))}, content...)
+		var decoded types.ObjectIdentifier
+		if err := Unmarshal(input, &decoded); err == nil {
+			t.Fatalf("Unmarshal accepted malformed OID %x", input)
+		}
+	}
+}
+
+func rawDERPtr(value []byte) *types.RawDER {
+	raw := types.RawDER(value)
+	return &raw
+}
+
 func TestChangePasswdDataGoldenDER(t *testing.T) {
 	realm := "TEST.REALM"
 	value := protocol.ChangePasswdData{

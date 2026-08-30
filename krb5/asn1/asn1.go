@@ -223,6 +223,9 @@ func encodeBare(value reflect.Value, depth int) ([]byte, error) {
 		return encodeTLV(tagUTF8String, []byte(value.String())), nil
 	}
 	if value.Type() == reflect.TypeOf(types.ObjectIdentifier{}) {
+		if !validObjectIdentifierContent(value.Bytes()) {
+			return nil, fmt.Errorf("invalid OBJECT IDENTIFIER encoding")
+		}
 		return encodeTLV(0x06, value.Bytes()), nil
 	}
 	if value.Type() == reflect.TypeOf(types.RawDER{}) {
@@ -389,7 +392,7 @@ func decodeBare(tag byte, content []byte, destination reflect.Value, depth int) 
 		return nil
 	}
 	if destination.Type() == reflect.TypeOf(types.ObjectIdentifier{}) {
-		if tag != 0x06 || len(content) == 0 {
+		if tag != 0x06 || !validObjectIdentifierContent(content) {
 			return fmt.Errorf("unexpected OBJECT IDENTIFIER encoding")
 		}
 		destination.SetBytes(append([]byte(nil), content...))
@@ -495,7 +498,12 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		}
 		if tag.bare {
 			expectedTag := tagForImplicitField(destination.Field(i))
-			if expectedTag != 0 && nextTag != expectedTag {
+			if expectedTag == 0 {
+				if tag.optional && isContextSpecificTag(nextTag) &&
+					hasTaggedFieldAfter(destination.Type(), i) {
+					continue
+				}
+			} else if nextTag != expectedTag {
 				if tag.optional && nextTag > expectedTag {
 					continue
 				}
@@ -781,6 +789,9 @@ func tagForImplicitField(value reflect.Value) byte {
 }
 
 func tagForImplicitType(typ reflect.Type) byte {
+	if typ == reflect.TypeOf(types.RawDER{}) {
+		return 0
+	}
 	if isFlagType(typ) {
 		return tagBitString
 	}
@@ -809,6 +820,37 @@ func tagForImplicitType(typ reflect.Type) byte {
 	default:
 		return 0
 	}
+}
+
+func isContextSpecificTag(tag byte) bool {
+	return tag&0xc0 == 0x80
+}
+
+func hasTaggedFieldAfter(typ reflect.Type, index int) bool {
+	for i := index + 1; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath == "" {
+			_, present, _ := parseFieldTag(field)
+			if present {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validObjectIdentifierContent(content []byte) bool {
+	if len(content) == 0 {
+		return false
+	}
+	firstInSubidentifier := true
+	for _, octet := range content {
+		if firstInSubidentifier && octet == 0x80 {
+			return false
+		}
+		firstInSubidentifier = octet&0x80 == 0
+	}
+	return firstInSubidentifier
 }
 
 func encodeSignedInteger(value reflect.Value) ([]byte, error) {
