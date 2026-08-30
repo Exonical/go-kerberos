@@ -177,6 +177,25 @@ func TestCredentialAcquisitionKeytabMatching(t *testing.T) {
 	if _, err := AcquireAcceptorCredential(kt, &wrong); err == nil {
 		t.Fatal("missing acceptor principal unexpectedly succeeded")
 	}
+	any, err := AcquireAcceptorCredential(kt, nil)
+	if err != nil {
+		t.Fatalf("unspecified acceptor credential: %v", err)
+	}
+	anyAcceptor, err := any.Acceptor()
+	if err != nil {
+		t.Fatalf("unspecified acceptor: %v", err)
+	}
+	otherInitiator, err := NewInitiator(creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial2, err := otherInitiator.InitialToken(time.Unix(1700000001, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := anyAcceptor.Accept(initial2, time.Unix(1700000001, 0).UTC()); err != nil {
+		t.Fatalf("unspecified acceptor rejected keytab principal: %v", err)
+	}
 }
 
 func TestChannelBindingsChecksumEncoding(t *testing.T) {
