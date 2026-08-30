@@ -16,6 +16,17 @@ type Clock interface {
 // built-in string type and are encoded as GeneralString instead.
 type UTF8String string
 
+// ObjectIdentifier stores the DER value octets of an ASN.1 OBJECT IDENTIFIER.
+// It is used by protocol structures whose algorithm identifiers must preserve
+// the original OID while using the Kerberos ASN.1 codec.
+type ObjectIdentifier []byte
+
+// RawDER stores one complete DER value, including its tag and length.
+type RawDER []byte
+
+// OTPFlags is the 32-bit flags value used by RFC 6560 OTP structures.
+type OTPFlags uint32
+
 // RandomSource is the injectable source used for security-sensitive
 // randomness. Production code should use crypto/rand.Reader.
 type RandomSource io.Reader

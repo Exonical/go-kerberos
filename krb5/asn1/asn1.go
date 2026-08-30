@@ -30,6 +30,8 @@ type fieldTag struct {
 	optional bool
 	choice   bool
 	implicit bool
+	signed   bool
+	bare     bool
 }
 
 // Marshal encodes a Kerberos ASN.1 value using canonical DER.
@@ -220,6 +222,16 @@ func encodeBare(value reflect.Value, depth int) ([]byte, error) {
 	if value.Type() == reflect.TypeOf(types.UTF8String("")) {
 		return encodeTLV(tagUTF8String, []byte(value.String())), nil
 	}
+	if value.Type() == reflect.TypeOf(types.ObjectIdentifier{}) {
+		return encodeTLV(0x06, value.Bytes()), nil
+	}
+	if value.Type() == reflect.TypeOf(types.RawDER{}) {
+		raw := append([]byte(nil), value.Bytes()...)
+		if _, _, end, err := readTLV(raw); err != nil || end != len(raw) {
+			return nil, fmt.Errorf("invalid raw DER value")
+		}
+		return raw, nil
+	}
 	switch value.Kind() {
 	case reflect.Bool:
 		if value.Bool() {
@@ -267,11 +279,16 @@ func encodeStruct(value reflect.Value, depth int) ([]byte, error) {
 		if tag.optional && isAbsent(fieldValue) {
 			continue
 		}
-		encoded, err := encodeValue(fieldValue, depth+1)
+		var encoded []byte
+		if tag.signed {
+			encoded, err = encodeSignedInteger(fieldValue)
+		} else {
+			encoded, err = encodeValue(fieldValue, depth+1)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("field %s: %w", field.Name, err)
 		}
-		if hasTag {
+		if hasTag && !tag.bare {
 			if tag.implicit {
 				innerTag, innerContent, innerEnd, err := readTLV(encoded)
 				if err != nil || innerEnd != len(encoded) {
@@ -303,6 +320,10 @@ func decodeValue(data []byte, destination reflect.Value, depth int) error {
 			destination.Set(reflect.New(destination.Type().Elem()))
 		}
 		return decodeValue(data, destination.Elem(), depth+1)
+	}
+	if destination.Type() == reflect.TypeOf(types.RawDER{}) {
+		destination.SetBytes(append([]byte(nil), data...))
+		return nil
 	}
 	if application, ok := applicationTag(destination); ok {
 		if tag != 0x60|byte(application) {
@@ -365,6 +386,13 @@ func decodeBare(tag byte, content []byte, destination reflect.Value, depth int) 
 			return fmt.Errorf("unexpected UTF8String tag 0x%x", tag)
 		}
 		destination.SetString(string(content))
+		return nil
+	}
+	if destination.Type() == reflect.TypeOf(types.ObjectIdentifier{}) {
+		if tag != 0x06 || len(content) == 0 {
+			return fmt.Errorf("unexpected OBJECT IDENTIFIER encoding")
+		}
+		destination.SetBytes(append([]byte(nil), content...))
 		return nil
 	}
 	switch destination.Kind() {
@@ -465,6 +493,20 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		if err != nil {
 			return err
 		}
+		if tag.bare {
+			expectedTag := tagForImplicitField(destination.Field(i))
+			if expectedTag != 0 && nextTag != expectedTag {
+				if tag.optional && nextTag > expectedTag {
+					continue
+				}
+				return fmt.Errorf("unexpected bare field tag 0x%x, want 0x%x", nextTag, expectedTag)
+			}
+			if err := decodeValue(content[position:position+end], destination.Field(i), depth+1); err != nil {
+				return fmt.Errorf("field %s: %w", field.Name, err)
+			}
+			position += end
+			continue
+		}
 		expectedTag := byte(0xa0 | tag.number)
 		if nextTag != expectedTag {
 			if tag.implicit && (nextTag == 0x80|byte(tag.number) ||
@@ -478,7 +520,7 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 					return fmt.Errorf("invalid implicit field")
 				}
 				if implicitTag == tagInteger {
-					if err := decodeImplicitInteger(implicitContent, destination.Field(i)); err != nil {
+					if err := decodeImplicitInteger(implicitContent, destination.Field(i), tag.signed); err != nil {
 						return fmt.Errorf("field %s: %w", field.Name, err)
 					}
 					position += end
@@ -507,7 +549,7 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 				return fmt.Errorf("invalid implicit field")
 			}
 			if implicitTag == tagInteger {
-				if err := decodeImplicitInteger(implicitContent, destination.Field(i)); err != nil {
+				if err := decodeImplicitInteger(implicitContent, destination.Field(i), tag.signed); err != nil {
 					return fmt.Errorf("field %s: %w", field.Name, err)
 				}
 				position += end
@@ -527,7 +569,11 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		if innerEnd != end {
 			return fmt.Errorf("invalid explicit field")
 		}
-		if err := decodeValue(inner, destination.Field(i), depth+1); err != nil {
+		if tag.signed {
+			if err := decodeSignedInteger(inner, destination.Field(i)); err != nil {
+				return fmt.Errorf("field %s: %w", field.Name, err)
+			}
+		} else if err := decodeValue(inner, destination.Field(i), depth+1); err != nil {
 			return fmt.Errorf("field %s: %w", field.Name, err)
 		}
 		position += end
@@ -714,6 +760,10 @@ func parseFieldTag(field reflect.StructField) (fieldTag, bool, error) {
 			result.choice = true
 		case part == "implicit":
 			result.implicit = true
+		case part == "signed":
+			result.signed = true
+		case part == "bare":
+			result.bare = true
 		default:
 			return fieldTag{}, false, fmt.Errorf("unknown krb5 field option %q", part)
 		}
@@ -731,11 +781,17 @@ func tagForImplicitField(value reflect.Value) byte {
 }
 
 func tagForImplicitType(typ reflect.Type) byte {
+	if isFlagType(typ) {
+		return tagBitString
+	}
 	if typ == reflect.TypeOf(types.UTF8String("")) {
 		return tagUTF8String
 	}
 	if typ == reflect.TypeOf(types.KerberosTime{}) || typ == reflect.TypeOf(time.Time{}) {
 		return tagGeneralizedTime
+	}
+	if typ == reflect.TypeOf(types.ObjectIdentifier{}) {
+		return 0x06
 	}
 	switch typ.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -755,7 +811,49 @@ func tagForImplicitType(typ reflect.Type) byte {
 	}
 }
 
-func decodeImplicitInteger(data []byte, destination reflect.Value) error {
+func encodeSignedInteger(value reflect.Value) ([]byte, error) {
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil, fmt.Errorf("nil signed INTEGER")
+		}
+		value = value.Elem()
+	}
+	if value.Kind() < reflect.Uint || value.Kind() > reflect.Uint64 {
+		return nil, fmt.Errorf("signed INTEGER source is not unsigned")
+	}
+	return encodeTLV(tagInteger, encodeInteger(int64(int32(value.Uint())))), nil
+}
+
+func decodeSignedInteger(data []byte, destination reflect.Value) error {
+	value, err := decodeIntegerFromTLV(data)
+	if err != nil {
+		return err
+	}
+	if destination.Kind() == reflect.Pointer {
+		if destination.IsNil() {
+			destination.Set(reflect.New(destination.Type().Elem()))
+		}
+		destination = destination.Elem()
+	}
+	if destination.Kind() < reflect.Uint || destination.Kind() > reflect.Uint64 {
+		return fmt.Errorf("signed INTEGER destination is not unsigned")
+	}
+	destination.SetUint(uint64(value))
+	return nil
+}
+
+func decodeIntegerFromTLV(data []byte) (int64, error) {
+	tag, content, end, err := readTLV(data)
+	if err != nil {
+		return 0, err
+	}
+	if tag != tagInteger || end != len(data) {
+		return 0, fmt.Errorf("unexpected signed INTEGER encoding")
+	}
+	return decodeInteger(content)
+}
+
+func decodeImplicitInteger(data []byte, destination reflect.Value, signed bool) error {
 	for len(data) > 1 && ((data[0] == 0 && data[1]&0x80 == 0) ||
 		(data[0] == 0xff && data[1]&0x80 != 0)) {
 		data = data[1:]
@@ -769,6 +867,19 @@ func decodeImplicitInteger(data []byte, destination reflect.Value) error {
 			destination.Set(reflect.New(destination.Type().Elem()))
 		}
 		destination = destination.Elem()
+	}
+	if signed {
+		if destination.Kind() == reflect.Pointer {
+			if destination.IsNil() {
+				destination.Set(reflect.New(destination.Type().Elem()))
+			}
+			destination = destination.Elem()
+		}
+		if destination.Kind() < reflect.Uint || destination.Kind() > reflect.Uint64 {
+			return fmt.Errorf("implicit INTEGER destination is not unsigned")
+		}
+		destination.SetUint(uint64(value))
+		return nil
 	}
 	if destination.Kind() < reflect.Int || destination.Kind() > reflect.Int64 {
 		return fmt.Errorf("implicit INTEGER destination is not signed")
@@ -872,7 +983,8 @@ func applicationTag(value reflect.Value) (int, bool) {
 func isFlagType(typ reflect.Type) bool {
 	return typ == reflect.TypeOf(types.KDCOptions(0)) ||
 		typ == reflect.TypeOf(types.TicketFlags(0)) ||
-		typ == reflect.TypeOf(types.APOptions(0))
+		typ == reflect.TypeOf(types.APOptions(0)) ||
+		typ == reflect.TypeOf(types.OTPFlags(0))
 }
 
 func isKerberosTime(typ reflect.Type) bool {

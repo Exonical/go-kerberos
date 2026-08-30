@@ -10,6 +10,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 const (
@@ -18,7 +19,7 @@ const (
 
 	KeyUsageRequest uint32 = 45
 
-	FlagNextOTP int32 = 1
+	FlagNextOTP types.OTPFlags = 1
 
 	FormatDecimal      int32 = 0
 	FormatHexadecimal  int32 = 1

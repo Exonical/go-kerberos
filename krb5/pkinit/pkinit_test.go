@@ -86,6 +86,31 @@ func TestAuthPackSupportedKDFWireEncoding(t *testing.T) {
 	}
 }
 
+func TestParseAuthPackPreservesOptionalCMSAndDHNonce(t *testing.T) {
+	auth := PKAuthenticator{
+		Cusec: 1, CTime: time.Unix(1700000000, 0).UTC(), Nonce: 2,
+		PAChecksum: []byte("checksum"),
+	}
+	base := authPackDER(auth, nil)
+	content := mustContent(base)
+	cms := derSeq(derSeq(derOID(asn1.ObjectIdentifier{1, 2, 3}), derNull()))
+	dhNonce := []byte{4, 5, 6, 7}
+	content = append(content, derExplicit(2, cms)...)
+	content = append(content, derExplicit(3, derOctet(dhNonce))...)
+	pack := der(0x30, content)
+	parsed, err := ParseAuthPack(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.SupportedCMSTypes) != 1 ||
+		!bytes.Equal(parsed.SupportedCMSTypes[0], cms[2:]) {
+		t.Fatalf("supported CMS types = %x, want %x", parsed.SupportedCMSTypes, cms[2:])
+	}
+	if !bytes.Equal(parsed.DHNonce, dhNonce) {
+		t.Fatalf("DH nonce = %x, want %x", parsed.DHNonce, dhNonce)
+	}
+}
+
 func TestAuthPackFreshnessTokenWireEncoding(t *testing.T) {
 	token := []byte{0xde, 0xad, 0xbe, 0xef}
 	auth := PKAuthenticator{
