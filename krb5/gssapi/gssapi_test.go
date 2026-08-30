@@ -92,7 +92,7 @@ func TestChannelBindingsInitiatorAndAcceptorSemantics(t *testing.T) {
 		ApplicationData:   []byte("channel-bound"),
 	}
 	makeToken := func(value *ChannelBindings) []byte {
-		initiator, err := NewInitiatorWithOptions(creds, GSSMutualFlag,
+		initiator, err := NewInitiatorWithOptions(creds, GSSMutualFlag|GSSChannelBoundFlag,
 			InitiatorOptions{ChannelBindings: value})
 		if err != nil {
 			t.Fatal(err)
@@ -118,6 +118,21 @@ func TestChannelBindingsInitiatorAndAcceptorSemantics(t *testing.T) {
 	sum := ChecksumChannelBindings(bindings)
 	if !bytes.Equal(verified.Checksum.Checksum[4:20], sum[:]) {
 		t.Fatalf("authenticator Bnd = %x, want %x", verified.Checksum.Checksum[4:20], sum)
+	}
+	asserted, err := channelBindingAsserted(verified.AuthenticatorAuthorizationData)
+	if err != nil || !asserted {
+		t.Fatalf("missing MS-KILE CBT assertion: asserted=%v err=%v", asserted, err)
+	}
+	initiator, err := NewInitiatorWithOptions(creds, GSSMutualFlag|GSSChannelBoundFlag,
+		InitiatorOptions{ChannelBindings: bindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.InitialToken(now); err != nil {
+		t.Fatal(err)
+	}
+	if initiator.ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("initiator context incorrectly set channel-bound flag: %#x", initiator.ctx.Flags())
 	}
 
 	token = makeToken(bindings)
@@ -172,6 +187,11 @@ func TestChannelBindingsAcceptorTolerance(t *testing.T) {
 	}
 	if err := verifyChannelBindings(&protocol.Checksum{ChecksumType: 0x8003, Checksum: make([]byte, 23)}, bindings); !errors.Is(err, ErrBadBindings) {
 		t.Fatalf("short RFC 4121 checksum error = %v, want ErrBadBindings", err)
+	}
+	invalidLength := make([]byte, 24)
+	binary.LittleEndian.PutUint32(invalidLength[:4], 15)
+	if err := verifyChannelBindings(&protocol.Checksum{ChecksumType: 0x8003, Checksum: invalidLength}, bindings); errors.Is(err, ErrBadBindings) || err == nil {
+		t.Fatalf("invalid RFC 4121 channel-binding length error = %v, want generic failure", err)
 	}
 	zero := make([]byte, 24)
 	binary.LittleEndian.PutUint32(zero[:4], 16)

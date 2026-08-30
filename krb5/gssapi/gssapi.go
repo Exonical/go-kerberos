@@ -243,7 +243,10 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		}
 		copy(checksumData[4:], channelBindings)
 	}
-	binary.LittleEndian.PutUint32(checksumData[20:], i.flags)
+	// GSS_C_CHANNEL_BOUND_FLAG is local context state, not an RFC 4121
+	// authenticator flag.  MS-KILE conveys the request through AP_OPTIONS
+	// authorization data instead.
+	binary.LittleEndian.PutUint32(checksumData[20:], i.flags&^GSSChannelBoundFlag)
 	if i.flags&GSSDelegFlag != 0 {
 		forwarded := i.forwarded
 		if forwarded == nil {
@@ -274,7 +277,14 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 	if i.flags&GSSMutualFlag != 0 {
 		opts |= types.APMutualRequired
 	}
-	state, apDER, err := ap.BuildAPReqWithOptions(i.creds, opts, now, ap.APReqOptions{Checksum: checksum})
+	var authData protocol.AuthorizationData
+	if i.flags&GSSChannelBoundFlag != 0 {
+		authData = channelBindingAuthData()
+	}
+	state, apDER, err := ap.BuildAPReqWithOptions(i.creds, opts, now, ap.APReqOptions{
+		Checksum:          checksum,
+		AuthorizationData: authData,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("GSS initial AP-REQ: %w", err)
 	}
@@ -282,7 +292,7 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 	i.ctx = &Context{
 		key:       contextKey(state.SessionKey, state.SubKey),
 		initiator: true,
-		flags:     i.flags | channelBoundFlag(i.channelBindings),
+		flags:     i.flags &^ GSSChannelBoundFlag,
 		sendSeq:   sequenceValue(state.SeqNumber),
 	}
 	if legacy {
@@ -348,6 +358,14 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	}
 	if err := verifyChannelBindings(verified.Checksum, a.channelBindings); err != nil {
 		return nil, principal.Principal{}, nil, err
+	}
+	clientCBT, err := channelBindingAsserted(verified.AuthenticatorAuthorizationData)
+	if err != nil {
+		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
+	}
+	if clientCBT && a.channelBindings != nil &&
+		channelBoundFlagForChecksum(verified.Checksum, a.channelBindings) == 0 {
+		return nil, principal.Principal{}, nil, fmt.Errorf("GSS channel bindings: %w", ErrBadBindings)
 	}
 	if conversation != nil {
 		finished, ok, err := checksumFinished(verified.Checksum)

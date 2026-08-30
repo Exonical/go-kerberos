@@ -5,7 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+)
+
+const (
+	kerbAuthDataAPOptions = 143
+	kerbAPOptionsCBT      = 0x4000
 )
 
 // ChannelBindings contains the RFC 2744 channel-binding fields.
@@ -98,9 +104,11 @@ func verifyChannelBindings(checksum *protocol.Checksum, expected *ChannelBinding
 	if checksum == nil || checksum.ChecksumType != 0x8003 {
 		return nil
 	}
-	if len(checksum.Checksum) < 24 ||
-		binary.LittleEndian.Uint32(checksum.Checksum[:4]) != 16 {
+	if len(checksum.Checksum) < 24 {
 		return fmt.Errorf("GSS channel bindings: %w", ErrBadBindings)
+	}
+	if binary.LittleEndian.Uint32(checksum.Checksum[:4]) != 16 {
+		return fmt.Errorf("GSS channel bindings: invalid checksum channel-binding length")
 	}
 	if expected == nil {
 		return nil
@@ -123,4 +131,42 @@ func channelBoundFlagForChecksum(checksum *protocol.Checksum, expected *ChannelB
 		return GSSChannelBoundFlag
 	}
 	return 0
+}
+
+func channelBindingAuthData() protocol.AuthorizationData {
+	flags := make([]byte, 4)
+	binary.LittleEndian.PutUint32(flags, kerbAPOptionsCBT)
+	inner, err := asn1.Marshal(protocol.AuthorizationData{{
+		ADType: kerbAuthDataAPOptions,
+		ADData: flags,
+	}})
+	if err != nil {
+		return nil
+	}
+	return protocol.AuthorizationData{{
+		ADType: protocol.ADIfRelevant,
+		ADData: inner,
+	}}
+}
+
+func channelBindingAsserted(data protocol.AuthorizationData) (bool, error) {
+	for _, outer := range data {
+		if outer.ADType != protocol.ADIfRelevant {
+			continue
+		}
+		var inner protocol.AuthorizationData
+		if err := asn1.Unmarshal(outer.ADData, &inner); err != nil {
+			return false, fmt.Errorf("GSS channel bindings: invalid AP options authdata: %w", err)
+		}
+		for _, entry := range inner {
+			if entry.ADType != kerbAuthDataAPOptions {
+				continue
+			}
+			if len(entry.ADData) != 4 {
+				return false, fmt.Errorf("GSS channel bindings: invalid AP options authdata")
+			}
+			return binary.LittleEndian.Uint32(entry.ADData)&kerbAPOptionsCBT != 0, nil
+		}
+	}
+	return false, nil
 }

@@ -45,6 +45,8 @@ type APReqState = APReq
 // APReqOptions controls optional authenticator fields when building AP-REQs.
 type APReqOptions struct {
 	Checksum *protocol.Checksum
+	// AuthorizationData supplies authenticator authorization data.
+	AuthorizationData protocol.AuthorizationData
 	// SubKey supplies an authenticator subkey. If nil, one is generated.
 	SubKey *protocol.EncryptionKey
 	// NoSubKey omits the authenticator subkey. Some protocols, including MIT
@@ -61,16 +63,17 @@ type AuthenticatorChecksumExtension struct {
 
 // VerifiedAPReq is the acceptor state associated with a verified AP-REQ.
 type VerifiedAPReq struct {
-	Client            principal.Principal
-	Server            principal.Principal
-	SessionKey        protocol.EncryptionKey
-	Flags             types.TicketFlags
-	AuthenticatorTime time.Time
-	Cusec             int32
-	SubKey            *protocol.EncryptionKey
-	SeqNumber         *uint32
-	APOptions         types.APOptions
-	Checksum          *protocol.Checksum
+	Client                         principal.Principal
+	Server                         principal.Principal
+	SessionKey                     protocol.EncryptionKey
+	Flags                          types.TicketFlags
+	AuthenticatorTime              time.Time
+	Cusec                          int32
+	SubKey                         *protocol.EncryptionKey
+	SeqNumber                      *uint32
+	APOptions                      types.APOptions
+	Checksum                       *protocol.Checksum
+	AuthenticatorAuthorizationData protocol.AuthorizationData
 	// AuthorizationData contains CAMMAC elements after service verification.
 	AuthorizationData protocol.AuthorizationData
 }
@@ -168,6 +171,9 @@ func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now 
 		checksum := *options.Checksum
 		checksum.Checksum = append([]byte(nil), checksum.Checksum...)
 		authenticator.Checksum = &checksum
+	}
+	if options.AuthorizationData != nil {
+		authenticator.AuthorizationData = append(protocol.AuthorizationData(nil), options.AuthorizationData...)
 	}
 	authenticatorDER, err := asn1.Marshal(authenticator)
 	if err != nil {
@@ -366,15 +372,16 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 			Realm: request.Ticket.Realm, NameType: principal.NameType(request.Ticket.SName.NameType),
 			Components: append([]string(nil), request.Ticket.SName.NameString...),
 		},
-		SessionKey:        copyEncryptionKey(ticketPart.Key),
-		Flags:             ticketPart.Flags,
-		AuthenticatorTime: authenticator.Ctime.Time,
-		Cusec:             authenticator.Cusec,
-		SubKey:            copyEncryptionKeyPointer(authenticator.SubKey),
-		SeqNumber:         uint32PointerValue(authenticator.SeqNumber),
-		APOptions:         request.APOptions,
-		Checksum:          authChecksum,
-		AuthorizationData: protectedAuthData,
+		SessionKey:                     copyEncryptionKey(ticketPart.Key),
+		Flags:                          ticketPart.Flags,
+		AuthenticatorTime:              authenticator.Ctime.Time,
+		Cusec:                          authenticator.Cusec,
+		SubKey:                         copyEncryptionKeyPointer(authenticator.SubKey),
+		SeqNumber:                      uint32PointerValue(authenticator.SeqNumber),
+		APOptions:                      request.APOptions,
+		Checksum:                       authChecksum,
+		AuthenticatorAuthorizationData: append(protocol.AuthorizationData(nil), authenticator.AuthorizationData...),
+		AuthorizationData:              protectedAuthData,
 	}, nil
 }
 

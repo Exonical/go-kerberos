@@ -308,9 +308,14 @@ the RFC 4121 `0x8003` authenticator checksum. Set
 `gssapi.AcceptorOptions.ChannelBindings` to bind a context to initiator and
 acceptor addresses and application data. Matching non-zero bindings set
 `GSS_C_CHANNEL_BOUND_FLAG`; absent or zero bindings retain MIT's tolerant
-acceptor behavior. SPNEGO and IAKERB propagate the option to their Kerberos
-mechanism. The local test suite covers encoding, token placement, matching,
-mismatch, and MIT-compatible absent/zero-binding cases.
+acceptor behavior. When the initiator requests the channel-bound flag, the
+implementation also emits the MS-KILE `KERB_AP_OPTIONS_CBT` assertion in
+authenticator authorization data; acceptors enforce matching bindings when
+that assertion is present. SPNEGO and IAKERB propagate the option to their
+Kerberos mechanism. The local test suite covers encoding, token placement,
+matching, mismatch, and MIT-compatible absent/zero-binding cases, while the
+MIT integration suite exercises both initiator and acceptor directions using
+Python GSSAPI channel bindings.
 
 RFC 7751 CAMMAC authorization data is available through the `krb5/cammac`
 package. It encodes KDC and service verifiers with checksum key usage 64,
