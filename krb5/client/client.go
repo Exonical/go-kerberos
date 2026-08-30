@@ -1385,8 +1385,11 @@ func (c *Client) DecodeASResponse(data []byte, clientPrincipal principal.Princip
 // BuildTGSRequest constructs a TGS-REQ without sending it.
 func (c *Client) BuildTGSRequest(tgt *Credentials, service principal.Principal,
 	now time.Time) (protocol.TGSReq, uint32, error) {
+	if tgt == nil {
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS request: nil TGT")
+	}
 	realm := service.Realm
-	if realm == "" && tgt != nil {
+	if realm == "" {
 		realm = tgt.Server.Realm
 	}
 	return c.newTGSReq(tgt, service, realm, now, false)
@@ -1397,6 +1400,9 @@ func (c *Client) BuildTGSRequest(tgt *Credentials, service principal.Principal,
 // requested.
 func (c *Client) BuildTGSRequestForRealm(tgt *Credentials, service principal.Principal,
 	realm string, referral bool, now time.Time) (protocol.TGSReq, uint32, error) {
+	if tgt == nil {
+		return protocol.TGSReq{}, 0, fmt.Errorf("TGS request: nil TGT")
+	}
 	return c.newTGSReq(tgt, service, realm, now, referral)
 }
 

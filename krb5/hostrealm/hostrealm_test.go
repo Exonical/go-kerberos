@@ -247,3 +247,68 @@ func TestHostRealmNumericAndContextErrors(t *testing.T) {
 		t.Fatalf("nil context error = %v", err)
 	}
 }
+
+func TestCanonicalizePrincipalCandidatesFallback(t *testing.T) {
+	cfg := &config.Config{DNSCanonicalizeHostname: "fallback"}
+	p := principal.Principal{
+		Realm: "EXAMPLE.COM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "alias.example.test"},
+	}
+	candidates, err := CanonicalizePrincipalCandidates(context.Background(), cfg, p, Options{
+		ForwardLookup: func(context.Context, string) (string, error) {
+			return "canonical.example.test.", nil
+		},
+	})
+	if err != nil || len(candidates) != 2 ||
+		candidates[0].Components[1] != p.Components[1] ||
+		candidates[1].Components[1] != "canonical.example.test" {
+		t.Fatalf("fallback candidates = %#v, %v", candidates, err)
+	}
+	cfg.DNSCanonicalizeHostname = "false"
+	candidates, err = CanonicalizePrincipalCandidates(context.Background(), cfg, p, Options{})
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("non-fallback candidates = %#v, %v", candidates, err)
+	}
+}
+
+func TestCanonicalizePrincipalNonHostAndTrailers(t *testing.T) {
+	plain := principal.Principal{Realm: "EXAMPLE.COM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	got, err := CanonicalizePrincipal(context.Background(), nil, plain, Options{})
+	if err != nil || got.String() != plain.String() {
+		t.Fatalf("non-host canonicalization = %#v, %v", got, err)
+	}
+	cfg := &config.Config{DNSCanonicalizeHostname: "false", QualifyShortname: "example.test"}
+	for _, host := range []string{"host", "host:88", "host:a:b"} {
+		got, err := CanonicalizePrincipal(context.Background(), cfg,
+			principal.Principal{NameType: principal.NTSrvHst, Components: []string{"http", host}}, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host == "host:88" && got.Components[1] != "host.example.test:88" {
+			t.Fatalf("trailer preserved as %q", got.Components[1])
+		}
+		if host == "host:a:b" && got.Components[1] != "host:a:b.example.test" {
+			t.Fatalf("multi-colon host = %q", got.Components[1])
+		}
+	}
+}
+
+func TestHostRealmProfileAndFallbackAPI(t *testing.T) {
+	if realm, ok := FallbackRealm(nil, "host.example.test"); ok || realm != "" {
+		t.Fatalf("nil fallback = %q, %v", realm, ok)
+	}
+	cfg := &config.Config{DefaultRealm: "DEFAULT.TEST",
+		DomainRealm: map[string]string{".example.test": "PROFILE.TEST"}}
+	if realm, ok := FallbackRealm(cfg, "host.example.test"); !ok || realm != "PROFILE.TEST" {
+		t.Fatalf("profile fallback = %q, %v", realm, ok)
+	}
+	if realm, ok := FallbackRealm(cfg, "other.test"); !ok || realm != "TEST" {
+		t.Fatalf("domain fallback = %q, %v", realm, ok)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ExpandHostname(ctx, cfg, "host", Options{}); err == nil {
+		t.Fatal("cancelled expansion unexpectedly succeeded")
+	}
+}
