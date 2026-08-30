@@ -322,8 +322,11 @@ GSS IOV operations are exposed by `Context.WrapIOV`, `Context.UnwrapIOV`, and
 `Context.WrapIOVLength`.  Confidentiality and integrity-only CFX tokens use
 the same RFC 4121 framing as the flat `Wrap` API; DATA buffers are distributed
 across caller-supplied fragments, SIGN_ONLY buffers are authenticated without
-being encrypted for integrity-only tokens, and STREAM unwrap accepts a
-complete token in one buffer.  RFC 4402 PRF output is available through
+being encrypted, and STREAM unwrap accepts a complete token in one buffer.
+Nonzero RRC rotation and explicit DCE-style framing are supported; callers
+must configure DCE mode on both sides when using that framing.  Length queries
+only report required sizes and do not allocate or resize caller buffers.
+RFC 4402 PRF output is available through
 `Context.PseudoRandom` with `GSS_C_PRF_KEY_FULL` and
 `GSS_C_PRF_KEY_PARTIAL`.  AES-SHA1, AES-SHA2, and enabled Camellia enctypes
 use the existing RFC 3961/RFC 8009 crypto implementations.  `/usr/bin/python3`

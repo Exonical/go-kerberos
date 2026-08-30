@@ -647,6 +647,10 @@ func (c *Context) wrap(data []byte, sealed bool) ([]byte, error) {
 }
 
 func (c *Context) unwrap(token []byte) ([]byte, error) {
+	return c.unwrapToken(token, c.dceStyle)
+}
+
+func (c *Context) unwrapToken(token []byte, dceStyle bool) ([]byte, error) {
 	header, payload, err := parseMessage(token, []byte{0x05, 0x04})
 	if err != nil {
 		return nil, err
@@ -665,6 +669,7 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 	}
 	sealed := header[2]&tokenFlagSealed != 0
 	if sealed {
+		ec := int(binary.BigEndian.Uint16(header[4:6]))
 		usage := uint32(24)
 		if c.initiator {
 			usage = 22
@@ -676,27 +681,19 @@ func (c *Context) unwrap(token []byte) ([]byte, error) {
 		if len(plain) < 16 {
 			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 		}
-		ec := int(binary.BigEndian.Uint16(header[4:6]))
 		expectedHeader := messageHeader(header[:2], header[2], ec, 0, binary.BigEndian.Uint64(header[8:]))
 		if !equalBytes(plain[len(plain)-16:], expectedHeader) {
 			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 		}
 		body := plain[:len(plain)-16]
-		// RFC 4121 DCE-style IOV tokens carry the block-size EC marker
-		// outside the encrypted payload; unlike CTS padding, it is not
-		// present in body and must not be removed here.
-		if ec != 0 {
-			if ec != 16 {
+		if !dceStyle {
+			if ec > len(body) {
 				return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
 			}
-			c.recvSeq++
-			return body, nil
-		}
-		if ec > len(body) {
-			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+			body = body[:len(body)-ec]
 		}
 		c.recvSeq++
-		return body[:len(body)-ec], nil
+		return body, nil
 	}
 	ec := int(binary.BigEndian.Uint16(header[4:6]))
 	if ec != etype.ChecksumSize() || len(payload) < ec {

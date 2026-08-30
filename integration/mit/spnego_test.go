@@ -742,10 +742,27 @@ for line in sys.stdin:
         gssapi.raw.wrap_iov(context, iov, confidential=True)
         emit("wrap", b"".join(x.value or b"" for x in iov))
     elif kind == "unwrap_iov":
-        iov = IOV((IOVBufferType.header, False, value[:32]),
-                  (IOVBufferType.data, False, value[32:-28]),
-                  (IOVBufferType.trailer, False, value[-28:]),
-                  std_layout=False)
-        gssapi.raw.unwrap_iov(context, iov)
-        emit("plain", iov[1].value)
+        plain = None
+        # The CFX header and trailer sizes are enctype-dependent.  Derive
+        # them from the token rather than assuming AES-SHA1's 32/28 layout.
+        for header_len in range(16, len(value)):
+            for trailer_len in range(1, len(value) - header_len + 1):
+                data_end = len(value) - trailer_len
+                if data_end <= header_len:
+                    continue
+                iov = IOV((IOVBufferType.header, False, value[:header_len]),
+                          (IOVBufferType.data, False, value[header_len:data_end]),
+                          (IOVBufferType.trailer, False, value[data_end:]),
+                          std_layout=False)
+                try:
+                    gssapi.raw.unwrap_iov(context, iov)
+                except Exception:
+                    continue
+                plain = iov[1].value
+                break
+            if plain is not None:
+                break
+        if plain is None:
+            raise RuntimeError("unable to derive GSS IOV layout")
+        emit("plain", plain)
 `
