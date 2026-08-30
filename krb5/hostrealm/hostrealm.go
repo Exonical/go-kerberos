@@ -287,6 +287,17 @@ func fallbackRealm(ctx context.Context, cfg *config.Config, host string, opts Op
 	if cfg.RealmTryDomainsSet {
 		limit = cfg.RealmTryDomains
 	}
+	realmExists := opts.RealmExists
+	if realmExists == nil {
+		realmExists = func(ctx context.Context, realm string) bool {
+			resolver, ok := opts.Resolver.(discovery.Resolver)
+			if !ok {
+				resolver = discovery.NetResolver{}
+			}
+			servers, err := discovery.Discover(ctx, resolver, realm)
+			return err == nil && len(servers) > 0
+		}
+	}
 	upper := strings.ToUpper(strings.TrimSuffix(host, "."))
 	suffix := upper
 	for limit >= 0 {
@@ -294,7 +305,7 @@ func fallbackRealm(ctx context.Context, cfg *config.Config, host string, opts Op
 		if dot < 0 {
 			break
 		}
-		if opts.RealmExists != nil && opts.RealmExists(ctx, suffix) {
+		if realmExists(ctx, suffix) {
 			return suffix, true
 		}
 		suffix = suffix[dot+1:]

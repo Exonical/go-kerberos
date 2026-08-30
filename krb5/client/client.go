@@ -1475,9 +1475,6 @@ func (c *Client) resolveServiceRealm(ctx context.Context, service principal.Prin
 			return "", false, err
 		}
 		if realm != "" {
-			if !authoritative && c.Config != nil && c.Config.DefaultRealm != "" {
-				return c.Config.DefaultRealm, false, nil
-			}
 			return realm, authoritative, nil
 		}
 	}
@@ -1511,7 +1508,8 @@ func (c *Client) serviceCandidates(ctx context.Context, service principal.Princi
 
 func isUnknownServiceError(err error) bool {
 	var kerberosError *krberrors.KRBError
-	return errors.As(err, &kerberosError) && kerberosError.Code == 7
+	return errors.As(err, &kerberosError) &&
+		kerberosError.Code == krberrors.KDCErrSPrincipalUnknown
 }
 
 func isReferralPrincipal(value protocol.PrincipalName, requested principal.Principal) bool {

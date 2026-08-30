@@ -35,6 +35,8 @@ const (
 	KDCErrPreauthExpired ErrorCode = 90
 	// KDCErrEtypeNosp is KDC_ERR_ETYPE_NOSUPP.
 	KDCErrEtypeNosp ErrorCode = 14
+	// KDCErrSPrincipalUnknown is KDC_ERR_S_PRINCIPAL_UNKNOWN.
+	KDCErrSPrincipalUnknown ErrorCode = 7
 	// KRBAPErrBadIntegrity is KRB_AP_ERR_BAD_INTEGRITY.
 	KRBAPErrBadIntegrity ErrorCode = 31
 	// KRBAPErrSkew is KRB_AP_ERR_SKEW.

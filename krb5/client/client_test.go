@@ -730,7 +730,7 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
 		}),
 	}
-	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service"}}
 	var realms []string
 	exchange := func(_ context.Context, realm string, payload []byte) ([]byte, error) {
 		realms = append(realms, realm)
@@ -748,7 +748,8 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 		return makeTGSReply(t, profile, referralKey, request.ReqBody.Nonce, now, bytes.Repeat([]byte{0x33}, profile.KeySize()),
 			"OTHER", principal.Principal{Realm: "OTHER", NameType: principal.NTSrvHst, Components: service.Components}), nil
 	}
-	result, err := (&Client{Config: &config.Config{DefaultRealm: "HOME"}, Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(context.Background(), tgt, service)
+	result, err := (&Client{Config: &config.Config{DefaultRealm: "HOME"},
+		Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(context.Background(), tgt, service)
 	if err != nil {
 		t.Fatalf("TGS referral: %v", err)
 	}
@@ -774,6 +775,22 @@ func TestServiceRealmUsesHostMapping(t *testing.T) {
 	realm, mapped = ServiceRealm(cfg, service)
 	if realm != "EXPLICIT" || !mapped {
 		t.Fatalf("explicit service realm = %q, mapped = %v", realm, mapped)
+	}
+}
+
+func TestResolveServiceRealmPrefersFallbackRealm(t *testing.T) {
+	client := &Client{Config: &config.Config{
+		DefaultRealm: "DEFAULT.TEST", RealmTryDomainsSet: true, RealmTryDomains: -1,
+	}}
+	service := principal.Principal{
+		NameType: principal.NTSrvHst, Components: []string{"host", "a.b"},
+	}
+	realm, authoritative, err := client.resolveServiceRealm(context.Background(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realm != "B" || authoritative {
+		t.Fatalf("fallback realm = %q, authoritative=%v", realm, authoritative)
 	}
 }
 
