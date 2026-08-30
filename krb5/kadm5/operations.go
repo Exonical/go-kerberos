@@ -17,6 +17,18 @@ func (c *Client) ModifyPrincipal(ctx context.Context, entry PrincipalEntry, mask
 	return c.genericCall(ctx, modifyPrincipal, body.bytes())
 }
 
+// CreatePrincipal3 creates a principal using explicit key/salt tuples.
+func (c *Client) CreatePrincipal3(ctx context.Context, entry PrincipalEntry, mask int32,
+	tuples []KeySaltTuple, password string) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	writeEntry(&body, entry, mask)
+	body.i32(mask)
+	writeKeySaltTuples(&body, tuples)
+	body.nullString(password)
+	return c.genericCall(ctx, createPrincipal3, body.bytes())
+}
+
 // RenamePrincipal renames src to dest.
 func (c *Client) RenamePrincipal(ctx context.Context, src, dest principal.Principal) error {
 	body := xdrWriter{}
@@ -53,6 +65,80 @@ func (c *Client) RandKey(ctx context.Context, p principal.Principal) ([]Key, err
 		return nil, err
 	}
 	return keys, nil
+}
+
+// RandKey3 changes keys using explicit key/salt tuples.
+func (c *Client) RandKey3(ctx context.Context, p principal.Principal, keepOld bool,
+	tuples []KeySaltTuple) ([]Key, error) {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.boolean(keepOld)
+	writeKeySaltTuples(&body, tuples)
+	reply, err := c.call(ctx, chrandPrincipal3, body.bytes())
+	if err != nil {
+		return nil, err
+	}
+	r, api, code, err := statusReader(reply)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkReplyAPI(api, c.API); err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, operationError("CHRAND_PRINCIPAL3", code)
+	}
+	keys, err := readKeys(&r)
+	if err != nil {
+		return nil, err
+	}
+	return keys, r.done()
+}
+
+// SetKeyPrincipalLegacy replaces keys using the legacy keyblock procedure.
+func (c *Client) SetKeyPrincipalLegacy(ctx context.Context, p principal.Principal, keys []Key) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.u32(uint32(len(keys)))
+	for _, key := range keys {
+		writeKeyBlock(&body, key)
+	}
+	return c.genericCall(ctx, setkeyPrincipal, body.bytes())
+}
+
+// SetKey3 replaces keys using explicit tuples and keep-old semantics.
+func (c *Client) SetKey3(ctx context.Context, p principal.Principal, keepOld bool,
+	tuples []KeySaltTuple, keys []Key) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.boolean(keepOld)
+	writeKeySaltTuples(&body, tuples)
+	body.u32(uint32(len(keys)))
+	for _, key := range keys {
+		writeKeyBlock(&body, key)
+	}
+	return c.genericCall(ctx, setkeyPrincipal3, body.bytes())
+}
+
+// PurgeKeys removes keys other than keepKVNO.
+func (c *Client) PurgeKeys(ctx context.Context, p principal.Principal, keepKVNO int32) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.i32(keepKVNO)
+	return c.genericCall(ctx, purgeKeys, body.bytes())
+}
+
+// CreateAlias maps alias to an existing canonical principal.
+func (c *Client) CreateAlias(ctx context.Context, alias, target principal.Principal) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(alias)
+	body.principal(target)
+	return c.genericCall(ctx, createAlias, body.bytes())
 }
 
 func readKeys(r *xdrReader) ([]Key, error) {
@@ -459,7 +545,7 @@ func writePolicy(w *xdrWriter, policy Policy, api uint32) {
 		w.i32(policy.Attributes)
 		w.i32(policy.MaxTicketLife)
 		w.i32(policy.MaxRenewableLife)
-		w.nullString("")
+		w.nullString(policy.AllowedKeySalts)
 		w.i16(0)
 		w.boolean(true)
 	}
@@ -471,6 +557,19 @@ func writeKeyData(w *xdrWriter, key KeyData) {
 	w.opaque(key.Key)
 	w.i16(key.SaltType)
 	w.opaque(key.Salt)
+}
+
+func writeKeySaltTuples(w *xdrWriter, tuples []KeySaltTuple) {
+	w.u32(uint32(len(tuples)))
+	for _, tuple := range tuples {
+		w.i32(tuple.Enctype)
+		w.i32(tuple.SaltType)
+	}
+}
+
+func writeKeyBlock(w *xdrWriter, key Key) {
+	w.i32(key.Enctype)
+	w.opaque(key.Key)
 }
 
 func readPolicy(r *xdrReader, api uint32) (Policy, error) {
@@ -533,9 +632,11 @@ func readPolicy(r *xdrReader, api uint32) (Policy, error) {
 		if err != nil {
 			return Policy{}, err
 		}
-		if _, err := r.nullString(); err != nil {
+		allowed, err := r.nullString()
+		if err != nil {
 			return Policy{}, err
 		}
+		policy.AllowedKeySalts = allowed
 		if _, err := r.i16(); err != nil {
 			return Policy{}, err
 		}

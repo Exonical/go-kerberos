@@ -341,11 +341,67 @@ func knownProcedure(proc uint32) bool {
 		renamePrincipal, getPrincipal, chpassPrincipal, chpassPrincipal3, chrandPrincipal,
 		createPolicy, deletePolicy, modifyPolicy, getPolicy, getPrivs,
 		getPrincs, getPolicies, getStrings, setString, setkeyPrincipal4,
-		extractKeys:
+		extractKeys, createPrincipal3, chrandPrincipal3, setkeyPrincipal,
+		setkeyPrincipal3, purgeKeys, createAlias:
 		return true
 	default:
 		return false
 	}
+}
+
+func readKeySaltTuples(r *xdrReader) ([]KeySaltTuple, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	if n > 1024 {
+		return nil, errors.New("kadm5: oversized key-salt tuple array")
+	}
+	out := make([]KeySaltTuple, n)
+	for i := range out {
+		out[i].Enctype, err = r.i32()
+		if err != nil {
+			return nil, err
+		}
+		out[i].SaltType, err = r.i32()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func readKeyBlocks(r *xdrReader) ([]kdb.Key, error) {
+	n, err := r.u32()
+	if err != nil {
+		return nil, err
+	}
+	if n > 1<<16 {
+		return nil, errors.New("kadm5: oversized keyblock array")
+	}
+	out := make([]kdb.Key, n)
+	for i := range out {
+		out[i].Enctype, err = r.i32()
+		if err != nil {
+			return nil, err
+		}
+		out[i].Key, err = r.opaque()
+		if err != nil {
+			return nil, err
+		}
+		if len(out[i].Key) == 0 {
+			return nil, errors.New("kadm5: empty keyblock")
+		}
+	}
+	return out, nil
+}
+
+func toKDBKeySaltTuples(in []KeySaltTuple) []kdb.KeySaltTuple {
+	out := make([]kdb.KeySaltTuple, len(in))
+	for i, tuple := range in {
+		out[i] = kdb.KeySaltTuple{Enctype: tuple.Enctype, SaltType: tuple.SaltType}
+	}
+	return out
 }
 
 func nowUTC() time.Time           { return time.Now().UTC() }
@@ -476,6 +532,60 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		_ = s.runHooks(HookPostCommit, event)
 		_ = mask
 		return status(0)
+	case createPrincipal3:
+		entry, err := decodeEntry(&r, api)
+		if err != nil {
+			return status(43787548)
+		}
+		mask, err := r.i32()
+		if err != nil {
+			return status(43787548)
+		}
+		tuples, err := readKeySaltTuples(&r)
+		if err != nil {
+			return status(43787548)
+		}
+		password, err := r.nullString()
+		if err != nil || r.done() != nil {
+			return status(43787548)
+		}
+		if !s.authorize(client, "create", entry.Principal) {
+			return status(authAdd)
+		}
+		policyName := ""
+		if mask&KADM5Policy != 0 && mask&KADM5PolicyClear == 0 {
+			policyName = entry.Policy
+		}
+		if policyName != "" {
+			policy, policyErr := s.Database.GetPolicy(policyName)
+			if policyErr != nil {
+				return status(kdbCode(policyErr))
+			}
+			if qualityErr := checkPolicy(password, &policy); qualityErr != nil {
+				return status(kdbCode(qualityErr))
+			}
+		}
+		if qualityErr := s.checkPasswordQuality(password, policyName, entry.Principal); qualityErr != nil {
+			return status(kdbCode(qualityErr))
+		}
+		event := HookEvent{Operation: "create", Principal: entry.Principal, Entry: entry,
+			Mask: mask, Password: password}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.CreatePrincipalWithKeySalts(formatPrincipal(entry.Principal),
+			password, toKDBKeySaltTuples(tuples))
+		if err == nil && mask&KADM5Policy != 0 {
+			policy := policyName
+			if mask&KADM5PolicyClear != 0 {
+				policy = ""
+			}
+			err = s.Database.SetPrincipalPolicy(entry.Principal, policy)
+		}
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case deletePrincipal:
 		p, err := readPrincipal()
 		if err != nil || r.done() != nil {
@@ -636,6 +746,98 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 			w.opaque(key.Key)
 		}
 		return w.bytes()
+	case chrandPrincipal3:
+		p, err := readPrincipal()
+		if err != nil {
+			return status(43787548)
+		}
+		keepOld, err := r.boolean()
+		if err != nil {
+			return status(43787548)
+		}
+		tuples, err := readKeySaltTuples(&r)
+		if err != nil || r.done() != nil {
+			return status(43787548)
+		}
+		if !s.authorize(client, "change-password", p) {
+			return status(authChangePass)
+		}
+		keys, err := s.Database.RandomizeKeysWithKeySalts(p, keepOld, toKDBKeySaltTuples(tuples))
+		if err != nil {
+			return status(kdbCode(err))
+		}
+		w := xdrWriter{}
+		w.raw(status(0))
+		w.u32(uint32(len(keys)))
+		for _, key := range keys {
+			w.i32(key.Enctype)
+			w.opaque(key.Key)
+		}
+		return w.bytes()
+	case setkeyPrincipal, setkeyPrincipal3:
+		p, err := readPrincipal()
+		if err != nil {
+			return status(43787548)
+		}
+		keepOld := false
+		var tuples []KeySaltTuple
+		if proc == setkeyPrincipal3 {
+			keepOld, err = r.boolean()
+			if err != nil {
+				return status(43787548)
+			}
+			tuples, err = readKeySaltTuples(&r)
+			if err != nil {
+				return status(43787548)
+			}
+		}
+		keys, err := readKeyBlocks(&r)
+		if err != nil || r.done() != nil {
+			return status(43787548)
+		}
+		if !s.authorize(client, "set-key", p) {
+			return status(authSetKey)
+		}
+		_ = tuples
+		err = s.Database.SetKeys(p, keys, keepOld)
+		return status(kdbCode(err))
+	case purgeKeys:
+		p, err := readPrincipal()
+		if err != nil {
+			return status(43787548)
+		}
+		keepKVNO, err := r.i32()
+		if err != nil || r.done() != nil {
+			return status(43787548)
+		}
+		if !s.authorize(client, "purgekeys", p) {
+			return status(authModify)
+		}
+		return status(kdbCode(s.Database.PurgeKeys(p, keepKVNO)))
+	case createAlias:
+		alias, err := readPrincipal()
+		if err != nil {
+			return status(43787548)
+		}
+		target, err := readPrincipal()
+		if err != nil || r.done() != nil {
+			return status(43787548)
+		}
+		if !strings.EqualFold(alias.Realm, target.Realm) {
+			return status(43787549)
+		}
+		if !s.authorize(client, "add-alias", alias) {
+			return status(authAdd)
+		}
+		event := HookEvent{Operation: "alias", Principal: alias, NewPrincipal: target}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.AddAlias(formatPrincipal(alias), formatPrincipal(target))
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case getPrincs:
 		expr, err := r.nullString()
 		if err != nil || r.done() != nil {
@@ -655,6 +857,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
+		if proc == modifyPolicy && !validPolicyMask(mask, api) {
+			return status(43787548)
+		}
 		if !s.authorize(client, map[uint32]string{createPolicy: "create-policy", modifyPolicy: "modify-policy"}[proc], principal.Principal{}) {
 			return status(authAdd)
 		}
@@ -665,7 +870,11 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 			old, getErr := s.Database.GetPolicy(policy.Name)
 			if getErr == nil {
 				applyPolicy(&old, kp, mask)
-				err = s.Database.UpdatePolicy(old)
+				if !validateModifiedPolicy(old, mask) {
+					err = errors.New("kadm5: invalid policy values")
+				} else {
+					err = s.Database.UpdatePolicy(old)
+				}
 			} else {
 				err = getErr
 			}
@@ -933,14 +1142,16 @@ func policyRecord(p Policy) kdb.PolicyRecord {
 	return kdb.PolicyRecord{Name: p.Name, MinLife: p.MinLife, MaxLife: p.MaxLife, MinLength: p.MinLength,
 		MinClasses: p.MinClasses, HistoryNum: p.HistoryNum, MaxFailure: p.MaxFailure,
 		FailureCountInterval: p.FailureCountInterval, LockoutDuration: p.LockoutDuration,
-		Attributes: p.Attributes, MaxTicketLife: p.MaxTicketLife, MaxRenewableLife: p.MaxRenewableLife}
+		Attributes: p.Attributes, MaxTicketLife: p.MaxTicketLife, MaxRenewableLife: p.MaxRenewableLife,
+		AllowedKeySalts: p.AllowedKeySalts}
 }
 
 func policyValue(p kdb.PolicyRecord) Policy {
 	return Policy{Name: p.Name, MinLife: p.MinLife, MaxLife: p.MaxLife, MinLength: p.MinLength,
 		MinClasses: p.MinClasses, HistoryNum: p.HistoryNum, MaxFailure: p.MaxFailure,
 		FailureCountInterval: p.FailureCountInterval, LockoutDuration: p.LockoutDuration,
-		Attributes: p.Attributes, MaxTicketLife: p.MaxTicketLife, MaxRenewableLife: p.MaxRenewableLife}
+		Attributes: p.Attributes, MaxTicketLife: p.MaxTicketLife, MaxRenewableLife: p.MaxRenewableLife,
+		AllowedKeySalts: p.AllowedKeySalts}
 }
 
 func applyPolicy(dst *kdb.PolicyRecord, src kdb.PolicyRecord, mask int32) {
@@ -977,6 +1188,52 @@ func applyPolicy(dst *kdb.PolicyRecord, src kdb.PolicyRecord, mask int32) {
 	if mask&KADM5PolicyMaxRenewableLife != 0 {
 		dst.MaxRenewableLife = src.MaxRenewableLife
 	}
+	if mask&KADM5PolicyAllowedKeysalts != 0 {
+		dst.AllowedKeySalts = src.AllowedKeySalts
+	}
+}
+
+func validPolicyMask(mask int32, api uint32) bool {
+	allowed := KADM5PWMaxLife | KADM5PWMinLife | KADM5PWMinLength |
+		KADM5PWMinClasses | KADM5PWHistoryNum | KADM5RefCount
+	if api >= APIv3 {
+		allowed |= KADM5PWMaxFailure | KADM5PWFailureCountInterval |
+			KADM5PWLockoutDuration
+	}
+	if api >= APIv4 {
+		allowed |= KADM5PolicyAttributes | KADM5PolicyMaxLife |
+			KADM5PolicyMaxRenewableLife | KADM5PolicyAllowedKeysalts |
+			KADM5PolicyTLData
+	}
+	return mask&KADM5Policy == 0 && mask&^allowed == 0
+}
+
+func validateModifiedPolicy(policy kdb.PolicyRecord, mask int32) bool {
+	if mask&KADM5PWMinLife != 0 && policy.MinLife < 0 {
+		return false
+	}
+	if mask&KADM5PWMaxLife != 0 && policy.MaxLife < 0 {
+		return false
+	}
+	if policy.MaxLife != 0 && policy.MinLife > policy.MaxLife {
+		return false
+	}
+	if mask&KADM5PWMinLength != 0 && policy.MinLength < 1 {
+		return false
+	}
+	if mask&KADM5PWMinClasses != 0 && (policy.MinClasses < 1 || policy.MinClasses > 5) {
+		return false
+	}
+	if mask&KADM5PWHistoryNum != 0 && policy.HistoryNum < 1 {
+		return false
+	}
+	if mask&KADM5PWFailureCountInterval != 0 && policy.FailureCountInterval < 0 {
+		return false
+	}
+	if mask&KADM5PWLockoutDuration != 0 && policy.LockoutDuration < 0 {
+		return false
+	}
+	return true
 }
 
 func (s *Server) listPrincipals(expr string) []string {

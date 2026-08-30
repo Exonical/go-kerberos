@@ -162,7 +162,8 @@ type HookEvent struct {
 	KeepOld      bool
 }
 
-// Kadm5Hook receives principal mutation lifecycle events.
+// Kadm5Hook receives principal mutation lifecycle events. Alias creation uses
+// the operation name "alias" and populates NewPrincipal with its target.
 type Kadm5Hook interface {
 	Name() string
 	Handle(HookEvent) error
