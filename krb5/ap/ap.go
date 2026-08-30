@@ -44,9 +44,18 @@ type APReqState = APReq
 // APReqOptions controls optional authenticator fields when building AP-REQs.
 type APReqOptions struct {
 	Checksum *protocol.Checksum
+	// SubKey supplies an authenticator subkey. If nil, one is generated.
+	SubKey *protocol.EncryptionKey
 	// NoSubKey omits the authenticator subkey. Some protocols, including MIT
 	// kprop, use the ticket session key for the authenticated context.
 	NoSubKey bool
+}
+
+// AuthenticatorChecksumExtension identifies an extension carried in the
+// RFC 4121 authenticator checksum. Extensions use a big-endian ID and length.
+type AuthenticatorChecksumExtension struct {
+	ID    uint32
+	Value []byte
 }
 
 // VerifiedAPReq is the acceptor state associated with a verified AP-REQ.
@@ -121,7 +130,12 @@ func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now 
 	now = now.UTC()
 	cusec := int32(now.Nanosecond() / 1000)
 	var subkey *protocol.EncryptionKey
-	if !options.NoSubKey {
+	if options.SubKey != nil {
+		if options.SubKey.KeyType != creds.Key.KeyType {
+			return nil, nil, fmt.Errorf("build AP-REQ subkey: enctype mismatch")
+		}
+		subkey = copyEncryptionKeyPointer(options.SubKey)
+	} else if !options.NoSubKey {
 		subkeyValue := make([]byte, etype.KeySize())
 		if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
 			return nil, nil, fmt.Errorf("build AP-REQ subkey: %w", err)
