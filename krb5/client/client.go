@@ -433,7 +433,8 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		}
 		var retryPA protocol.PAData
 		if challengePA := preauth.FindPAData(fastReply.PAData, preauth.PADataEncryptedChallenge); challengePA != nil {
-			retryPA, err = preauth.BuildEncryptedChallenge(armor.EType, armor.Key, clientKey, now)
+			retryPA, err = preauth.BuildEncryptedChallengeWithKeyEType(
+				armor.EType, armor.Key, etype, clientKey, now)
 		} else {
 			retryPA, err = preauth.BuildEncryptedTimestamp(etype, clientKey, now, 0)
 		}
@@ -574,8 +575,12 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 		return nil, err
 	}
 	if challengePA := preauth.FindPAData(fastReply.PAData, preauth.PADataEncryptedChallenge); challengePA != nil {
-		if err := preauth.VerifyEncryptedChallengeReply(armor.EType, armor.Key, key,
-			challengePA.PADataValue); err != nil {
+		clientEType, err := crypto.NewRegistry().Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		if err := preauth.VerifyEncryptedChallengeReplyWithKeyEType(
+			armor.EType, armor.Key, clientEType, key, challengePA.PADataValue); err != nil {
 			return nil, fmt.Errorf("FAST AS exchange encrypted challenge: %w", err)
 		}
 	}

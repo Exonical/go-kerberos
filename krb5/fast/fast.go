@@ -235,14 +235,19 @@ func (a *Armor) ReplyKey(reply protocol.EncryptionKey, strengthen *protocol.Encr
 	if strengthen == nil {
 		return protocol.EncryptionKey{KeyType: reply.KeyType, KeyValue: append([]byte(nil), reply.KeyValue...)}, nil
 	}
-	if strengthen.KeyType != reply.KeyType || strengthen.KeyType != a.EType.ID() {
+	if strengthen.KeyType != a.EType.ID() {
 		return protocol.EncryptionKey{}, fmt.Errorf("FAST reply: strengthen key enctype mismatch")
 	}
-	key, err := crypto.CF2(a.EType, strengthen.KeyValue, reply.KeyValue, []byte("strengthenkey"), []byte("replykey"))
+	replyEType, err := crypto.NewRegistry().Get(reply.KeyType)
+	if err != nil {
+		return protocol.EncryptionKey{}, fmt.Errorf("FAST reply key enctype: %w", err)
+	}
+	key, err := crypto.CF2WithKeyEType(a.EType, strengthen.KeyValue,
+		replyEType, reply.KeyValue, []byte("strengthenkey"), []byte("replykey"))
 	if err != nil {
 		return protocol.EncryptionKey{}, fmt.Errorf("FAST reply key: %w", err)
 	}
-	return protocol.EncryptionKey{KeyType: reply.KeyType, KeyValue: key}, nil
+	return protocol.EncryptionKey{KeyType: a.EType.ID(), KeyValue: key}, nil
 }
 
 func principalProtocol(value principal.Principal) *protocol.PrincipalName {
