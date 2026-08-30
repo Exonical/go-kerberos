@@ -4,6 +4,7 @@ package mit_test
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -72,7 +73,7 @@ func TestMITIAKERBInitiatorAgainstGo(t *testing.T) {
 	}
 	var ctx *gssapi.Context
 	for step := 0; step < 16 && len(token) != 0; step++ {
-		nextContext, reply, err := acceptor.Accept(token, now)
+		nextContext, reply, err := acceptor.Accept(context.Background(), token, now)
 		if err != nil {
 			t.Fatalf("Go IAKERB acceptor step %d: %v", step, err)
 		}

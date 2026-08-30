@@ -415,6 +415,10 @@ conversation checksum uses key usage 41 and the authenticator subkey.
 Unit coverage includes header and finished DER goldens, malformed framing,
 conversation checksum tamper detection, cookie-preserving proxy tokens, and
 existing-ticket AP handoff. The proxy uses the configured Go KDC transport.
+IAKERB credential delegation is explicitly rejected because delegation is not
+implemented yet. The acceptor is single-conversation and can restrict proxy
+realms with an explicit allowlist; without one it proxies only realms in its
+KDC client configuration.
 The live MIT initiator gate uses `python3-gssapi` raw credentials acquired
 with a password and selects mechanism OID `1.3.6.1.5.2.5`; it proxies AS/TGS
 traffic through the Go acceptor and verifies a Go `Wrap`/MIT `Unwrap`

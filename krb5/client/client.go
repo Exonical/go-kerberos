@@ -1220,6 +1220,26 @@ func (c *Client) BuildTGSRequest(tgt *Credentials, service principal.Principal,
 	return c.newTGSReq(tgt, service, realm, now, false)
 }
 
+// BuildTGSRequestForRealm constructs one step of a possibly cross-realm TGS
+// exchange. The caller supplies the KDC realm and whether referrals should be
+// requested.
+func (c *Client) BuildTGSRequestForRealm(tgt *Credentials, service principal.Principal,
+	realm string, referral bool, now time.Time) (protocol.TGSReq, uint32, error) {
+	return c.newTGSReq(tgt, service, realm, now, referral)
+}
+
+// DecodeTGSResponseForExchange decodes one TGS exchange and reports whether
+// the response is a referral ticket that requires another proxy step.
+func (c *Client) DecodeTGSResponseForExchange(data []byte, tgt *Credentials,
+	service, requestedService principal.Principal, mapped bool, nonce uint32,
+	now time.Time) (*Credentials, bool, error) {
+	if tgt == nil {
+		return nil, false, fmt.Errorf("TGS response: nil TGT")
+	}
+	return c.decodeTGSRepForExchange(data, tgt.Client, service, requestedService,
+		mapped, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+}
+
 // DecodeTGSResponse validates and decrypts a TGS-REP.
 func (c *Client) DecodeTGSResponse(data []byte, tgt *Credentials,
 	service principal.Principal, nonce uint32, now time.Time) (*Credentials, error) {

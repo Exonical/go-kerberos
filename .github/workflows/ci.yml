@@ -18,11 +18,8 @@ jobs:
           go-version: '1.27.x'
       - run: go build ./...
       - run: go vet ./...
-      # The implementation is intentionally RED at this stage. Compile all
-      # tests without running the unimplemented behavior; this gate flips to
-      # the full suite when implementation work starts.
       - if: runner.os == 'Linux'
-        run: go test -count=1 -run '^$' ./...
+        run: go test -count=1 ./...
 
   race:
     name: race (compile-only)
@@ -32,7 +29,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
-      - run: go test -race -count=1 -run '^$' ./...
+      - run: go test -race -count=1 ./...
 
   vet:
     name: vet
@@ -52,9 +49,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
-      # Fuzz execution is deferred until the corresponding implementations
-      # exist; this confirms every fuzz package and seed compiles.
-      - run: go test -count=1 -run '^$' ./...
+      - run: go test -count=1 ./...
 
   interop-mit:
     name: interop-mit (iprop)

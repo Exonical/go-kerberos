@@ -86,7 +86,8 @@ deployments; upstream MIT krb5 does not apply this gate.
   unencrypted KRB-CRED forms are accepted.
 - **IAKERB GSS mechanism** (MIT-compatible): proxy-token realm discovery,
   password/TGT/service-ticket initiation, KDC proxying, and IAKERB-FINISHED
-  conversation integrity before the normal Kerberos GSS context.
+  conversation integrity before the normal Kerberos GSS context. Delegation
+  is rejected until IAKERB credential forwarding is implemented.
 - **SPNEGO** (RFC 4178): Kerberos mechanism negotiation with the modern and
   Microsoft legacy Kerberos OIDs, mechListMIC exchange, and transparent
   Kerberos GSS Wrap/MIC access after establishment. Live MIT-backed gates cover

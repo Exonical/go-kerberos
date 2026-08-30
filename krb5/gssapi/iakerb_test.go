@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,37 @@ func TestIAKERBProxyTokenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIAKERBRealmDiscoveryUsesEmptyPayload(t *testing.T) {
+	initiator, err := NewIAKERBInitiator(&client.Client{},
+		principal.Principal{Components: []string{"alice"}}, principal.Principal{
+			Realm: "TEST.REALM", Components: []string{"host", "service"},
+		}, "password", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := initiator.Step(nil, time.Unix(1700002200, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, payload, err := parseIAKERBProxyToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.TargetRealm != "" || len(payload) != 0 {
+		t.Fatalf("discovery token = %#v, %x", header, payload)
+	}
+}
+
+func TestIAKERBRejectsDelegation(t *testing.T) {
+	_, err := NewIAKERBInitiator(&client.Client{},
+		principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		principal.Principal{Realm: "TEST.REALM", Components: []string{"host", "service"}},
+		"password", GSSDelegFlag)
+	if err == nil || !strings.Contains(err.Error(), "delegation") {
+		t.Fatalf("delegation result = %v", err)
+	}
+}
+
 func TestIAKERBRejectsMalformedProxyTokens(t *testing.T) {
 	token, err := BuildIAKERBProxyToken("TEST.REALM", nil, []byte{0x30, 0x00})
 	if err != nil {
@@ -117,7 +149,7 @@ func TestIAKERBProxyRealmDiscoveryAndForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, reply, err := acceptor.Accept(discovery, time.Unix(1700002200, 0)); err != nil {
+	if _, reply, err := acceptor.Accept(context.Background(), discovery, time.Unix(1700002200, 0)); err != nil {
 		t.Fatal(err)
 	} else {
 		header, payload, err := parseIAKERBProxyToken(reply)
@@ -134,7 +166,7 @@ func TestIAKERBProxyRealmDiscoveryAndForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, reply, err := acceptor.Accept(proxy, time.Unix(1700002200, 0)); err != nil {
+	if _, reply, err := acceptor.Accept(context.Background(), proxy, time.Unix(1700002200, 0)); err != nil {
 		t.Fatal(err)
 	} else {
 		header, payload, err := parseIAKERBProxyToken(reply)
@@ -146,6 +178,37 @@ func TestIAKERBProxyRealmDiscoveryAndForwarding(t *testing.T) {
 			!bytes.Equal(payload, []byte{0x30, 0x00}) {
 			t.Fatalf("forwarding = %q %x, reply = %#v %x", forwardedRealm, forwarded, header, payload)
 		}
+	}
+}
+
+func TestIAKERBAcceptorRealmAllowlistAndContext(t *testing.T) {
+	credentials, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	type contextKey string
+	key := contextKey("seen")
+	var seen any
+	kdc := &client.Client{Exchange: func(ctx context.Context, realm string, request []byte) ([]byte, error) {
+		seen = ctx.Value(key)
+		return []byte{0x30, 0x00}, nil
+	}}
+	acceptor, err := NewIAKERBAcceptor(kt, kdc, credentials.Server.Realm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := []byte{0x30, 0x01, 0x00}
+	proxy, err := BuildIAKERBProxyToken("OTHER.REALM", nil, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), key, "passed")
+	if _, _, err := acceptor.Accept(ctx, proxy, time.Unix(1700002200, 0)); err == nil {
+		t.Fatal("unconfigured realm unexpectedly proxied")
+	}
+	acceptor.AllowedRealms = []string{"OTHER.REALM"}
+	if _, _, err := acceptor.Accept(ctx, proxy, time.Unix(1700002200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if seen != "passed" {
+		t.Fatalf("proxy context = %#v", seen)
 	}
 }
 
@@ -168,7 +231,7 @@ func TestIAKERBExistingCredentialsHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	acceptCtx, reply, err := acceptor.Accept(token, now)
+	acceptCtx, reply, err := acceptor.Accept(context.Background(), token, now)
 	if err != nil {
 		t.Fatal(err)
 	}

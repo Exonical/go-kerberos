@@ -179,26 +179,36 @@ func buildIAKERBAuthenticatorChecksum(flags uint32, finished []byte) *protocol.C
 // IAKERBInitiator performs the stepwise proxy exchange and then hands the
 // resulting AP exchange to the normal Kerberos GSS mechanism.
 type IAKERBInitiator struct {
-	KDC          *client.Client
-	Password     string
-	Client       principal.Principal
-	Target       principal.Principal
-	TGT          *client.Credentials
-	Service      *client.Credentials
-	Flags        uint32
-	state        int
-	request      protocol.ASReq
-	nonce        uint32
-	tgsRequest   *protocol.TGSReq
-	tgsNonce     uint32
-	etype        int32
-	key          []byte
-	realm        string
-	cookie       []byte
-	context      *Context
-	apState      *ap.APReq
-	conversation []byte
-	discovery    bool
+	KDC                 *client.Client
+	Password            string
+	Client              principal.Principal
+	Target              principal.Principal
+	TGT                 *client.Credentials
+	Service             *client.Credentials
+	Flags               uint32
+	state               int
+	request             protocol.ASReq
+	nonce               uint32
+	tgsRequest          *protocol.TGSReq
+	tgsNonce            uint32
+	tgsRealm            string
+	tgsCurrentRealm     string
+	tgsService          principal.Principal
+	tgsRequestedService principal.Principal
+	tgsMapped           bool
+	tgsCross            bool
+	tgsPath             []string
+	tgsPathIndex        int
+	tgsReferralHops     int
+	tgsVisited          map[string]bool
+	etype               int32
+	key                 []byte
+	realm               string
+	cookie              []byte
+	context             *Context
+	apState             *ap.APReq
+	conversation        []byte
+	discovery           bool
 }
 
 const (
@@ -214,6 +224,9 @@ func NewIAKERBInitiator(kdc *client.Client, clientPrincipal, target principal.Pr
 	if kdc == nil || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("IAKERB initiator: incomplete credentials")
 	}
+	if flags&GSSDelegFlag != 0 {
+		return nil, fmt.Errorf("IAKERB initiator: credential delegation is not supported")
+	}
 	return &IAKERBInitiator{
 		KDC: kdc, Password: password, Client: clientPrincipal, Target: target,
 		Flags: flags, state: iakerbStateAS, realm: clientPrincipal.Realm,
@@ -227,6 +240,9 @@ func NewIAKERBInitiatorWithCredentials(tgt, service *client.Credentials,
 	target principal.Principal, flags uint32) (*IAKERBInitiator, error) {
 	if service == nil && (tgt == nil || len(tgt.Ticket) == 0) {
 		return nil, fmt.Errorf("IAKERB initiator: missing credentials")
+	}
+	if flags&GSSDelegFlag != 0 {
+		return nil, fmt.Errorf("IAKERB initiator: credential delegation is not supported")
 	}
 	var clientPrincipal principal.Principal
 	if service != nil {
@@ -246,6 +262,49 @@ func (i *IAKERBInitiator) SetKDC(kdc *client.Client) {
 	if i != nil {
 		i.KDC = kdc
 	}
+}
+
+func (i *IAKERBInitiator) initTGSPath() error {
+	if i.tgsRealm != "" {
+		return nil
+	}
+	realm, mapped := client.ServiceRealm(i.KDC.Config, i.Target)
+	if realm == "" {
+		realm = i.Target.Realm
+	}
+	currentRealm := i.TGT.Server.Realm
+	if currentRealm == "" {
+		currentRealm = i.TGT.Client.Realm
+	}
+	if realm == "" {
+		realm = currentRealm
+	}
+	if realm == "" || currentRealm == "" {
+		return fmt.Errorf("IAKERB initiator: missing TGS realm")
+	}
+	i.tgsRealm, i.tgsMapped = realm, mapped
+	i.tgsRequestedService = i.Target
+	i.tgsService = i.Target
+	i.tgsService.Realm = realm
+	i.tgsPath = []string{currentRealm}
+	i.tgsPathIndex = 1
+	i.tgsVisited = map[string]bool{strings.ToUpper(currentRealm): true}
+	if !strings.EqualFold(currentRealm, realm) {
+		i.tgsPath = []string{currentRealm, realm}
+		if i.KDC.Config != nil {
+			path, configured, err := i.KDC.Config.RealmPath(currentRealm, realm)
+			if err != nil {
+				return fmt.Errorf("IAKERB initiator: %w", err)
+			}
+			if configured {
+				i.tgsPath = path
+			}
+		}
+		if len(i.tgsPath) < 2 || len(i.tgsPath) > 11 {
+			return fmt.Errorf("IAKERB initiator: invalid capath")
+		}
+	}
+	return nil
 }
 
 // Step advances the IAKERB exchange. An empty input starts the exchange.
@@ -347,25 +406,77 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 			if i.KDC == nil {
 				return nil, fmt.Errorf("IAKERB initiator: KDC client required for TGT start")
 			}
-			if i.tgsRequest == nil {
-				request, nonce, err := i.KDC.BuildTGSRequest(i.TGT, i.Target, now)
+			if len(response) != 0 {
+				result, referral, err := i.KDC.DecodeTGSResponseForExchange(
+					response, i.TGT, i.tgsService, i.tgsRequestedService,
+					i.tgsMapped, i.tgsNonce, now)
 				if err != nil {
 					return nil, err
 				}
-				i.tgsRequest = &request
-				i.tgsNonce = nonce
-				if i.Target.Realm == "" {
-					i.Target.Realm = request.ReqBody.Realm
+				if i.tgsCross {
+					if referral || len(result.Server.Components) != 2 ||
+						result.Server.Components[0] != "krbtgt" ||
+						!strings.EqualFold(result.Server.Components[1], i.tgsPath[i.tgsPathIndex]) ||
+						!strings.EqualFold(result.Server.Realm, i.tgsCurrentRealm) {
+						return nil, fmt.Errorf("IAKERB initiator: malformed cross-realm TGT")
+					}
+					i.TGT = result
+					i.tgsPathIndex++
+				} else if referral {
+					if i.tgsReferralHops >= 10 || len(result.Server.Components) != 2 ||
+						result.Server.Components[0] != "krbtgt" {
+						return nil, fmt.Errorf("IAKERB initiator: referral hop limit exceeded")
+					}
+					nextRealm := result.Server.Components[1]
+					if nextRealm == "" || strings.EqualFold(nextRealm, i.tgsRealm) ||
+						i.tgsVisited[strings.ToUpper(nextRealm)] {
+						return nil, fmt.Errorf("IAKERB initiator: referral realm loop")
+					}
+					i.TGT, i.tgsRealm = result, nextRealm
+					i.tgsReferralHops++
+					i.tgsVisited[strings.ToUpper(nextRealm)] = true
+				} else {
+					i.Service = result
 				}
+				i.tgsRequest = nil
 			}
-			if len(input) == 0 && len(response) == 0 {
+			if i.Service == nil {
+				if i.tgsRequest == nil {
+					if err := i.initTGSPath(); err != nil {
+						return nil, err
+					}
+					var request protocol.TGSReq
+					var nonce uint32
+					if i.tgsPathIndex < len(i.tgsPath) {
+						i.tgsCurrentRealm = i.tgsPath[i.tgsPathIndex-1]
+						nextRealm := i.tgsPath[i.tgsPathIndex]
+						i.tgsService = principal.Principal{
+							Realm: i.tgsCurrentRealm, NameType: principal.NTSrvInstance,
+							Components: []string{"krbtgt", nextRealm},
+						}
+						i.tgsRequestedService = i.tgsService
+						i.tgsRequestedService.Realm = nextRealm
+						i.tgsMapped, i.tgsCross = true, true
+						request, nonce, err = i.KDC.BuildTGSRequestForRealm(
+							i.TGT, i.tgsService, i.tgsCurrentRealm, false, now)
+					} else {
+						i.tgsCurrentRealm = i.TGT.Server.Realm
+						i.tgsService = i.Target
+						i.tgsService.Realm = i.tgsRealm
+						i.tgsRequestedService = i.Target
+						i.tgsCross = false
+						referral := i.tgsReferralHops > 0 ||
+							(!i.tgsMapped && i.Target.Realm == "")
+						request, nonce, err = i.KDC.BuildTGSRequestForRealm(
+							i.TGT, i.tgsService, i.tgsRealm, referral, now)
+					}
+					if err != nil {
+						return nil, err
+					}
+					i.tgsRequest, i.tgsNonce = &request, nonce
+				}
 				return i.proxyRequest(i.tgsRequest.ReqBody.Realm, i.cookie, *i.tgsRequest)
 			}
-			service, err := i.KDC.DecodeTGSResponse(response, i.TGT, i.Target, i.tgsNonce, now)
-			if err != nil {
-				return nil, err
-			}
-			i.Service = service
 		}
 		i.state = iakerbStateAP
 	}
@@ -414,9 +525,15 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 }
 
 func (i *IAKERBInitiator) proxyRequest(realm string, cookie []byte, request any) ([]byte, error) {
-	encoded, err := asn1.Marshal(request)
-	if err != nil {
-		return nil, err
+	var encoded []byte
+	if raw, ok := request.([]byte); ok && len(raw) == 0 {
+		encoded = nil
+	} else {
+		var err error
+		encoded, err = asn1.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
 	}
 	token, err := BuildIAKERBProxyToken(realm, cookie, encoded)
 	if err != nil {
@@ -473,6 +590,8 @@ func (i *IAKERBInitiator) Unwrap(token []byte) ([]byte, error) {
 }
 
 // IAKERBAcceptor proxies IAKERB KDC requests and accepts the final AP token.
+// It is single-conversation: each instance owns one transcript, hop counter,
+// and proxy state, so callers must use a separate acceptor per client context.
 type IAKERBAcceptor struct {
 	keytab       *keytab.Keytab
 	KDC          *client.Client
@@ -480,6 +599,9 @@ type IAKERBAcceptor struct {
 	conversation []byte
 	acceptor     *Acceptor
 	hops         int
+	// AllowedRealms restricts proxying to these realms. A nil allowlist
+	// permits only realms configured by the acceptor's KDC client.
+	AllowedRealms []string
 }
 
 // NewIAKERBAcceptor creates an IAKERB proxy backed by a service keytab.
@@ -491,9 +613,12 @@ func NewIAKERBAcceptor(kt *keytab.Keytab, kdc *client.Client, realm string) (*IA
 }
 
 // Accept advances the proxy or final AP exchange.
-func (a *IAKERBAcceptor) Accept(token []byte, now time.Time) (*Context, []byte, error) {
+func (a *IAKERBAcceptor) Accept(callerCtx context.Context, token []byte, now time.Time) (*Context, []byte, error) {
 	if a == nil || a.acceptor == nil {
 		return nil, nil, fmt.Errorf("IAKERB acceptor: incomplete context")
+	}
+	if callerCtx == nil {
+		return nil, nil, fmt.Errorf("IAKERB acceptor: nil context")
 	}
 	if len(token) >= 2 && token[0] == 0x60 {
 		if _, _, err := parseIAKERBProxyToken(token); err == nil {
@@ -522,7 +647,10 @@ func (a *IAKERBAcceptor) Accept(token []byte, now time.Time) (*Context, []byte, 
 			if realm == "" {
 				realm = a.Realm
 			}
-			reply, err := a.KDC.ExchangeRaw(context.Background(), realm, request)
+			if !a.realmAllowed(realm) {
+				return nil, nil, fmt.Errorf("IAKERB KDC proxy: realm unknown")
+			}
+			reply, err := a.KDC.ExchangeRaw(callerCtx, realm, request)
 			if err != nil {
 				code := int32(86)
 				if strings.Contains(err.Error(), "no KDC configured") ||
@@ -551,6 +679,29 @@ func (a *IAKERBAcceptor) Accept(token []byte, now time.Time) (*Context, []byte, 
 		return nil, nil, err
 	}
 	return ctx, reply, nil
+}
+
+func (a *IAKERBAcceptor) realmAllowed(realm string) bool {
+	if a.AllowedRealms != nil {
+		for _, allowed := range a.AllowedRealms {
+			if strings.EqualFold(allowed, realm) {
+				return true
+			}
+		}
+		return false
+	}
+	if strings.EqualFold(realm, a.Realm) {
+		return true
+	}
+	if a.KDC == nil || a.KDC.Config == nil {
+		return false
+	}
+	for configured := range a.KDC.Config.Realms {
+		if strings.EqualFold(configured, realm) {
+			return true
+		}
+	}
+	return false
 }
 
 // MIC and VerifyMIC expose the established acceptor context operations.
