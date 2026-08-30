@@ -302,6 +302,16 @@ exposure; the MIT integration suite covers a live `python3-gssapi`
 delegation exchange against the Go acceptor and verifies the delegated TGT can
 obtain another service ticket.
 
+GSS channel bindings use the RFC 1964 little-endian encoding and MD5 digest in
+the RFC 4121 `0x8003` authenticator checksum. Set
+`gssapi.InitiatorOptions.ChannelBindings` or
+`gssapi.AcceptorOptions.ChannelBindings` to bind a context to initiator and
+acceptor addresses and application data. Matching non-zero bindings set
+`GSS_C_CHANNEL_BOUND_FLAG`; absent or zero bindings retain MIT's tolerant
+acceptor behavior. SPNEGO and IAKERB propagate the option to their Kerberos
+mechanism. The local test suite covers encoding, token placement, matching,
+mismatch, and MIT-compatible absent/zero-binding cases.
+
 RFC 7751 CAMMAC authorization data is available through the `krb5/cammac`
 package. It encodes KDC and service verifiers with checksum key usage 64,
 wraps protected elements in AD-IF-RELEVANT, and verifies service-protected

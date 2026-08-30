@@ -1,10 +1,9 @@
 package gssapi
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -49,13 +48,14 @@ var kerberosOldOID = []byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01
 
 // Initiator establishes a Kerberos GSS security context.
 type Initiator struct {
-	creds         *client.Credentials
-	tgt           *client.Credentials
-	forwarded     *client.Credentials
-	delegationKDC *client.Client
-	flags         uint32
-	state         *ap.APReq
-	ctx           *Context
+	creds           *client.Credentials
+	tgt             *client.Credentials
+	forwarded       *client.Credentials
+	delegationKDC   *client.Client
+	channelBindings *ChannelBindings
+	flags           uint32
+	state           *ap.APReq
+	ctx             *Context
 }
 
 // Acceptor accepts Kerberos GSS security contexts using a service keytab.
@@ -63,6 +63,7 @@ type Acceptor struct {
 	keytab          *keytab.Keytab
 	replayCache     rcache.Cache
 	replayCacheName string
+	channelBindings *ChannelBindings
 }
 
 // AcceptorOptions controls optional replay-cache selection for GSS
@@ -70,6 +71,15 @@ type Acceptor struct {
 type AcceptorOptions struct {
 	ReplayCache     rcache.Cache
 	ReplayCacheName string
+	ChannelBindings *ChannelBindings
+}
+
+// ErrBadBindings identifies channel bindings which do not match.
+var ErrBadBindings = errors.New("GSS channel bindings mismatch")
+
+// InitiatorOptions controls optional GSS context establishment behavior.
+type InitiatorOptions struct {
+	ChannelBindings *ChannelBindings
 }
 
 // Context is an established Kerberos GSS security context.
@@ -85,10 +95,19 @@ type Context struct {
 
 // NewInitiator creates an initiator for the supplied service credentials.
 func NewInitiator(creds *client.Credentials, flags uint32) (*Initiator, error) {
+	return NewInitiatorWithOptions(creds, flags, InitiatorOptions{})
+}
+
+// NewInitiatorWithOptions creates an initiator with optional channel bindings.
+func NewInitiatorWithOptions(creds *client.Credentials, flags uint32, options InitiatorOptions) (*Initiator, error) {
 	if creds == nil || len(creds.Ticket) == 0 || len(creds.Key.KeyValue) == 0 {
 		return nil, fmt.Errorf("GSS initiator: incomplete credentials")
 	}
-	return &Initiator{creds: creds, flags: flags}, nil
+	return &Initiator{
+		creds:           creds,
+		flags:           flags,
+		channelBindings: cloneChannelBindings(options.ChannelBindings),
+	}, nil
 }
 
 // NewInitiatorWithDelegation creates an initiator which requests credential
@@ -153,6 +172,21 @@ func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Accepto
 		keytab:          kt,
 		replayCache:     options.ReplayCache,
 		replayCacheName: options.ReplayCacheName,
+		channelBindings: cloneChannelBindings(options.ChannelBindings),
+	}
+}
+
+// SetChannelBindings supplies the bindings expected from the peer.
+func (a *Acceptor) SetChannelBindings(bindings *ChannelBindings) {
+	if a != nil {
+		a.channelBindings = cloneChannelBindings(bindings)
+	}
+}
+
+// SetChannelBindings supplies the bindings to include in the initial token.
+func (i *Initiator) SetChannelBindings(bindings *ChannelBindings) {
+	if i != nil {
+		i.channelBindings = cloneChannelBindings(bindings)
 	}
 }
 
@@ -164,7 +198,12 @@ func (i *Initiator) InitialToken(now time.Time) ([]byte, error) {
 // InitialTokenContext creates the RFC 2743 initial context token using ctx
 // for any KDC exchange needed to obtain delegated credentials.
 func (i *Initiator) InitialTokenContext(ctx context.Context, now time.Time) ([]byte, error) {
-	return i.initialToken(ctx, now, false, nil)
+	var channelBindings []byte
+	if i != nil && i.channelBindings != nil {
+		sum := ChecksumChannelBindings(i.channelBindings)
+		channelBindings = sum[:]
+	}
+	return i.initialToken(ctx, now, false, channelBindings)
 }
 
 // InitialTokenWithChannelBindings creates an initial token bound to the
@@ -177,23 +216,13 @@ func (i *Initiator) InitialTokenWithChannelBindings(now time.Time, initiatorAddr
 // token using ctx for any KDC exchange needed to obtain delegated
 // credentials.
 func (i *Initiator) InitialTokenWithChannelBindingsContext(ctx context.Context, now time.Time, initiatorAddress, acceptorAddress []byte) ([]byte, error) {
-	var binding bytes.Buffer
-	var addressType [4]byte
-	binary.LittleEndian.PutUint32(addressType[:], 2)
-	binding.Write(addressType[:])
-	writeAddress := func(address []byte) {
-		var length [4]byte
-		binary.LittleEndian.PutUint32(length[:], uint32(len(address)))
-		binding.Write(length[:])
-		binding.Write(address)
-	}
-	writeAddress(initiatorAddress)
-	binding.Write(addressType[:])
-	writeAddress(acceptorAddress)
-	var zero [4]byte
-	binding.Write(zero[:])
-	sum := md5.Sum(binding.Bytes())
-	return i.initialToken(ctx, now, false, sum[:])
+	i.SetChannelBindings(&ChannelBindings{
+		InitiatorAddrType: 2,
+		InitiatorAddress:  initiatorAddress,
+		AcceptorAddrType:  2,
+		AcceptorAddress:   acceptorAddress,
+	})
+	return i.InitialTokenContext(ctx, now)
 }
 
 func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool, channelBindings []byte) ([]byte, error) {
@@ -253,7 +282,7 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 	i.ctx = &Context{
 		key:       contextKey(state.SessionKey, state.SubKey),
 		initiator: true,
-		flags:     i.flags,
+		flags:     i.flags | channelBoundFlag(i.channelBindings),
 		sendSeq:   sequenceValue(state.SeqNumber),
 	}
 	if legacy {
@@ -317,6 +346,9 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	if err != nil {
 		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
 	}
+	if err := verifyChannelBindings(verified.Checksum, a.channelBindings); err != nil {
+		return nil, principal.Principal{}, nil, err
+	}
 	if conversation != nil {
 		finished, ok, err := checksumFinished(verified.Checksum)
 		if err != nil {
@@ -333,13 +365,17 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 			return nil, principal.Principal{}, nil, err
 		}
 	}
-	flags, delegation, err := checksumData(verified.Checksum)
-	if err != nil {
-		return nil, principal.Principal{}, nil, err
+	var flags uint32
+	var delegation []byte
+	if verified.Checksum != nil && verified.Checksum.ChecksumType == 0x8003 {
+		flags, delegation, err = checksumData(verified.Checksum)
+		if err != nil {
+			return nil, principal.Principal{}, nil, err
+		}
 	}
 	ctx := &Context{
 		key:     contextKey(verified.SessionKey, verified.SubKey),
-		flags:   flags,
+		flags:   flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
 		recvSeq: sequenceValue(verified.SeqNumber),
 	}
 	if len(delegation) != 0 {
