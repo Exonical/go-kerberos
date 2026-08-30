@@ -50,6 +50,28 @@ func TestParseMITConfigSectionsAndOptions(t *testing.T) {
 	}
 }
 
+func TestParseHostRealmOptions(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+qualify_shortname = EXAMPLE.TEST
+dns_canonicalize_hostname = fallback
+realm_try_domains = 2
+rdns = false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.QualifyShortname != "EXAMPLE.TEST" || !cfg.QualifyShortnameSet ||
+		cfg.DNSCanonicalizeHostname != "fallback" || cfg.RealmTryDomains != 2 ||
+		cfg.RDNS || !cfg.RDNSSet {
+		t.Fatalf("hostrealm options = %#v", cfg)
+	}
+	if _, err := Parse([]byte(`[libdefaults]
+dns_canonicalize_hostname = invalid
+`)); err == nil {
+		t.Fatal("invalid dns_canonicalize_hostname accepted")
+	}
+}
+
 func TestParseCamelliaEnctypeAliases(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
     default_realm = TEST.REALM

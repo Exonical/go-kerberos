@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/hostrealm"
 	"github.com/Exonical/go-kerberos/krb5/kkdcp"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -288,6 +289,10 @@ func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principa
 	}
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("AS service exchange: invalid service principal")
+	}
+	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC()
 	if c.Now != nil {
@@ -635,6 +640,10 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("TGS exchange: invalid service principal")
 	}
+	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
+	if err != nil {
+		return nil, err
+	}
 	requestedService := service
 	realm, mapped := ServiceRealm(c.Config, service)
 	if realm == "" {
@@ -781,6 +790,10 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("TGS U2U exchange: invalid service principal")
 	}
+	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
+	if err != nil {
+		return nil, err
+	}
 	realm, _ := ServiceRealm(c.Config, service)
 	if realm == "" {
 		realm = tgt.Server.Realm
@@ -900,6 +913,10 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 	}
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("FAST TGS exchange: invalid service principal")
+	}
+	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
+	if err != nil {
+		return nil, err
 	}
 	realm, _ := ServiceRealm(c.Config, service)
 	if realm == "" {
