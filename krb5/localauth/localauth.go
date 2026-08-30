@@ -5,6 +5,7 @@ package localauth
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -23,6 +24,12 @@ var (
 	ErrBadFormat = errors.New("invalid local authorization rule")
 	// ErrNoCache indicates that a requested identity has no matching cache.
 	ErrNoCache = errors.New("no credential cache for selected principal")
+)
+
+var (
+	openK5Login    = os.Open
+	fileOwner      = fileOwnerUID
+	lookupLocalUID = localUID
 )
 
 // AnameToLocalname translates p using auth_to_local_names and auth_to_local
@@ -221,8 +228,8 @@ func expandSelection(format string, p principal.Principal) (string, error) {
 
 // Kuserok checks whether p may authenticate as localUser using the default
 // local user's .k5login file and auth_to_local fallback.
-func Kuserok(p principal.Principal, localUser string) bool {
-	ok, _ := KuserokWithOptions(nil, p, localUser, KuserokOptions{})
+func Kuserok(cfg *config.Config, p principal.Principal, localUser string) bool {
+	ok, _ := KuserokWithOptions(cfg, p, localUser, KuserokOptions{})
 	return ok
 }
 
@@ -246,17 +253,9 @@ func KuserokWithOptions(cfg *config.Config, p principal.Principal, localUser str
 		if opts.K5LoginPath == "" && opts.K5LoginDirectory == "" && cfg.K5LoginDirectory != "" {
 			opts.K5LoginDirectory = cfg.K5LoginDirectory
 		}
-		if opts.K5LoginPath == "" && opts.K5LoginDirectory == "" {
-			if values := cfg.Options["libdefaults"]["k5login_directory"]; len(values) != 0 {
-				opts.K5LoginDirectory = values[len(values)-1]
-			}
-		}
 		if !opts.AuthoritativeSet {
-			if values := cfg.Options["libdefaults"]["k5login_authoritative"]; len(values) != 0 {
-				opts.K5LoginAuthoritative = strings.EqualFold(values[len(values)-1], "true") ||
-					strings.EqualFold(values[len(values)-1], "yes")
-				opts.AuthoritativeSet = true
-			}
+			opts.K5LoginAuthoritative = cfg.K5LoginAuthoritative
+			opts.AuthoritativeSet = cfg.K5LoginAuthoritativeSet
 		}
 	}
 	authoritative := true
@@ -275,7 +274,7 @@ func KuserokWithOptions(cfg *config.Config, p principal.Principal, localUser str
 			path = filepath.Join(home, ".k5login")
 		}
 	}
-	info, err := os.Stat(path)
+	file, err := openK5Login(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fallbackLocalname(cfg, p, localUser, authoritative)
 	}
@@ -285,18 +284,34 @@ func KuserokWithOptions(cfg *config.Config, p principal.Principal, localUser str
 		}
 		return fallbackLocalname(cfg, p, localUser, false)
 	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		if authoritative {
+			return false, nil
+		}
+		return fallbackLocalname(cfg, p, localUser, false)
+	}
 	if info.Mode().IsDir() {
 		return false, nil
 	}
-	if uid, ok := fileOwnerUID(info); ok && uid != 0 {
-		if expected, uidErr := localUID(localUser); uidErr == nil && uid != expected {
+	uid, ownerKnown := fileOwner(info)
+	if !ownerKnown {
+		if authoritative {
+			return false, nil
+		}
+		return fallbackLocalname(cfg, p, localUser, false)
+	}
+	if uid != 0 {
+		expected, uidErr := lookupLocalUID(localUser)
+		if uidErr != nil || uid != expected {
 			if authoritative {
 				return false, nil
 			}
 			return fallbackLocalname(cfg, p, localUser, false)
 		}
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(file)
 	if err != nil {
 		if authoritative {
 			return false, nil

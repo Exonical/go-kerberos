@@ -26,6 +26,7 @@ type Config struct {
 	DefaultClientKeytabName string
 	K5LoginDirectory        string
 	K5LoginAuthoritative    bool
+	K5LoginAuthoritativeSet bool
 	K5IdentityPath          string
 	KCMSocket               string
 	UDPPreferenceLimit      int
@@ -124,6 +125,7 @@ func Parse(data []byte) (*Config, error) {
 	subsection := ""
 	nestedSubsection := ""
 	pendingSubsection := ""
+	pendingNestedSubsection := ""
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	scanner.Buffer(make([]byte, 1024), maxConfigSize)
 	lineNumber := 0
@@ -134,7 +136,8 @@ func Parse(data []byte) (*Config, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			if subsection != "" || nestedSubsection != "" || pendingSubsection != "" {
+			if subsection != "" || nestedSubsection != "" || pendingSubsection != "" ||
+				pendingNestedSubsection != "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: unclosed subsection", lineNumber)
 			}
 			if !strings.HasSuffix(line, "]") || strings.Count(line, "[") != 1 ||
@@ -151,6 +154,11 @@ func Parse(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("parse krb5.conf line %d: relation before section", lineNumber)
 		}
 		if line == "{" {
+			if pendingNestedSubsection != "" {
+				nestedSubsection = pendingNestedSubsection
+				pendingNestedSubsection = ""
+				continue
+			}
 			if pendingSubsection == "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: unexpected opening brace", lineNumber)
 			}
@@ -181,6 +189,9 @@ func Parse(data []byte) (*Config, error) {
 		if pendingSubsection != "" {
 			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
 		}
+		if pendingNestedSubsection != "" {
+			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
+		}
 		if strings.HasSuffix(value, "{") {
 			if strings.TrimSpace(strings.TrimSuffix(value, "{")) != "" {
 				return nil, fmt.Errorf("parse krb5.conf line %d: malformed subsection", lineNumber)
@@ -197,6 +208,11 @@ func Parse(data []byte) (*Config, error) {
 		}
 		if value == "" {
 			if subsection != "" {
+				if nestedSubsection == "" &&
+					strings.EqualFold(rawKey, "auth_to_local_names") {
+					pendingNestedSubsection = rawKey
+					continue
+				}
 				return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
 			}
 			pendingSubsection = strings.TrimSpace(rawKey)
@@ -207,7 +223,7 @@ func Parse(data []byte) (*Config, error) {
 			return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
 		}
 		if nestedSubsection != "" {
-			addNestedSubsection(cfg, subsection, nestedSubsection, key, values)
+			addNestedSubsection(cfg, subsection, nestedSubsection, rawKey, values)
 			continue
 		}
 		if subsection != "" {
@@ -221,7 +237,7 @@ func Parse(data []byte) (*Config, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("parse krb5.conf: %w", err)
 	}
-	if subsection != "" || pendingSubsection != "" {
+	if subsection != "" || pendingSubsection != "" || pendingNestedSubsection != "" {
 		return nil, fmt.Errorf("parse krb5.conf: unclosed subsection")
 	}
 	return cfg, nil
@@ -364,6 +380,7 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.K5LoginDirectory = value
 		case "k5login_authoritative":
 			cfg.K5LoginAuthoritative = parseBool(value)
+			cfg.K5LoginAuthoritativeSet = true
 		case "k5identity":
 			cfg.K5IdentityPath = value
 		case "kcm_socket":

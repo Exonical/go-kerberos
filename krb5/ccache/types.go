@@ -372,25 +372,42 @@ func SelectForServer(name string, cfg *config.Config, server principal.Principal
 	defer resolved.Close()
 	caches, err := resolved.Collection()
 	if err != nil {
+		for _, cache := range caches {
+			_ = cache.Close()
+		}
 		return nil, principal.Principal{}, err
 	}
+	var selectedCache *Handle
+	defer func() {
+		for _, cache := range caches {
+			if cache != selectedCache {
+				_ = cache.Close()
+			}
+		}
+	}()
 	identityPath := localauth.IdentityPath(cfg)
 	if identityPath == "" {
-		return firstCache(caches)
+		var selectedPrincipal principal.Principal
+		selectedCache, selectedPrincipal, err = firstCache(caches)
+		return selectedCache, selectedPrincipal, err
 	}
 	selected, matched, err := localauth.SelectIdentity(identityPath, server)
 	if err != nil {
 		return nil, principal.Principal{}, err
 	}
 	if !matched {
-		return firstCache(caches)
+		var selectedPrincipal principal.Principal
+		selectedCache, selectedPrincipal, err = firstCache(caches)
+		return selectedCache, selectedPrincipal, err
 	}
 	for _, cache := range caches {
 		value, readErr := cache.Read()
 		if readErr != nil {
+			_ = cache.Close()
 			continue
 		}
 		if principalsEqual(value.DefaultPrincipal, selected) {
+			selectedCache = cache
 			return cache, selected, nil
 		}
 	}

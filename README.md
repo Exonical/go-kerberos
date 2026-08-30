@@ -144,7 +144,9 @@ deployments; upstream MIT krb5 does not apply this gate.
   `auth_to_local`/`auth_to_local_names` translation, `.k5login` authorization
   with `k5login_directory` and `k5login_authoritative`, and `.k5identity`
   service/host/realm matching for selecting a client principal from a ccache
-  collection.
+  collection. The `Kuserok` convenience API accepts the parsed
+  `*config.Config`; `.k5login` ownership must be verifiable as the target
+  user or root before its entries are trusted.
 - **krb5.conf** parsing, MIT-style `[domain_realm]` host mapping, injectable
   DNS TXT realm and URI/SRV **KDC discovery**, UDP/TCP transport with
   response-too-big failover, and HTTPS KDC Proxy routing for `kdc =

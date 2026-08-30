@@ -145,8 +145,9 @@ func TestParseLocalAuthorizationSettings(t *testing.T) {
 [realms]
     EXAMPLE.COM = {
         auth_to_local = RULE:[1:$1](.*)s/^/user-/
-        auth_to_local_names = {
-            alice = deploy
+        auth_to_local_names =
+        {
+            Alice = deploy
         }
     }
 `))
@@ -154,11 +155,12 @@ func TestParseLocalAuthorizationSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.K5LoginDirectory != "/etc/krb5/k5login" ||
-		cfg.K5LoginAuthoritative || cfg.K5IdentityPath != "/tmp/test.k5identity" {
+		cfg.K5LoginAuthoritative || !cfg.K5LoginAuthoritativeSet ||
+		cfg.K5IdentityPath != "/tmp/test.k5identity" {
 		t.Fatalf("local authorization settings = %#v", cfg)
 	}
 	if len(cfg.RealmAuthToLocal["EXAMPLE.COM"]) != 1 ||
-		cfg.RealmAuthToLocalNames["EXAMPLE.COM"]["alice"][0] != "deploy" {
+		cfg.RealmAuthToLocalNames["EXAMPLE.COM"]["Alice"][0] != "deploy" {
 		t.Fatalf("local authorization mappings = %#v/%#v", cfg.RealmAuthToLocal, cfg.RealmAuthToLocalNames)
 	}
 }

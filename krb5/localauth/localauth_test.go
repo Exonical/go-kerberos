@@ -1,6 +1,7 @@
 package localauth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,13 @@ func testPrincipal(t *testing.T, value string) principal.Principal {
 		t.Fatal(err)
 	}
 	return *p
+}
+
+func trustK5LoginOwner(t *testing.T) {
+	t.Helper()
+	original := fileOwner
+	fileOwner = func(os.FileInfo) (uint32, bool) { return 0, true }
+	t.Cleanup(func() { fileOwner = original })
 }
 
 func TestAnameToLocalnameNamesAndRules(t *testing.T) {
@@ -63,6 +71,28 @@ func TestAnameToLocalnameImplicitDefault(t *testing.T) {
 	}
 }
 
+func TestAnameToLocalnamePreservesPrincipalCase(t *testing.T) {
+	cfg, err := config.Parse([]byte(`[libdefaults]
+default_realm = EXAMPLE.COM
+[realms]
+EXAMPLE.COM = {
+  auth_to_local_names = {
+    Alice/Admin = deploy
+  }
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := AnameToLocalname(cfg, testPrincipal(t, "Alice/Admin@EXAMPLE.COM"))
+	if err != nil || got != "deploy" {
+		t.Fatalf("mixed-case explicit name = %q, %v", got, err)
+	}
+	if _, err := AnameToLocalname(cfg, testPrincipal(t, "alice/admin@EXAMPLE.COM")); !errors.Is(err, ErrNoTranslation) {
+		t.Fatalf("lowercase principal unexpectedly matched: %v", err)
+	}
+}
+
 func TestAnameToLocalnameRuleSelectionAndSubstitution(t *testing.T) {
 	cfg := &config.Config{
 		DefaultRealm: "EXAMPLE.COM",
@@ -97,6 +127,7 @@ func TestKuserokK5LoginAndFallback(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".k5login")
 	p := testPrincipal(t, "alice@EXAMPLE.COM")
+	trustK5LoginOwner(t)
 	if err := os.WriteFile(path, []byte(p.String()+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +171,80 @@ func TestKuserokNonAuthoritativeFallsBack(t *testing.T) {
 		KuserokOptions{HomeDir: dir, K5LoginPath: path, K5LoginAuthoritative: false, AuthoritativeSet: true})
 	if err != nil || !ok {
 		t.Fatalf("non-authoritative fallback = %v, %v", ok, err)
+	}
+}
+
+func TestKuserokRejectsUndeterminableOwnership(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".k5login")
+	p := testPrincipal(t, "alice@EXAMPLE.COM")
+	if err := os.WriteFile(path, []byte(p.String()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	originalOwner := fileOwner
+	fileOwner = func(os.FileInfo) (uint32, bool) { return 0, false }
+	defer func() { fileOwner = originalOwner }()
+
+	ok, err := KuserokWithOptions(nil, p, "alice", KuserokOptions{
+		HomeDir: dir, K5LoginPath: path,
+	})
+	if err != nil || ok {
+		t.Fatalf("authoritative unknown owner = %v, %v", ok, err)
+	}
+	cfg := &config.Config{
+		DefaultRealm:     "EXAMPLE.COM",
+		RealmAuthToLocal: map[string][]string{"EXAMPLE.COM": {"DEFAULT"}},
+	}
+	ok, err = KuserokWithOptions(cfg, p, "alice", KuserokOptions{
+		HomeDir: dir, K5LoginPath: path, K5LoginAuthoritative: false, AuthoritativeSet: true,
+	})
+	if err != nil || !ok {
+		t.Fatalf("non-authoritative unknown owner fallback = %v, %v", ok, err)
+	}
+}
+
+func TestKuserokRejectsLocalUIDLookupFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".k5login")
+	p := testPrincipal(t, "alice@EXAMPLE.COM")
+	if err := os.WriteFile(path, []byte(p.String()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	originalOwner, originalUID := fileOwner, lookupLocalUID
+	fileOwner = func(os.FileInfo) (uint32, bool) { return 1234, true }
+	lookupLocalUID = func(string) (uint32, error) { return 0, errors.New("lookup failed") }
+	defer func() {
+		fileOwner, lookupLocalUID = originalOwner, originalUID
+	}()
+
+	ok, err := KuserokWithOptions(nil, p, "alice", KuserokOptions{
+		HomeDir: dir, K5LoginPath: path,
+	})
+	if err != nil || ok {
+		t.Fatalf("authoritative UID lookup failure = %v, %v", ok, err)
+	}
+}
+
+func TestKuserokOpensK5LoginOnce(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".k5login")
+	p := testPrincipal(t, "alice@EXAMPLE.COM")
+	trustK5LoginOwner(t)
+	if err := os.WriteFile(path, []byte(p.String()+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	originalOpen := openK5Login
+	opens := 0
+	openK5Login = func(name string) (*os.File, error) {
+		opens++
+		return os.Open(name)
+	}
+	defer func() { openK5Login = originalOpen }()
+	ok, err := KuserokWithOptions(nil, p, "alice", KuserokOptions{
+		HomeDir: dir, K5LoginPath: path,
+	})
+	if err != nil || !ok || opens != 1 {
+		t.Fatalf("single-descriptor k5login = %v, %v, opens %d", ok, err, opens)
 	}
 }
 
