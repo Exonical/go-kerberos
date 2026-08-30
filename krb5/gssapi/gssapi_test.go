@@ -195,11 +195,42 @@ func TestChannelBindingsAcceptorTolerance(t *testing.T) {
 
 	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
 	now := time.Unix(1700000300, 0).UTC()
-	_, der, err := ap.BuildAPReqWithOptions(creds, 0, now, ap.APReqOptions{})
+	etype, err := crypto.NewRegistry().Get(creds.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := etype.Checksum(creds.Key.KeyValue, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, der, err := ap.BuildAPReqWithOptions(creds, types.APMutualRequired, now,
+		ap.APReqOptions{Checksum: &protocol.Checksum{
+			ChecksumType: crypto.ChecksumHMACSHA196AES256,
+			Checksum:     regular,
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := frameToken([]byte{0x01, 0x00}, der)
+	ctx, _, err := NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings}).Accept(token, now)
+	if err != nil {
+		t.Fatalf("regular checksum with expected bindings: %v", err)
+	}
+	if got, want := ctx.Flags()&(GSSReplayFlag|GSSSequenceFlag|GSSMutualFlag),
+		GSSReplayFlag|GSSSequenceFlag|GSSMutualFlag; got != want {
+		t.Fatalf("regular checksum flags = %#x, want %#x", got, want)
+	}
+	if ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("regular checksum unexpectedly set channel-bound flag")
+	}
+
+	creds, kt = syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now = time.Unix(1700000400, 0).UTC()
+	_, der, err = ap.BuildAPReqWithOptions(creds, 0, now, ap.APReqOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token = frameToken([]byte{0x01, 0x00}, der)
 	if _, _, err := NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings}).Accept(token, now); err != nil {
 		t.Fatalf("missing checksum with expected bindings: %v", err)
 	}

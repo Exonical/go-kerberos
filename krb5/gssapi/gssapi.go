@@ -367,10 +367,30 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	}
 	var flags uint32
 	var delegation []byte
-	if verified.Checksum != nil && verified.Checksum.ChecksumType == 0x8003 {
+	switch {
+	case verified.Checksum == nil:
+		// MIT accepts handcrafted authenticators without a checksum and
+		// assumes that no GSS flags or channel bindings were supplied.
+	case verified.Checksum.ChecksumType == 0x8003:
 		flags, delegation, err = checksumData(verified.Checksum)
 		if err != nil {
 			return nil, principal.Principal{}, nil, err
+		}
+	default:
+		// Non-0x8003 checksums are the regular AP authenticator checksum
+		// form used by some implementations (notably Samba).  Verify it
+		// over the empty input, but do not interpret it as GSS metadata.
+		etype, checksumErr := crypto.NewRegistry().Get(verified.SessionKey.KeyType)
+		if checksumErr != nil {
+			return nil, principal.Principal{}, nil, checksumErr
+		}
+		if checksumErr = etype.VerifyChecksum(verified.SessionKey.KeyValue, 10, nil,
+			verified.Checksum.Checksum); checksumErr != nil {
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS authenticator checksum: %w", checksumErr)
+		}
+		flags = GSSReplayFlag | GSSSequenceFlag
+		if verified.APOptions&types.APMutualRequired != 0 {
+			flags |= GSSMutualFlag
 		}
 	}
 	ctx := &Context{
