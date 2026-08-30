@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"strings"
+	"sync"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -21,6 +24,105 @@ type Entry struct {
 
 type Keytab struct {
 	Entries []Entry
+	mu      *sync.RWMutex
+}
+
+var (
+	memoryMu      sync.Mutex
+	memoryKeytabs = make(map[string]*Keytab)
+	keytabMu      sync.Mutex
+)
+
+// Resolve opens a keytab name. FILE paths and FILE: names are read from disk;
+// MEMORY:name resolves to a process-local keytab which persists for the
+// lifetime of the process and is shared by all resolves of that name.
+func Resolve(name string) (*Keytab, error) {
+	if name == "" {
+		return nil, fmt.Errorf("resolve keytab: empty name")
+	}
+	if strings.HasPrefix(name, "MEMORY:") {
+		residual := strings.TrimPrefix(name, "MEMORY:")
+		if residual == "" {
+			return nil, fmt.Errorf("resolve keytab: empty MEMORY name")
+		}
+		memoryMu.Lock()
+		defer memoryMu.Unlock()
+		if kt := memoryKeytabs[residual]; kt != nil {
+			return kt, nil
+		}
+		kt := &Keytab{mu: &sync.RWMutex{}}
+		memoryKeytabs[residual] = kt
+		return kt, nil
+	}
+	if strings.HasPrefix(name, "FILE:") {
+		name = strings.TrimPrefix(name, "FILE:")
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("resolve keytab: %w", err)
+	}
+	defer file.Close()
+	return Read(file)
+}
+
+// AddEntry adds an entry to a keytab. MEMORY keytabs use this method to
+// publish keys to all handles resolved with the same name.
+func (kt *Keytab) AddEntry(entry Entry) error {
+	if kt == nil {
+		return fmt.Errorf("add keytab entry: nil keytab")
+	}
+	mu := kt.mutex()
+	mu.Lock()
+	kt.Entries = append(kt.Entries, cloneEntry(entry))
+	mu.Unlock()
+	return nil
+}
+
+// RemoveEntry removes matching entries from a keytab.
+func (kt *Keytab) RemoveEntry(entry Entry) error {
+	if kt == nil {
+		return fmt.Errorf("remove keytab entry: nil keytab")
+	}
+	mu := kt.mutex()
+	mu.Lock()
+	defer mu.Unlock()
+	filtered := kt.Entries[:0]
+	for _, candidate := range kt.Entries {
+		if !entriesEqual(candidate, entry) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	kt.Entries = filtered
+	return nil
+}
+
+func (kt *Keytab) mutex() *sync.RWMutex {
+	keytabMu.Lock()
+	defer keytabMu.Unlock()
+	if kt.mu == nil {
+		kt.mu = &sync.RWMutex{}
+	}
+	return kt.mu
+}
+
+func cloneEntry(entry Entry) Entry {
+	entry.Principal.Components = append([]string(nil), entry.Principal.Components...)
+	entry.Key = append([]byte(nil), entry.Key...)
+	return entry
+}
+
+func entriesEqual(left, right Entry) bool {
+	if !principalEqual(left.Principal, right.Principal) ||
+		left.Timestamp != right.Timestamp || left.KVNO != right.KVNO ||
+		left.Enctype != right.Enctype || len(left.Key) != len(right.Key) {
+		return false
+	}
+	for i := range left.Key {
+		if left.Key[i] != right.Key[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func Read(r io.Reader) (*Keytab, error) {
@@ -38,7 +140,7 @@ func Read(r io.Reader) (*Keytab, error) {
 		return nil, fmt.Errorf("read keytab: unsupported version")
 	}
 
-	kt := &Keytab{}
+	kt := &Keytab{mu: &sync.RWMutex{}}
 	offset := 2
 	for offset < len(data) {
 		if len(data)-offset < 4 {

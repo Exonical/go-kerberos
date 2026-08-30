@@ -148,9 +148,13 @@ deployments; upstream MIT krb5 does not apply this gate.
 
 ### Formats and configuration
 - MIT **FILE keytab** (v2) reader/writer, byte-compatible with `ktutil`.
+- Process-local named **MEMORY keytabs** (`MEMORY:name`) with shared,
+  mutex-protected entries and GSS default-acceptor integration.
 - MIT **FILE ccache** (v4) reader/writer, byte-compatible with `klist`.
 - MIT **DIR** ccache collections (primary switching and subsidiary caches) and
   process-local **MEMORY** ccaches with collection resolution.
+- Linux **KEYRING** ccaches (`KEYRING:{session|user|process|thread}:name`) use
+  kernel keyrings and the MIT FILE ccache v4 credential encoding.
 - Heimdal/MIT-compatible **KCM** ccaches over Linux Unix-domain sockets,
   including cache replacement, retrieval, collection enumeration, KDC
   offsets, and the MIT `GET_CRED_LIST`/`REPLACE` extensions. The default

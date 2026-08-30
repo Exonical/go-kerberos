@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -204,5 +205,66 @@ func TestReadMITGeneratedKeytabFixture(t *testing.T) {
 	}
 	if _, err := Read(bytes.NewReader(data)); err != nil {
 		t.Fatalf("Read MIT-generated keytab: %v", err)
+	}
+}
+
+func TestMemoryKeytabResolveSharesEntries(t *testing.T) {
+	name := "MEMORY:go-keytab-test"
+	first, err := Resolve(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Entries = nil
+	if len(first.Entries) != 0 {
+		t.Fatal("new MEMORY keytab was not empty")
+	}
+	entry := Entry{
+		Principal: principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"host", "service"}},
+		Timestamp: 1, KVNO: 2, Enctype: 17, Key: []byte{1, 2, 3},
+	}
+	if err := first.AddEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Resolve(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(second.Entries) != 1 ||
+		!entriesEqual(second.Entries[0], entry) {
+		t.Fatalf("shared MEMORY keytab = %#v", second.Entries)
+	}
+	if err := second.RemoveEntry(entry); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries) != 0 {
+		t.Fatal("MEMORY keytab removal was not shared")
+	}
+}
+
+func TestMemoryKeytabConcurrentResolve(t *testing.T) {
+	const workers = 32
+	results := make(chan *Keytab, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			kt, err := Resolve("MEMORY:go-keytab-concurrent-test")
+			if err != nil {
+				t.Errorf("Resolve: %v", err)
+				return
+			}
+			results <- kt
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var first *Keytab
+	for kt := range results {
+		if first == nil {
+			first = kt
+		} else if first != kt {
+			t.Fatal("concurrent MEMORY resolves returned different keytabs")
+		}
 	}
 }

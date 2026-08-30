@@ -19,21 +19,23 @@ import (
 type Type string
 
 const (
-	TypeFile   Type = "FILE"
-	TypeDir    Type = "DIR"
-	TypeMemory Type = "MEMORY"
-	TypeKCM    Type = "KCM"
+	TypeFile    Type = "FILE"
+	TypeDir     Type = "DIR"
+	TypeMemory  Type = "MEMORY"
+	TypeKCM     Type = "KCM"
+	TypeKeyring Type = "KEYRING"
 )
 
 // Handle is a resolved credential cache. DIR handles refer to either a
 // collection (DIR:/path) or one of its subsidiary FILE caches (DIR::/path).
 type Handle struct {
-	typ    Type
-	name   string
-	path   string
-	dir    string
-	memory *memoryCache
-	kcm    *kcmHandle
+	typ     Type
+	name    string
+	path    string
+	dir     string
+	memory  *memoryCache
+	kcm     *kcmHandle
+	keyring *keyringHandle
 }
 
 type memoryCache struct {
@@ -47,9 +49,9 @@ var (
 	memorySequence uint64
 )
 
-// Resolve resolves a FILE, DIR, or MEMORY credential cache name. A name
-// without a type prefix is a FILE cache name, matching MIT's default FILE
-// resolver behavior.
+// Resolve resolves a FILE, DIR, MEMORY, KCM, or platform-supported KEYRING
+// credential cache name. A name without a type prefix is a FILE cache name,
+// matching MIT's default FILE resolver behavior.
 func Resolve(name string) (*Handle, error) {
 	if name == "" {
 		return nil, errors.New("ccache: empty cache name")
@@ -68,6 +70,8 @@ func Resolve(name string) (*Handle, error) {
 		return resolveMemory(strings.TrimPrefix(name, "MEMORY:"))
 	case strings.HasPrefix(name, "KCM:"):
 		return resolveKCM(strings.TrimPrefix(name, "KCM:"))
+	case strings.HasPrefix(name, "KEYRING:"):
+		return resolveKeyring(strings.TrimPrefix(name, "KEYRING:"))
 	default:
 		return nil, fmt.Errorf("ccache: unsupported cache type in %q", name)
 	}
@@ -185,6 +189,9 @@ func (h *Handle) Read() (*Cache, error) {
 	if h.typ == TypeKCM {
 		return h.kcm.read()
 	}
+	if h.typ == TypeKeyring {
+		return h.keyring.read()
+	}
 	file, err := os.Open(h.path)
 	if err != nil {
 		return nil, err
@@ -210,6 +217,9 @@ func (h *Handle) Write(cache *Cache) error {
 	}
 	if h.typ == TypeKCM {
 		return h.kcm.write(cache)
+	}
+	if h.typ == TypeKeyring {
+		return h.keyring.write(cache)
 	}
 	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
