@@ -255,6 +255,25 @@ func TestCredentialAcquisitionKeytabMatching(t *testing.T) {
 	}
 }
 
+func TestAcquireDefaultMemoryAcceptorCredential(t *testing.T) {
+	creds, source := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	name := "MEMORY:go-gss-default-" + creds.Server.String()
+	memory, err := keytab.Resolve(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory.Entries = append([]keytab.Entry(nil), source.Entries...)
+	t.Setenv("KRB5_KTNAME", name)
+	acquired, err := AcquireDefaultAcceptorCredential(&creds.Server)
+	if err != nil {
+		t.Fatalf("acquire default MEMORY acceptor: %v", err)
+	}
+	if acquired.keytab != memory || acquired.name == nil ||
+		acquired.name.String() != creds.Server.String() {
+		t.Fatalf("acquired MEMORY credential = %#v", acquired)
+	}
+}
+
 func TestRestrictedAcceptorChecksNameBeforeReplayCache(t *testing.T) {
 	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
 	now := time.Unix(1700000100, 0).UTC()

@@ -75,9 +75,20 @@ func AcquireAcceptorCredential(kt *keytab.Keytab, name *principal.Principal) (*C
 }
 
 // AcquireAcceptorCredentialFromFile opens an acceptor keytab by path.
+// MEMORY:name paths use the process-local named keytab registry.
 func AcquireAcceptorCredentialFromFile(path string, name *principal.Principal) (*Credential, error) {
 	if path == "" {
 		return nil, fmt.Errorf("GSS acquire acceptor credential: empty keytab path")
+	}
+	if strings.HasPrefix(path, "MEMORY:") {
+		kt, err := keytab.Resolve(path)
+		if err != nil {
+			return nil, fmt.Errorf("GSS acquire acceptor credential: %w", err)
+		}
+		return AcquireAcceptorCredential(kt, name)
+	}
+	if strings.HasPrefix(path, "FILE:") {
+		path = strings.TrimPrefix(path, "FILE:")
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -95,9 +106,6 @@ func AcquireAcceptorCredentialFromFile(path string, name *principal.Principal) (
 // /etc/krb5.keytab.
 func AcquireDefaultAcceptorCredential(name *principal.Principal) (*Credential, error) {
 	path := os.Getenv("KRB5_KTNAME")
-	if strings.HasPrefix(path, "FILE:") {
-		path = strings.TrimPrefix(path, "FILE:")
-	}
 	if path == "" {
 		path = "/etc/krb5.keytab"
 	}

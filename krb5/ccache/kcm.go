@@ -533,6 +533,9 @@ func (h *kcmHandle) write(cache *Cache) error {
 
 // Initialize replaces a KCM cache with a principal and no credentials.
 func (h *Handle) Initialize(p principal.Principal) error {
+	if h != nil && h.typ == TypeKeyring {
+		return h.keyring.initialize(p)
+	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: initialize requires a KCM cache")
 	}
@@ -546,6 +549,9 @@ func (h *Handle) Initialize(p principal.Principal) error {
 
 // Store adds one credential to a KCM cache.
 func (h *Handle) Store(credential Credential) error {
+	if h != nil && h.typ == TypeKeyring {
+		return h.keyring.store(credential)
+	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: store requires a KCM cache")
 	}
@@ -561,6 +567,18 @@ func (h *Handle) Store(credential Credential) error {
 // first asks the daemon for cached credentials, then retries without the
 // KCM_GC_CACHED bit for older daemons.
 func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
+	if h != nil && h.typ == TypeKeyring {
+		cache, err := h.Read()
+		if err != nil {
+			return Credential{}, err
+		}
+		for _, candidate := range cache.Credentials {
+			if credentialMatches(candidate, match, flags) {
+				return candidate, nil
+			}
+		}
+		return Credential{}, errors.New("ccache: KEYRING credential not found")
+	}
 	if h == nil || h.typ != TypeKCM {
 		return Credential{}, errors.New("ccache: retrieve requires a KCM cache")
 	}
@@ -602,6 +620,19 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 
 // Remove removes the first credential matching match and flags.
 func (h *Handle) Remove(match Credential, flags uint32) error {
+	if h != nil && h.typ == TypeKeyring {
+		cache, err := h.Read()
+		if err != nil {
+			return err
+		}
+		for i, candidate := range cache.Credentials {
+			if credentialMatches(candidate, match, flags) {
+				cache.Credentials = append(cache.Credentials[:i], cache.Credentials[i+1:]...)
+				return h.Write(cache)
+			}
+		}
+		return errors.New("ccache: KEYRING credential not found")
+	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: remove requires a KCM cache")
 	}
@@ -618,6 +649,9 @@ func (h *Handle) Remove(match Credential, flags uint32) error {
 
 // Destroy deletes a KCM cache.
 func (h *Handle) Destroy() error {
+	if h != nil && h.typ == TypeKeyring {
+		return h.keyring.destroy()
+	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: destroy requires a KCM cache")
 	}
