@@ -11,6 +11,8 @@ var (
 	ErrNotImplemented = stderrors.New("kerberos: not implemented")
 	// ErrIntegrity identifies a failed Kerberos integrity check.
 	ErrIntegrity = stderrors.New("kerberos integrity check failed")
+	// ErrReplay identifies a replayed authenticated message.
+	ErrReplay = stderrors.New("kerberos replay detected")
 	// ErrClockSkew identifies a timestamp outside the permitted clock skew.
 	ErrClockSkew = stderrors.New("kerberos clock skew")
 	// ErrTicketExpired identifies an expired ticket.

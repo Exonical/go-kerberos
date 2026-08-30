@@ -15,6 +15,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -59,7 +60,16 @@ type Initiator struct {
 
 // Acceptor accepts Kerberos GSS security contexts using a service keytab.
 type Acceptor struct {
-	keytab *keytab.Keytab
+	keytab          *keytab.Keytab
+	replayCache     rcache.Cache
+	replayCacheName string
+}
+
+// AcceptorOptions controls optional replay-cache selection for GSS
+// establishment. The default remains the process-local AP replay cache.
+type AcceptorOptions struct {
+	ReplayCache     rcache.Cache
+	ReplayCacheName string
 }
 
 // Context is an established Kerberos GSS security context.
@@ -134,6 +144,16 @@ func (i *Initiator) SetForwardedCredential(cred *client.Credentials) error {
 // NewAcceptor creates an acceptor backed by a service keytab.
 func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 	return &Acceptor{keytab: kt}
+}
+
+// NewAcceptorWithOptions creates a GSS acceptor with optional AP replay-cache
+// configuration.
+func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Acceptor {
+	return &Acceptor{
+		keytab:          kt,
+		replayCache:     options.ReplayCache,
+		replayCacheName: options.ReplayCacheName,
+	}
 }
 
 // InitialToken creates the RFC 2743 initial context token.
@@ -289,7 +309,11 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	if err != nil {
 		return nil, principal.Principal{}, nil, err
 	}
-	verified, err := ap.VerifyAPReq(a.keytab, inner, now, 5*time.Minute)
+	verified, err := ap.VerifyAPReqWithOptions(a.keytab, inner, now, 5*time.Minute,
+		ap.VerifyAPReqOptions{
+			ReplayCache:     a.replayCache,
+			ReplayCacheName: a.replayCacheName,
+		})
 	if err != nil {
 		return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
 	}

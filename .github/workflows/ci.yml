@@ -65,4 +65,4 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             krb5-kdc krb5-admin-server krb5-user krb5-kdc-ldap \
             krb5-kpropd python3-gssapi
-      - run: go test -tags integration ./integration/mit -run 'TestHarnessSelfTest|TestGoIPROPReplicaAgainstMITMaster|TestMITKpropdAgainstGoIPROPMaster|TestMITIAKERBInitiatorAgainstGo' -count=1 -v
+      - run: go test -tags integration ./integration/mit -run 'TestHarnessSelfTest|TestGoIPROPReplicaAgainstMITMaster|TestMITKpropdAgainstGoIPROPMaster|TestMITIAKERBInitiatorAgainstGo|TestMITFile2ReplayCacheAgainstGo' -count=1 -v

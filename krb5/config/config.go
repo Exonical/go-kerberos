@@ -24,6 +24,7 @@ type Config struct {
 	DefaultCCacheName       string
 	DefaultKeytabName       string
 	DefaultClientKeytabName string
+	DefaultRCacheName       string
 	K5LoginDirectory        string
 	K5LoginAuthoritative    bool
 	K5LoginAuthoritativeSet bool
@@ -376,6 +377,8 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DefaultKeytabName = value
 		case "default_client_keytab_name":
 			cfg.DefaultClientKeytabName = value
+		case "default_rcache_name":
+			cfg.DefaultRCacheName = value
 		case "k5login_directory":
 			cfg.K5LoginDirectory = value
 		case "k5login_authoritative":

@@ -351,9 +351,10 @@ from gssapi.raw.oids import OID
 spnego = OID.from_int_seq((1, 3, 6, 1, 5, 5, 2))
 kerberos = OID.from_int_seq((1, 2, 840, 113554, 1, 2, 2))
 mode, config, cache, keytab, realm = sys.argv[1:]
-if mode == "accept":
+if mode in ("accept", "kerberos-accept"):
     acceptor_name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
-    acceptor_creds = gssapi.Credentials(name=acceptor_name, usage="accept", mechs=[spnego])
+    acceptor_mechs = [kerberos] if mode == "kerberos-accept" else [spnego]
+    acceptor_creds = gssapi.Credentials(name=acceptor_name, usage="accept", mechs=acceptor_mechs)
     ctx = gssapi.SecurityContext(creds=acceptor_creds, usage="accept")
 elif mode == "delegate":
     name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)

@@ -78,7 +78,12 @@ deployments; upstream MIT krb5 does not apply this gate.
   cover both Edwards25519 and P-256; P-384/P-521 are covered by MIT vector
   goldens.
 - **AP exchange**: AP-REQ/AP-REP initiator and acceptor with mutual
-  authentication, subkeys, sequence numbers, and a replay cache.
+  authentication, subkeys, sequence numbers, and replay detection. The
+  default acceptor cache is process-local; `ap.VerifyAPReqWithOptions` can
+  select a persistent MIT-compatible `file2:` cache (or `none:`/`dfl:`).
+  File2 stores use exclusive advisory locking and survive separate verifier
+  processes; the MIT integration harness also verifies that Go detects an AP
+  token recorded by an MIT `python3-gssapi` acceptor.
 - **GSS-API Kerberos mechanism** (RFC 2743/4121): context establishment,
   mutual auth, Wrap (sealed and integrity-only), MIC, RRC rotation, strict
   sequence enforcement, and credential delegation with RFC 4120 KRB-CRED

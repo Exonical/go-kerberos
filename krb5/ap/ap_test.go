@@ -3,6 +3,7 @@ package ap
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -206,6 +208,24 @@ func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 	}
 	if _, err := VerifyAPReq(kt, der, now.Add(time.Minute), 5*time.Minute); err == nil {
 		t.Fatal("VerifyAPReq accepted replayed authenticator")
+	}
+}
+
+func TestVerifyAPReqWithPersistentReplayCache(t *testing.T) {
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &rcache.File2{Path: filepath.Join(t.TempDir(), "replay.rcache2")}
+	if _, err := VerifyAPReqWithOptions(kt, der, now, 5*time.Minute,
+		VerifyAPReqOptions{ReplayCache: cache}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReqWithOptions(kt, der, now, 5*time.Minute,
+		VerifyAPReqOptions{ReplayCache: cache}); !errors.Is(err, krberrors.ErrReplay) {
+		t.Fatalf("second verification error = %v, want replay", err)
 	}
 }
 
@@ -402,14 +422,14 @@ func apFixture(t *testing.T, start, end time.Time) (*client.Credentials, *keytab
 		EncPart: protocol.EncryptedData{EType: apEtype, KVNO: &kvno, Cipher: ticketCipher},
 	}
 	return &client.Credentials{
-			Client: clientPrincipal, Server: service,
-			Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
-			Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
-			StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
-			Ticket: mustMarshalAP(t, ticket),
-		}, &keytab.Keytab{Entries: []keytab.Entry{{
-			Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
-		}}}
+		Client: clientPrincipal, Server: service,
+		Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
+		Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
+		StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
+		Ticket: mustMarshalAP(t, ticket),
+	}, &keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
+	}}}
 }
 
 func encryptTicket(t *testing.T, key []byte, part protocol.EncTicketPart) []byte {

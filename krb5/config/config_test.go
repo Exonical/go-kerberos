@@ -136,6 +136,16 @@ func TestKCMSocketSetting(t *testing.T) {
 	}
 }
 
+func TestDefaultRCacheNameSetting(t *testing.T) {
+	cfg, err := Parse([]byte("[libdefaults]\ndefault_rcache_name = file2:/var/tmp/example.rcache2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultRCacheName != "file2:/var/tmp/example.rcache2" {
+		t.Fatalf("DefaultRCacheName = %q", cfg.DefaultRCacheName)
+	}
+}
+
 func TestParseLocalAuthorizationSettings(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
     default_realm = EXAMPLE.COM
