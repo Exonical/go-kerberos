@@ -67,6 +67,48 @@ TEST.REALM = {
 	}
 }
 
+func TestVerifyInitCredsAutomaticSelectionUsesHostPrincipals(t *testing.T) {
+	realm := testRealm
+	host := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvHst, Components: []string{"host", "verify"},
+	}
+	service := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvInstance, Components: []string{"HTTP", "verify", "extra"},
+	}
+	servers := verifyInitCredsPrincipals(&keytab.Keytab{Entries: []keytab.Entry{
+		{Principal: service}, {Principal: host}, {Principal: host},
+	}}, nil)
+	if len(servers) != 1 || !sameClientPrincipal(servers[0], host) {
+		t.Fatalf("automatic server principals = %#v, want only %s", servers, host)
+	}
+}
+
+func TestVerifyInitCredsNoHostPrincipalsHonorsNoFail(t *testing.T) {
+	clientPrincipal := principal.Principal{
+		Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	creds := &Credentials{
+		Client: clientPrincipal,
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: []byte{1}},
+		Ticket: []byte{1},
+	}
+	kt := &keytab.Keytab{Entries: []keytab.Entry{{Principal: principal.Principal{
+		Realm: testRealm, NameType: principal.NTSrvInstance, Components: []string{"HTTP", "verify"},
+	}}}}
+	client := &Client{}
+	if err := client.VerifyInitCreds(context.Background(), creds, kt, VerifyInitCredsOptions{}); err != nil {
+		t.Fatalf("VerifyInitCreds without nofail = %v, want success", err)
+	}
+	err := client.VerifyInitCreds(context.Background(), creds, kt,
+		VerifyInitCredsOptions{NoFailSet: true, NoFail: true})
+	if err == nil {
+		t.Fatal("VerifyInitCreds with nofail unexpectedly succeeded")
+	}
+	if got := err.Error(); got != "verify initial credentials: no usable keytab entries" {
+		t.Fatalf("VerifyInitCreds with nofail error = %q", got)
+	}
+}
+
 func verifyInitCredsFixture(t *testing.T, now, end time.Time,
 	flags types.TicketFlags) (*Credentials, *keytab.Keytab, principal.Principal) {
 	t.Helper()

@@ -148,7 +148,7 @@ func verifyInitCredsPrincipals(kt *keytab.Keytab, explicit *principal.Principal)
 	}
 	servers := make([]principal.Principal, 0, len(kt.Entries))
 	for _, entry := range kt.Entries {
-		if len(entry.Principal.Components) == 0 {
+		if len(entry.Principal.Components) != 2 || entry.Principal.Components[0] != "host" {
 			continue
 		}
 		found := false
