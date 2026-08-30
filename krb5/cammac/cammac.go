@@ -31,6 +31,10 @@ func checksumType(enctype int32) (int32, error) {
 		return crypto.ChecksumHMACSHA256128AES128, nil
 	case crypto.EnctypeAES256SHA384:
 		return crypto.ChecksumHMACSHA384192AES256, nil
+	case crypto.EnctypeCamellia128:
+		return crypto.ChecksumCMACCamellia128, nil
+	case crypto.EnctypeCamellia256:
+		return crypto.ChecksumCMACCamellia256, nil
 	default:
 		return 0, fmt.Errorf("CAMMAC: unsupported checksum enctype %d", enctype)
 	}

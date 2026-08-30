@@ -1196,7 +1196,7 @@ func (c *Client) requestEnctypes() []int32 {
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
 		return append([]int32(nil), c.Config.DefaultTKTEnctypes...)
 	}
-	return []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
+	return []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256, crypto.EnctypeCamellia256, crypto.EnctypeCamellia128}
 }
 
 func checksumType(etype int32) int32 {
@@ -1209,6 +1209,10 @@ func checksumType(etype int32) int32 {
 		return crypto.ChecksumHMACSHA256128AES128
 	case crypto.EnctypeAES256SHA384:
 		return crypto.ChecksumHMACSHA384192AES256
+	case crypto.EnctypeCamellia128:
+		return crypto.ChecksumCMACCamellia128
+	case crypto.EnctypeCamellia256:
+		return crypto.ChecksumCMACCamellia256
 	default:
 		return 0
 	}
@@ -1282,7 +1286,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 	if c.canonicalizeEnabled() {
 		options |= types.KDCCanonicalize
 	}
-	enctypes := []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
+	enctypes := []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256, crypto.EnctypeCamellia256, crypto.EnctypeCamellia128}
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
 		enctypes = append([]int32(nil), c.Config.DefaultTKTEnctypes...)
 	}

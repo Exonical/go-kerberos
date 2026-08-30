@@ -37,6 +37,25 @@ func TestPRFRFC8009Vectors(t *testing.T) {
 	}
 }
 
+func TestCamelliaRegistry(t *testing.T) {
+	registry := NewRegistry()
+	for _, test := range []struct {
+		id   int32
+		size int
+	}{
+		{EnctypeCamellia128, 16},
+		{EnctypeCamellia256, 32},
+	} {
+		etype, err := registry.Get(test.id)
+		if err != nil {
+			t.Fatalf("registry.Get(%d): %v", test.id, err)
+		}
+		if etype.ID() != test.id || etype.KeySize() != test.size {
+			t.Fatalf("registry.Get(%d) = id %d, size %d", test.id, etype.ID(), etype.KeySize())
+		}
+	}
+}
+
 func TestCF2UsesDistinctPepperInputs(t *testing.T) {
 	etype, err := NewRegistry().Get(EnctypeAES128SHA256)
 	if err != nil {

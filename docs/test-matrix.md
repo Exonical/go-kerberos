@@ -13,6 +13,8 @@ when absent.
 | AES256 SHA1 | RED | RED | RED |
 | AES128 SHA256 | RED | RED | RED |
 | AES256 SHA384 | RED | RED | RED |
+| Camellia128 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; Go client/KDC crypto coverage | MIT client → Go KDC live gate; Go client → MIT KDC requires an MIT KDC build/configuration that accepts Camellia | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors |
+| Camellia256 CTS-CMAC (RFC 6803) | RFC 3713/RFC 6803 vectors; Go client/KDC crypto coverage | MIT client → Go KDC live gate passes; Go client → installed MIT KDC is attempted and skips when it returns KDC_ERR_ETYPE_NOSUPP | RFC 6803 string-to-key, derivation, CMAC, CTS, and round-trip vectors |
 | keytab | RED | RED | RED |
 | FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
 | DIR, MEMORY, and KCM ccache types | Go resolver, DIR primary/collection, MEMORY concurrency, and KCM v2 framing/server tests | MIT KCM test-server round trips and Go KCM server against MIT CLI where available | MIT KCM protocol operations, UUID fallback, default-cache ordering, and `GET_CRED_LIST`/`REPLACE` |
@@ -21,7 +23,7 @@ when absent.
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
-| PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | Conditional MIT `kinit -T` gate when `encrypted_challenge.so` is installed; the current Ubuntu runtime lacks this client/KDC plugin, so the live gate skips; existing Go FAST-to-MIT coverage exercises fallback when MIT does not advertise type 138 | Usage-54/55 CF2 crypto and response verification |
+| PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | MIT `kinit -T` gate with trace coverage; the factor is built into MIT libkrb5 rather than a separate plugin | Usage-54/55 CF2 crypto and response verification |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
@@ -96,8 +98,8 @@ constant, so the one-minute Go default follows the approved hardening design.
 MIT evicts an existing least-recently-started stream when its cap is exceeded;
 the Go listener follows the same newest-connection-preserving behavior.
 
-MIT dump persistence decrypts database key data with AES master-key enctypes
-17, 18, 19, and 20 (AES-SHA1 and AES-SHA2). Go version-7/r1.11 exports include
+MIT dump persistence decrypts database key data with AES and Camellia master-key
+enctypes. Go version-7/r1.11 exports include
 an encrypted `K/M@REALM` record and use the K/M salt from MIT's
 `krb5_principal2salt` rule (`REALMKM`). Dump/parse round trips cover keys,
 KVNOs, salts, flags, expirations, and lifetimes; `LoadWithStash` reads MIT's
@@ -105,7 +107,7 @@ modern keytab-format stash and its legacy binary fallback (legacy entries are
 treated as KVNO 1). The integration gate loads a Go-generated dump with real
 MIT `kdb5_util` and authenticates with `kinit`, and separately loads a real MIT
 dump using the stash created by `kdb5_util create -s`. Go can write a
-keytab-format K/M stash for the supported AES master enctypes; interoperability
+keytab-format K/M stash for the supported AES and Camellia master enctypes; interoperability
 with MIT's stash writer is covered at the keytab byte-semantics level, while
 the live gate covers MIT stash consumption by Go.
 

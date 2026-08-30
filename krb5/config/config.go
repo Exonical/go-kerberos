@@ -396,6 +396,10 @@ func parseEnctypes(values []string) []int32 {
 			result = append(result, 19)
 		case "aes256-cts-hmac-sha384-192":
 			result = append(result, 20)
+		case "camellia128-cts-cmac", "camellia128-cts":
+			result = append(result, 25)
+		case "camellia256-cts-cmac", "camellia256-cts":
+			result = append(result, 26)
 		default:
 			if number, err := strconv.ParseInt(value, 10, 32); err == nil {
 				result = append(result, int32(number))

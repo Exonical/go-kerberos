@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 )
 
 const sampleConfig = `
@@ -45,6 +47,20 @@ func TestParseMITConfigSectionsAndOptions(t *testing.T) {
 	}
 	if len(cfg.Realms) == 0 || len(cfg.DomainRealm) == 0 || len(cfg.Capaths) == 0 {
 		t.Fatalf("sections not parsed: %#v", cfg)
+	}
+}
+
+func TestParseCamelliaEnctypeAliases(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+    default_realm = TEST.REALM
+    permitted_enctypes = camellia128-cts-cmac camellia256-cts
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []int32{crypto.EnctypeCamellia128, crypto.EnctypeCamellia256}
+	if fmt.Sprint(cfg.PermittedEnctypes) != fmt.Sprint(want) {
+		t.Fatalf("enctypes = %v, want %v", cfg.PermittedEnctypes, want)
 	}
 }
 

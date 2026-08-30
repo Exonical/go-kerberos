@@ -638,6 +638,10 @@ func checksumType(id int32) int32 {
 		return crypto.ChecksumHMACSHA256128AES128
 	case crypto.EnctypeAES256SHA384:
 		return crypto.ChecksumHMACSHA384192AES256
+	case crypto.EnctypeCamellia128:
+		return crypto.ChecksumCMACCamellia128
+	case crypto.EnctypeCamellia256:
+		return crypto.ChecksumCMACCamellia256
 	default:
 		return 0
 	}
