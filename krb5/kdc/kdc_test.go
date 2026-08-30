@@ -75,7 +75,7 @@ func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
 		AuthTime: types.KerberosTime{Time: now, Present: true},
 		EndTime:  types.KerberosTime{Time: now.Add(time.Hour), Present: true},
 	}
-	if err := server.issueCAMMAC(&part, serviceKey); err != nil {
+	if err := server.issueCAMMAC(&part, serviceKey, nil); err != nil {
 		t.Fatalf("issueCAMMAC: %v", err)
 	}
 	protected, err := cammac.VerifyService(part.AuthorizationData,
@@ -103,9 +103,58 @@ func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
 	}
 }
 
+func TestServerRejectsMalformedCAMMACTGS(t *testing.T) {
+	now := time.Unix(2000000006, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	var ticket protocol.Ticket
+	if err := asn1.Unmarshal(tgt.Ticket, &ticket); err != nil {
+		t.Fatal(err)
+	}
+	tgtRecord, ok, err := server.DB.Lookup(principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	})
+	if err != nil || !ok {
+		t.Fatalf("TGT lookup: %v, %v", err, ok)
+	}
+	tgtKey := tgtRecord.Keys[ticket.EncPart.EType]
+	etype, err := crypto.NewRegistry().Get(ticket.EncPart.EType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(tgtKey.Key, 2, ticket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var part protocol.EncTicketPart
+	if err := asn1.Unmarshal(plain, &part); err != nil {
+		t.Fatal(err)
+	}
+	part.AuthorizationData = protocol.AuthorizationData{{
+		ADType: protocol.ADIfRelevant, ADData: []byte{0x30, 0x01, 0x00},
+	}}
+	ticket.EncPart.Cipher, err = etype.Encrypt(tgtKey.Key, 2, mustMarshal(t, part))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgt.Ticket = mustMarshal(t, ticket)
+	if _, err := kclient.TGSExchange(context.Background(), tgt, service); err == nil {
+		t.Fatal("TGSExchange accepted malformed CAMMAC")
+	}
+}
+
 func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
 	now := time.Unix(2000000010, 0).UTC()
 	server, kclient := testServer(t, now)
+	server.AuthIndicators = []string{"password"}
 	db := server.DB.(*kdb.Database)
 	if err := db.AddPrincipal("bob", "bob-password", 1); err != nil {
 		t.Fatal(err)
@@ -159,6 +208,10 @@ func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
 	}
 	if !samePrincipal(verified.Client, bob) || !samePrincipal(verified.Server, alice) {
 		t.Fatalf("verified U2U AP-REQ = %#v", verified)
+	}
+	if len(verified.AuthorizationData) != 1 ||
+		verified.AuthorizationData[0].ADType != protocol.ADAuthIndicator {
+		t.Fatalf("U2U CAMMAC elements = %#v", verified.AuthorizationData)
 	}
 	if err := db.AddAlias("alice-alias", "alice"); err != nil {
 		t.Fatal(err)
@@ -795,9 +848,39 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("service AS exchange: %v", err)
 	}
+	server.AuthIndicators = []string{"password"}
 	self, err := kclient.S4U2Self(context.Background(), tgt, user)
 	if err != nil {
 		t.Fatalf("S4U2Self without policy: %v", err)
+	}
+	var selfTicket protocol.Ticket
+	if err := asn1.Unmarshal(self.Ticket, &selfTicket); err != nil {
+		t.Fatal(err)
+	}
+	selfRecord, ok, err := db.Lookup(service)
+	if err != nil || !ok {
+		t.Fatalf("self service lookup: %v", err)
+	}
+	selfKey := selfRecord.Keys[selfTicket.EncPart.EType]
+	selfEType, err := crypto.NewRegistry().Get(selfKey.Enctype)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfPlain, err := selfEType.Decrypt(selfKey.Key, 2, selfTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selfPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(selfPlain, &selfPart); err != nil {
+		t.Fatal(err)
+	}
+	selfKDCKey, ok := server.freshnessKey([]int32{selfTicket.EncPart.EType})
+	if !ok {
+		t.Fatal("self CAMMAC KDC key unavailable")
+	}
+	if err := cammac.VerifyKDC(selfPart.AuthorizationData, selfPart,
+		protocol.EncryptionKey{KeyType: selfKDCKey.Enctype, KeyValue: selfKDCKey.Key}); err != nil {
+		t.Fatalf("S4U2Self CAMMAC verification: %v", err)
 	}
 	if !samePrincipal(self.Client, user) || !samePrincipal(self.Server, service) {
 		t.Fatalf("S4U2Self credentials = %#v", self)
@@ -926,6 +1009,10 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 		pac.Key{EType: backendEType, Key: backendKey.Key},
 		&pac.Key{EType: privEType, Key: privKey.Key}); err != nil {
 		t.Fatalf("S4U2Proxy PAC verification: %v", err)
+	}
+	if _, err := cammac.VerifyService(proxyPart.AuthorizationData,
+		protocol.EncryptionKey{KeyType: backendKey.Enctype, KeyValue: backendKey.Key}); err != nil {
+		t.Fatalf("S4U2Proxy CAMMAC verification: %v", err)
 	}
 	disallowed := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "other.test"}}
 	if err := db.AddPrincipal("host/other.test", "other-password", 1); err != nil {

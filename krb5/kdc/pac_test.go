@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/pac"
@@ -18,6 +19,7 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	now := time.Unix(2000001900, 0).UTC()
 	server, kclient := testServer(t, now)
 	server.EnablePAC = true
+	server.AuthIndicators = []string{"password"}
 	server.GeneratePAC = func(client, service principal.Principal) ([]byte, error) {
 		return []byte{0xaa, 0xbb, 0xcc}, nil
 	}
@@ -64,6 +66,10 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	if !ok || string(data) != string([]byte{0xaa, 0xbb, 0xcc}) {
 		t.Fatalf("logon-info = %x", data)
 	}
+	if _, err := cammac.VerifyService(part.AuthorizationData,
+		protocol.EncryptionKey{KeyType: key.Enctype, KeyValue: key.Key}); err != nil {
+		t.Fatalf("verify AS CAMMAC: %v", err)
+	}
 
 	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	serviceCreds, err := kclient.TGSExchange(context.Background(), creds, service)
@@ -105,7 +111,7 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 		t.Fatal("TGS PAC is missing ticket checksum")
 	}
 	dummyPart := servicePart
-	dummyPart.AuthorizationData, err = pac.AddDummyAuthorizationData(part.AuthorizationData)
+	dummyPart.AuthorizationData, err = pac.AddDummyAuthorizationData(servicePart.AuthorizationData)
 	if err != nil {
 		t.Fatal(err)
 	}

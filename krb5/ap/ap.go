@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -228,11 +229,12 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrIntegrity)
 	}
 	var protectedAuthData protocol.AuthorizationData
-	if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
-		protectedAuthData, err = cammac.VerifyService(ticketPart.AuthorizationData, ticketKey)
-		if err != nil {
-			return nil, fmt.Errorf("verify AP-REQ CAMMAC: %w", err)
-		}
+	protectedAuthData, err = cammac.VerifyService(ticketPart.AuthorizationData, ticketKey)
+	if err != nil && !errors.Is(err, cammac.ErrNotFound) {
+		return nil, fmt.Errorf("verify AP-REQ CAMMAC: %w", err)
+	}
+	if errors.Is(err, cammac.ErrNotFound) {
+		protectedAuthData = nil
 	}
 	if ticketPart.Flags&types.TicketInvalid != 0 {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketInvalid)
