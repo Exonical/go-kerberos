@@ -119,6 +119,10 @@ func (e camelliaEType) Encrypt(key []byte, usage uint32, plaintext []byte) ([]by
 }
 
 func (e camelliaEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) ([]byte, []byte, error) {
+	return e.encryptWithAssociatedData(key, usage, plaintext, iv, nil)
+}
+
+func (e camelliaEType) encryptWithAssociatedData(key []byte, usage uint32, plaintext, iv, associated []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
 		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
 	}
@@ -142,7 +146,8 @@ func (e camelliaEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []b
 	if err != nil {
 		return nil, nil, err
 	}
-	mac, err := camelliaCMACKey(ki, plain)
+	macInput := append(append([]byte(nil), plain...), associated...)
+	mac, err := camelliaCMACKey(ki, macInput)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,6 +160,10 @@ func (e camelliaEType) Decrypt(key []byte, usage uint32, ciphertext []byte) ([]b
 }
 
 func (e camelliaEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte) ([]byte, []byte, error) {
+	return e.decryptWithAssociatedData(key, usage, ciphertext, iv, nil)
+}
+
+func (e camelliaEType) decryptWithAssociatedData(key []byte, usage uint32, ciphertext, iv, associated []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
 		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
 	}
@@ -175,7 +184,8 @@ func (e camelliaEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []
 	if err != nil || len(plain) < camellia.BlockSize {
 		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 	}
-	expected, err := camelliaCMACKey(ki, plain)
+	macInput := append(append([]byte(nil), plain...), associated...)
+	expected, err := camelliaCMACKey(ki, macInput)
 	if err != nil || !hmac.Equal(expected, supplied) {
 		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 	}
@@ -469,6 +479,10 @@ func (e aesEType) Encrypt(key []byte, usage uint32, plaintext []byte) ([]byte, e
 }
 
 func (e aesEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) ([]byte, []byte, error) {
+	return e.encryptWithAssociatedData(key, usage, plaintext, iv, nil)
+}
+
+func (e aesEType) encryptWithAssociatedData(key []byte, usage uint32, plaintext, iv, associated []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
 		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
 	}
@@ -492,8 +506,9 @@ func (e aesEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) 
 	if e.sha2 {
 		macInput = append(make([]byte, 0, 16+len(encrypted)), iv...)
 		macInput = append(macInput, encrypted...)
+		macInput = append(macInput, associated...)
 	} else {
-		macInput = plain
+		macInput = append(append([]byte(nil), plain...), associated...)
 	}
 	mac := hmacDigest(e.hash, ki, macInput)[:e.checksumSize]
 	return append(encrypted, mac...), nextIV, nil
@@ -505,6 +520,10 @@ func (e aesEType) Decrypt(key []byte, usage uint32, ciphertext []byte) ([]byte, 
 }
 
 func (e aesEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte) ([]byte, []byte, error) {
+	return e.decryptWithAssociatedData(key, usage, ciphertext, iv, nil)
+}
+
+func (e aesEType) decryptWithAssociatedData(key []byte, usage uint32, ciphertext, iv, associated []byte) ([]byte, []byte, error) {
 	if err := validateKey(key, e.keySize); err != nil {
 		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
 	}
@@ -526,12 +545,13 @@ func (e aesEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte)
 	if e.sha2 {
 		macInput = append(make([]byte, 0, 16+len(encrypted)), iv...)
 		macInput = append(macInput, encrypted...)
+		macInput = append(macInput, associated...)
 	} else {
 		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)
 		if err != nil {
 			return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
 		}
-		macInput = plain
+		macInput = append(append([]byte(nil), plain...), associated...)
 	}
 	expectedMAC := hmacDigest(e.hash, ki, macInput)[:e.checksumSize]
 	if !hmac.Equal(expectedMAC, suppliedMAC) {
@@ -564,6 +584,37 @@ func DecryptWithIV(etype EType, key []byte, usage uint32, ciphertext, iv []byte)
 		return nil, nil, fmt.Errorf("etype %d does not support cipher state", etype.ID())
 	}
 	return stateful.DecryptWithIV(key, usage, ciphertext, iv)
+}
+
+// EncryptWithAssociatedData performs RFC 3961 encryption while authenticating
+// associated data without including it in the ciphertext.  GSS CFX IOV
+// SIGN_ONLY buffers use this operation.
+func EncryptWithAssociatedData(etype EType, key []byte, usage uint32, plaintext, associated []byte) ([]byte, error) {
+	switch value := etype.(type) {
+	case aesEType:
+		out, _, err := value.encryptWithAssociatedData(key, usage, plaintext, make([]byte, 16), associated)
+		return out, err
+	case camelliaEType:
+		out, _, err := value.encryptWithAssociatedData(key, usage, plaintext, make([]byte, camellia.BlockSize), associated)
+		return out, err
+	default:
+		return nil, fmt.Errorf("etype %d does not support associated data", etype.ID())
+	}
+}
+
+// DecryptWithAssociatedData verifies and decrypts RFC 3961 ciphertext with
+// associated GSS CFX IOV SIGN_ONLY data.
+func DecryptWithAssociatedData(etype EType, key []byte, usage uint32, ciphertext, associated []byte) ([]byte, error) {
+	switch value := etype.(type) {
+	case aesEType:
+		out, _, err := value.decryptWithAssociatedData(key, usage, ciphertext, make([]byte, 16), associated)
+		return out, err
+	case camelliaEType:
+		out, _, err := value.decryptWithAssociatedData(key, usage, ciphertext, make([]byte, camellia.BlockSize), associated)
+		return out, err
+	default:
+		return nil, fmt.Errorf("etype %d does not support associated data", etype.ID())
+	}
 }
 
 func (e aesEType) Checksum(key []byte, usage uint32, data []byte) ([]byte, error) {
@@ -622,6 +673,22 @@ func PRF(etype EType, key, input []byte) ([]byte, error) {
 	digest := sha1.Sum(input)
 	block := digest[:16]
 	return aescts.Encrypt(dkey, make([]byte, 16), block)
+}
+
+// PRFOutputSize returns the native output size of the enctype-specific
+// Kerberos PRF.
+func PRFOutputSize(etype EType) int {
+	switch value := etype.(type) {
+	case aesEType:
+		if value.sha2 {
+			return value.hash().Size()
+		}
+		return 16
+	case camelliaEType:
+		return camellia.BlockSize
+	default:
+		return 0
+	}
 }
 
 // CF2 combines two keys using the RFC 6113 KRB-FX-CF2 construction.
