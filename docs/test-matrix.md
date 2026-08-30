@@ -474,6 +474,25 @@ CI image installs the MIT GSS Python binding. Reverse MIT acceptor/proxy
 interoperability is not enabled.
 SPNEGO remains unchanged: callers select IAKERB directly by mechanism OID.
 
+## Go command-line tools
+
+`cmd/gokdestroy`, `cmd/gokswitch`, `cmd/gokpasswd`, and `cmd/gokutil` provide
+the supported non-interactive Go command surfaces for cache destruction and
+selection, RFC 3244 password changes, and keytab editing. DIR and FILE cache
+operations, password changes against the disposable MIT KDC, and keytabs
+consumed by MIT `klist` and `ktutil` are covered by the integration suite.
+The ccache package also supports MEMORY, KCM, and Linux KEYRING handles where
+the corresponding runtime service is available; collection-wide operations
+are runtime-dependent for those backends. `gokpasswd` uses the available Go
+AS-exchange API and does not yet expose every MIT `get_init_creds` option or
+terminal-specific echo suppression. `gokutil` is intentionally a subcommand
+interface rather than the full MIT interactive command interpreter, and
+supports the enctypes registered by the Go crypto package. A live MIT
+`kinit -kt` gate requires a KDC principal key generated through MIT admin
+operations and is not part of the current command fixture; unsupported MIT
+ktutil fetch/plugin flows and unavailable OS KCM/KEYRING services are skipped
+with these limitations documented rather than silently emulated.
+
 ## MIT fuzz seed corpora
 
 MIT 1.22.2 seed files from `src/tests/fuzzing` are copied verbatim under
