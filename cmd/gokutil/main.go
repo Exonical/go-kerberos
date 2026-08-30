@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -116,6 +119,10 @@ func parseUtilArgs(args []string) (utilOptions, error) {
 	if options.Keytab == "" {
 		return utilOptions{}, errors.New("-k is required")
 	}
+	if strings.Contains(options.Keytab, ":") &&
+		!strings.HasPrefix(options.Keytab, "FILE:") {
+		return utilOptions{}, errors.New("only FILE keytabs are supported")
+	}
 	return options, nil
 }
 
@@ -145,16 +152,42 @@ func listUtilKeytab(path string, stdout io.Writer) error {
 }
 
 func writeUtilKeytab(path string, kt *keytab.Keytab) error {
-	file, err := os.OpenFile(strings.TrimPrefix(path, "FILE:"),
-		os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	path = strings.TrimPrefix(path, "FILE:")
+	var encoded bytes.Buffer
+	if err := keytab.Write(&encoded, kt); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".gokutil-*")
 	if err != nil {
 		return err
 	}
-	if err := keytab.Write(file, kt); err != nil {
+	tempName := file.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tempName)
+		}
+	}()
+	if err := file.Chmod(0600); err != nil {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if _, err := file.Write(encoded.Bytes()); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempName, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func addUtilEntry(options utilOptions, stdin io.Reader) error {
@@ -163,6 +196,9 @@ func addUtilEntry(options utilOptions, stdin io.Reader) error {
 	}
 	if options.PasswordMode && options.Key != "" {
 		return errors.New("-password and -key are mutually exclusive")
+	}
+	if _, err := keytabFilePath(options.Keytab); err != nil {
+		return err
 	}
 	p, err := principal.Parse(options.Principal)
 	if err != nil {
@@ -180,11 +216,12 @@ func addUtilEntry(options utilOptions, stdin io.Reader) error {
 		}
 	} else {
 		fmt.Fprint(os.Stderr, "Password: ")
-		line, readErr := io.ReadAll(stdin)
-		if readErr != nil {
-			return readErr
+		line, readErr := bufio.NewReader(stdin).ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read password: %w", readErr)
 		}
-		password := strings.TrimSpace(string(line))
+		password := strings.TrimSuffix(line, "\n")
+		password = strings.TrimSuffix(password, "\r")
 		if password == "" {
 			return errors.New("password is required")
 		}
@@ -224,7 +261,11 @@ func deleteUtilEntry(options utilOptions) error {
 	if options.Slot < 1 {
 		return errors.New("delent requires -slot")
 	}
-	kt, err := keytab.Resolve(options.Keytab)
+	path, err := keytabFilePath(options.Keytab)
+	if err != nil {
+		return err
+	}
+	kt, err := keytab.Resolve(path)
 	if err != nil {
 		return err
 	}
@@ -239,16 +280,14 @@ func deleteUtilEntry(options utilOptions) error {
 			return err
 		}
 	}
-	file, err := os.OpenFile(strings.TrimPrefix(options.Keytab, "FILE:"),
-		os.O_TRUNC|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
+	return writeUtilKeytab(path, replacement)
+}
+
+func keytabFilePath(path string) (string, error) {
+	if strings.Contains(path, ":") && !strings.HasPrefix(path, "FILE:") {
+		return "", errors.New("only FILE keytabs are supported")
 	}
-	if err := keytab.Write(file, replacement); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	return strings.TrimPrefix(path, "FILE:"), nil
 }
 
 func parseUtilEnctype(value string) (int32, error) {

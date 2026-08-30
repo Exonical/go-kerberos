@@ -491,7 +491,10 @@ supports the enctypes registered by the Go crypto package. A live MIT
 `kinit -kt` gate requires a KDC principal key generated through MIT admin
 operations and is not part of the current command fixture; unsupported MIT
 ktutil fetch/plugin flows and unavailable OS KCM/KEYRING services are skipped
-with these limitations documented rather than silently emulated.
+with these limitations documented rather than silently emulated. `gokutil`
+editing currently accepts only FILE keytabs. Destroying a MEMORY ccache marks
+all existing handles empty; a subsequent write through an old handle creates a
+new cache for that name, while other old handles remain destroyed.
 
 ## MIT fuzz seed corpora
 

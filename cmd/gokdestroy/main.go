@@ -84,14 +84,16 @@ func runDestroy(args []string, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+		var destroyErr error
 		for _, cache := range caches {
 			err := cache.Destroy()
 			_ = cache.Close()
 			if err != nil && !(options.Quiet && errors.Is(err, os.ErrNotExist)) {
 				fmt.Fprintf(stderr, "while destroying cache %s: %v\n", cache.Name(), err)
+				destroyErr = errors.Join(destroyErr, err)
 			}
 		}
-		return nil
+		return destroyErr
 	}
 	if options.Principal != "" {
 		target, err := principal.Parse(options.Principal)
