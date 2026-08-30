@@ -304,6 +304,77 @@ func TestUnwrapIOVStreamStandardSealedNonzeroEC(t *testing.T) {
 	}
 }
 
+func TestCVE202437370RejectsAlteredEncryptedExtraCount(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	token := standardSealedNonzeroECToken(t)
+	altered := reencryptSealedTokenWithEC(t, token, 3, 0)
+	receiver := testPRFContext(key)
+	receiver.initiator = false
+	if _, err := receiver.Unwrap(altered); err == nil {
+		t.Fatal("altered encrypted EC token was accepted")
+	}
+	receiver = testPRFContext(key)
+	receiver.initiator = false
+	if err := receiver.UnwrapIOV([]IOVBuffer{{Type: IOVStream, Buffer: altered}}); err == nil {
+		t.Fatal("altered encrypted EC IOV token was accepted")
+	}
+}
+
+func TestCVE202437371RejectsInvalidRRCAndShortPlaintext(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	altered := standardSealedNonzeroECToken(t)
+	binary.BigEndian.PutUint16(altered[6:8], ^uint16(0))
+	receiver := testPRFContext(key)
+	receiver.initiator = false
+	if _, err := receiver.Unwrap(altered); err == nil {
+		t.Fatal("token with invalid RRC was accepted")
+	}
+
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := messageHeader([]byte{0x05, 0x04}, tokenFlagSealed, 0, 0, 0)
+	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
+	ciphertext, err := etype.Encrypt(key, 24, []byte{0x42})
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	short := append(append([]byte(nil), header...), ciphertext...)
+	receiver = testPRFContext(key)
+	receiver.initiator = false
+	if _, err := receiver.Unwrap(short); err == nil {
+		t.Fatal("short decrypted plaintext token was accepted")
+	}
+}
+
+func reencryptSealedTokenWithEC(t *testing.T, token []byte, outer, inner uint16) []byte {
+	t.Helper()
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := etype.Decrypt(key, 24, token[16:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) < 16 {
+		t.Fatalf("sealed plaintext length = %d", len(plain))
+	}
+	binary.BigEndian.PutUint16(plain[len(plain)-12:], inner)
+	header := append([]byte(nil), token[:16]...)
+	binary.BigEndian.PutUint16(header[4:6], outer)
+	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
+	ciphertext, err := etype.Encrypt(key, 24, plain)
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(header, ciphertext...)
+}
+
 func TestUnwrapIOVStream(t *testing.T) {
 	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
 	sender := testPRFContext(key)

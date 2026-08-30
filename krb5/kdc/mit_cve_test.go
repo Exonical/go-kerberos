@@ -6,8 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestMITCVE20121014MalformedASRequests(t *testing.T) {
@@ -43,6 +46,29 @@ func TestMITBogusKDCRequests(t *testing.T) {
 		_ = server.HandleMessage(mustHex(t, request))
 		assertKDCStillServesAS(t, client)
 	}
+}
+
+func TestMITCVE202137750MissingTGSServerName(t *testing.T) {
+	server, client := testServer(t, time.Unix(2000000000, 0).UTC())
+	request := protocol.TGSReq{
+		PVNO: 5, MsgType: 12,
+		ReqBody: protocol.KDCReqBody{
+			KDCOptions: types.KDCOptions(0),
+			Realm:      "TEST.REALM",
+			Till:       types.KerberosTime{Time: time.Unix(2000003600, 0).UTC(), Present: true},
+			Nonce:      1,
+			EType:      []int32{18},
+		},
+	}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("missing-sname response was not KRB-ERROR: %v", err)
+	}
+	if kerberosError.MsgType != 30 || kerberosError.ErrorCode == 0 {
+		t.Fatalf("missing-sname response = %#v", kerberosError)
+	}
+	assertKDCStillServesAS(t, client)
 }
 
 func TestMITCVE20131416MalformedServiceNames(t *testing.T) {

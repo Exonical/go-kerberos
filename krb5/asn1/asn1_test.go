@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -406,6 +407,33 @@ func TestMalformedDERReturnsError(t *testing.T) {
 		if err := Unmarshal(input, &value); err == nil {
 			t.Fatalf("Unmarshal(%x) accepted malformed DER", input)
 		}
+	}
+}
+
+func TestCVE202028196RejectsDeepConstructedNesting(t *testing.T) {
+	type nested struct {
+		Child *nested `krb5:"tag:0,optional"`
+	}
+
+	value := []byte{tagSequence, 0}
+	for i := 0; i < maxDepth+4; i++ {
+		value = encodeTLV(tagSequence, encodeTLV(0xa0, value))
+	}
+	var decoded nested
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("deeply nested DER panicked: %v", recovered)
+		}
+	}()
+	if err := Unmarshal(value, &decoded); err == nil {
+		t.Fatal("deeply nested DER was accepted")
+	} else if !strings.Contains(err.Error(), "maximum nesting depth exceeded") {
+		t.Fatalf("deep nesting error = %v", err)
+	}
+
+	indefinite := []byte{tagSequence, 0x80, 0, 0}
+	if err := Unmarshal(indefinite, &decoded); err == nil {
+		t.Fatal("indefinite-length DER was accepted")
 	}
 }
 

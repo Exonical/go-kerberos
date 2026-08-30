@@ -495,3 +495,38 @@ token fuzzer), `fuzz_json_seed_corpus` (no JSON parser), `fuzz_kdc_seed_corpus`
 `fuzz_marshal_cred_seed_corpus` and `fuzz_marshal_princ_seed_corpus` (no
 matching binary marshal fuzzers), `fuzz_oid_seed_corpus` (no OID-content
 fuzzer), and `fuzz_util_seed_corpus` (no matching utility parser fuzzer).
+
+## MIT CVE regression coverage
+
+MIT 1.22.2 source-grounded regression tests cover the equivalent Go surfaces:
+
+- CVE-2020-28196: `src/lib/krb5/asn.1/asn1_encode.c` commit
+  `57415dda6`; deep constructed nesting is bounded and BER indefinite lengths
+  are rejected by the Go DER decoder.
+- CVE-2021-37750: `src/kdc/do_tgs_req.c` commit `d775c95af`; a TGS-REQ
+  without `sname` returns KRB-ERROR and does not impair subsequent AS use.
+  The Go test exercises the reachable outer-request validation; the MIT
+  FAST-inner-body null-server path is not directly exposed as a standalone
+  Go API.
+- CVE-2022-42898: `src/lib/krb5/krb/pac.c` commit `ea92d2f0f`; overflowing
+  PAC buffer counts and sizes are rejected before allocation or range use.
+- CVE-2024-37370 and CVE-2024-37371: `src/lib/gssapi/krb5/k5sealv3.c`,
+  `k5sealv3iov.c`, and `k5unsealiov.c` commit `b0a2f8a53`; manipulated
+  encrypted EC, invalid RRC, short plaintext, and IOV inputs are rejected.
+  The malformed length shapes are based on `src/tests/gssapi/t_invalid.c`.
+- CVE-2023-39975: `src/kdc/do_tgs_req.c` commit `88a1701b4`; malformed
+  kadm5 dispatch inputs are exercised for panic-free status replies. The MIT
+  fix itself is KDC authorization-data pointer ownership, which has no
+  equivalent Go pointer-free ticket issuance path.
+
+CVE-2023-36054 is partially covered by the negative-count guard from MIT's
+`src/lib/kadm5/kadm_rpc_xdr.c` commit `ef08b09c9`. A direct probe also found
+that the Go `decodeEntry` path currently accepts a mismatched `n_key_data`
+value when the following XDR array count differs. This is a production
+hardening gap and is intentionally not patched in this test-only slice.
+
+LDAP KDB regressions are skipped because this repository has no LDAP KDB
+backend:
+
+- CVE-2014-5353 — no LDAP KDB implementation or LDAP ticket-policy path.
+- CVE-2018-5730 — no LDAP KDB implementation or LDAP suffix-matching path.

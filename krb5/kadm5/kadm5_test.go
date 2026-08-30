@@ -542,3 +542,80 @@ func TestRecordMarkingRejectsOversizedContinuation(t *testing.T) {
 	}
 	<-done
 }
+
+func TestCVE202336054RejectsNegativeKeyDataCount(t *testing.T) {
+	p, err := principal.Parse("alice@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := xdrWriter{}
+	writeEmptyEntry(&w, *p)
+	data := append([]byte(nil), w.bytes()...)
+	r := xdrReader{b: data}
+	if _, err = r.principal(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if _, err = r.i32(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	has, err := r.boolean()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		if _, err = r.principal(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err = r.i32(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err = r.u32(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = r.nullString(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if _, err = r.i32(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = r.u32(); err != nil {
+		t.Fatal(err)
+	}
+	binary.BigEndian.PutUint32(data[r.off:], ^uint32(0))
+	if _, err := decodeEntry(&xdrReader{b: data}, APIv4); err == nil {
+		t.Fatal("negative n_key_data was accepted")
+	}
+}
+
+func TestCVE202339975MalformedDispatchDoesNotPanic(t *testing.T) {
+	server := &Server{API: APIv4}
+	for _, proc := range []uint32{
+		createPrincipal, deletePrincipal, modifyPrincipal, renamePrincipal,
+		getPrincipal, chpassPrincipal, chpassPrincipal3, chrandPrincipal,
+		createPolicy, deletePolicy, modifyPolicy, getPolicy, getPrivs,
+		getPrincs, getPolicies, getStrings, setString, setkeyPrincipal4,
+		extractKeys,
+	} {
+		t.Run(fmt.Sprint(proc), func(t *testing.T) {
+			body := xdrWriter{}
+			body.u32(APIv4)
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("dispatch panicked on malformed XDR: %v", recovered)
+				}
+			}()
+			if response := server.dispatch(principal.Principal{}, proc, body.bytes()); len(response) == 0 {
+				t.Fatal("dispatch returned an empty malformed-input response")
+			}
+		})
+	}
+}
