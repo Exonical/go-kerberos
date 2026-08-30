@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
@@ -12,6 +13,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 // VerifyInitCredsOptions controls VerifyInitCreds.
@@ -111,7 +113,7 @@ func (c *Client) VerifyInitCreds(ctx context.Context, creds *Credentials,
 				continue
 			}
 		}
-		if err := verifyInitCredsTicket(candidate, server, entries); err == nil {
+		if err := verifyInitCredsTicket(candidate, server, entries, c.now(), c.clockSkew()); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -124,10 +126,10 @@ func (c *Client) VerifyInitCreds(ctx context.Context, creds *Credentials,
 }
 
 func (c *Client) verifyInitCredsNoFail(realm string) bool {
-	if c.Config == nil || c.Config.Options == nil {
+	if c.Config == nil {
 		return false
 	}
-	values := c.Config.Options["libdefaults"]["verify_ap_req_nofail"]
+	values := c.Config.LibDefaultValues(realm, "verify_ap_req_nofail")
 	if len(values) == 0 {
 		return false
 	}
@@ -174,7 +176,7 @@ func keytabEntriesForPrincipal(kt *keytab.Keytab, server principal.Principal) []
 }
 
 func verifyInitCredsTicket(creds *Credentials, server principal.Principal,
-	entries []keytab.Entry) error {
+	entries []keytab.Entry, now time.Time, skew time.Duration) error {
 	if creds == nil || len(creds.Ticket) == 0 {
 		return fmt.Errorf("verify initial credentials: missing service ticket")
 	}
@@ -219,12 +221,42 @@ func verifyInitCredsTicket(creds *Credentials, server principal.Principal,
 			lastErr = errors.New("decrypted ticket client principal mismatch")
 			continue
 		}
+		if part.Flags&types.TicketInvalid != 0 {
+			lastErr = krberrors.ErrTicketInvalid
+			continue
+		}
+		if !verifyInitCredsTicketValid(part, now, skew) {
+			lastErr = krberrors.ErrTicketExpired
+			continue
+		}
 		return nil
 	}
 	if lastErr == nil {
 		lastErr = krberrors.ErrIntegrity
 	}
 	return fmt.Errorf("verify initial credentials: decrypt service ticket: %w", lastErr)
+}
+
+func (c *Client) now() time.Time {
+	now := time.Now().UTC()
+	if c.Now != nil {
+		now = c.Now().UTC()
+	}
+	return now
+}
+
+func verifyInitCredsTicketValid(part protocol.EncTicketPart, now time.Time, skew time.Duration) bool {
+	if skew < 0 {
+		skew = -skew
+	}
+	if !part.EndTime.Present || part.EndTime.Time.Before(now.Add(-skew)) {
+		return false
+	}
+	if part.StartTime != nil && part.StartTime.Present &&
+		part.StartTime.Time.After(now.Add(skew)) {
+		return false
+	}
+	return true
 }
 
 func sameClientPrincipal(a, b principal.Principal) bool {

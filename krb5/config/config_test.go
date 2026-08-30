@@ -73,6 +73,24 @@ dns_canonicalize_hostname = invalid
 	}
 }
 
+func TestParseRealmLibDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+verify_ap_req_nofail = false
+TEST.REALM = {
+    verify_ap_req_nofail = true
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.LibDefaultValues("test.realm", "verify_ap_req_nofail"); len(got) != 1 || got[0] != "true" {
+		t.Fatalf("realm libdefault = %#v, want [true]", got)
+	}
+	if got := cfg.LibDefaultValues("OTHER.REALM", "verify_ap_req_nofail"); len(got) != 1 || got[0] != "false" {
+		t.Fatalf("global libdefault = %#v, want [false]", got)
+	}
+}
+
 func TestParseCamelliaEnctypeAliases(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
     default_realm = TEST.REALM
