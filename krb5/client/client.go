@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -269,6 +270,37 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 // RFC 3244 kpasswd whose service principal intentionally rejects TGT-based
 // service-ticket requests.
 func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principal.Principal, password string, service principal.Principal) (*Credentials, error) {
+	candidates, err := c.serviceCandidates(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	for index := range candidates {
+		if candidates[index].Realm == "" {
+			realm, _, resolveErr := c.resolveServiceRealm(ctx, candidates[index])
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			if realm == "" {
+				realm = clientPrincipal.Realm
+			}
+			candidates[index].Realm = realm
+		}
+	}
+	var last error
+	for index, candidate := range candidates {
+		result, err := c.asExchangeServiceOnce(ctx, clientPrincipal, password, candidate)
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) asExchangeServiceOnce(ctx context.Context, clientPrincipal principal.Principal, password string, service principal.Principal) (*Credentials, error) {
 	if c == nil {
 		return nil, fmt.Errorf("AS service exchange: nil client")
 	}
@@ -281,18 +313,11 @@ func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principa
 	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("AS service exchange: invalid client principal")
 	}
-	if service.Realm == "" {
-		service.Realm = clientPrincipal.Realm
-	}
 	if service.NameType == 0 {
 		service.NameType = principal.NTSrvInstance
 	}
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("AS service exchange: invalid service principal")
-	}
-	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
-	if err != nil {
-		return nil, err
 	}
 	now := time.Now().UTC()
 	if c.Now != nil {
@@ -622,6 +647,35 @@ func freshnessTokenFromError(value *krberrors.KRBError) []byte {
 
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	candidates, err := c.serviceCandidates(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	if service.Realm == "" {
+		for index := range candidates {
+			candidates[index].Realm = ""
+		}
+	}
+	var last error
+	for index, candidate := range candidates {
+		result, err := c.tgsExchangeOnce(ctx, tgt, candidate)
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) tgsExchangeOnce(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	return c.tgsExchangeOnceWithMode(ctx, tgt, service, service.Realm == "", service.Realm != "")
+}
+
+func (c *Client) tgsExchangeOnceWithMode(ctx context.Context, tgt *Credentials,
+	service principal.Principal, referral, serviceRealmKnown bool) (*Credentials, error) {
 	if c == nil {
 		return nil, fmt.Errorf("TGS exchange: nil client")
 	}
@@ -640,12 +694,8 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("TGS exchange: invalid service principal")
 	}
-	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
-	if err != nil {
-		return nil, err
-	}
 	requestedService := service
-	realm, mapped := ServiceRealm(c.Config, service)
+	realm := service.Realm
 	if realm == "" {
 		realm = tgt.Server.Realm
 	}
@@ -736,7 +786,7 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 			now = c.Now().UTC()
 		}
 		request, nonce, err := c.newTGSReq(currentTGT, service, realm, now,
-			hops > 0 || (!mapped && requestedService.Realm == ""))
+			hops > 0 || referral)
 		if err != nil {
 			return nil, err
 		}
@@ -745,13 +795,25 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 			return nil, err
 		}
 		if kerberosError, ok := decodeKRBError(response); ok {
+			if referral && hops == 0 && requestedService.Realm == "" {
+				fallback, authoritative, fallbackErr := c.resolveServiceRealm(ctx, requestedService)
+				if fallbackErr != nil {
+					return nil, fallbackErr
+				}
+				if fallback != "" {
+					fallbackService := requestedService
+					fallbackService.Realm = fallback
+					return c.tgsExchangeOnceWithMode(ctx, tgt, fallbackService,
+						false, authoritative)
+				}
+			}
 			return nil, kerberosError
 		}
-		result, referral, err := c.decodeTGSRepForExchange(response, currentTGT.Client, service, requestedService, mapped, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now)
+		result, gotReferral, err := c.decodeTGSRepForExchange(response, currentTGT.Client, service, requestedService, serviceRealmKnown, nonce, currentTGT.Key.KeyType, currentTGT.Key.KeyValue, now)
 		if err != nil {
 			return nil, err
 		}
-		if !referral {
+		if !gotReferral {
 			return result, nil
 		}
 		if hops >= 10 {
@@ -772,6 +834,52 @@ func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service prin
 // TGSExchangeU2U obtains a service ticket encrypted in the session key of the
 // supplied second ticket, as specified by RFC 4120 section 3.3.
 func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTicket []byte, service principal.Principal) (*Credentials, error) {
+	candidates, err := c.serviceCandidates(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	if service.Realm == "" {
+		for index := range candidates {
+			candidates[index].Realm = ""
+		}
+	}
+	var last error
+	for index, candidate := range candidates {
+		result, err := c.tgsExchangeU2UOnce(ctx, tgt, secondTicket, candidate)
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if service.Realm == "" && isKRBError(err) {
+			fallback, authoritative, fallbackErr := c.resolveServiceRealm(ctx, candidate)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			if fallback != "" {
+				fallbackCandidate := candidate
+				fallbackCandidate.Realm = fallback
+				result, fallbackErr := c.tgsExchangeU2UOnceWithMode(ctx, tgt, secondTicket,
+					fallbackCandidate, false, authoritative)
+				if fallbackErr == nil {
+					return result, nil
+				}
+				last = fallbackErr
+			}
+		}
+		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) tgsExchangeU2UOnce(ctx context.Context, tgt *Credentials, secondTicket []byte, service principal.Principal) (*Credentials, error) {
+	return c.tgsExchangeU2UOnceWithMode(ctx, tgt, secondTicket, service,
+		service.Realm == "", service.Realm != "")
+}
+
+func (c *Client) tgsExchangeU2UOnceWithMode(ctx context.Context, tgt *Credentials,
+	secondTicket []byte, service principal.Principal, referral, serviceRealmKnown bool) (*Credentials, error) {
 	if c == nil {
 		return nil, fmt.Errorf("TGS U2U exchange: nil client")
 	}
@@ -790,11 +898,7 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("TGS U2U exchange: invalid service principal")
 	}
-	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
-	if err != nil {
-		return nil, err
-	}
-	realm, _ := ServiceRealm(c.Config, service)
+	realm := service.Realm
 	if realm == "" {
 		realm = tgt.Server.Realm
 	}
@@ -813,7 +917,7 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 	if c.Now != nil {
 		now = c.Now().UTC()
 	}
-	request, nonce, err := c.newTGSReqWithBody(tgt, service, realm, now, false, func(body *protocol.KDCReqBody) {
+	request, nonce, err := c.newTGSReqWithBody(tgt, service, realm, now, referral, func(body *protocol.KDCReqBody) {
 		body.KDCOptions |= types.KDCEncTktInSkey
 		body.AdditionalTickets = []protocol.Ticket{second}
 	})
@@ -831,7 +935,7 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 		return nil, kerberosError
 	}
 	result, _, err := c.decodeTGSRepForExchange(response, tgt.Client, service, service,
-		true, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
+		serviceRealmKnown, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
 	if err != nil {
 		return nil, err
 	}
@@ -899,6 +1003,52 @@ func (c *Client) TGSExchangeForwarded(ctx context.Context, tgt *Credentials) (*C
 // TGSExchangeFAST obtains a service ticket using an RFC 6113 implicit TGS
 // armor exchange. The TGS authenticator subkey supplies the armor key input.
 func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	candidates, err := c.serviceCandidates(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	if service.Realm == "" {
+		for index := range candidates {
+			candidates[index].Realm = ""
+		}
+	}
+	var last error
+	for index, candidate := range candidates {
+		result, err := c.tgsExchangeFASTOnce(ctx, tgt, candidate)
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if service.Realm == "" && isKRBError(err) {
+			fallback, authoritative, fallbackErr := c.resolveServiceRealm(ctx, candidate)
+			if fallbackErr != nil {
+				return nil, fallbackErr
+			}
+			if fallback != "" {
+				fallbackCandidate := candidate
+				fallbackCandidate.Realm = fallback
+				result, fallbackErr := c.tgsExchangeFASTOnceWithMode(ctx, tgt,
+					fallbackCandidate, false, authoritative)
+				if fallbackErr == nil {
+					return result, nil
+				}
+				last = fallbackErr
+			}
+		}
+		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
+func (c *Client) tgsExchangeFASTOnce(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	return c.tgsExchangeFASTOnceWithMode(ctx, tgt, service,
+		service.Realm == "", service.Realm != "")
+}
+
+func (c *Client) tgsExchangeFASTOnceWithMode(ctx context.Context, tgt *Credentials,
+	service principal.Principal, referral, serviceRealmKnown bool) (*Credentials, error) {
 	if c == nil {
 		return nil, fmt.Errorf("FAST TGS exchange: nil client")
 	}
@@ -914,11 +1064,7 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 	if len(service.Components) == 0 {
 		return nil, fmt.Errorf("FAST TGS exchange: invalid service principal")
 	}
-	service, err := hostrealm.CanonicalizePrincipal(ctx, c.Config, service, hostrealm.Options{})
-	if err != nil {
-		return nil, err
-	}
-	realm, _ := ServiceRealm(c.Config, service)
+	realm := service.Realm
 	if realm == "" {
 		realm = tgt.Server.Realm
 	}
@@ -937,7 +1083,7 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 	if c.Now != nil {
 		now = c.Now().UTC()
 	}
-	request, nonce, armor, replyKey, err := c.newTGSReqFAST(tgt, service, realm, now, false)
+	request, nonce, armor, replyKey, err := c.newTGSReqFAST(tgt, service, realm, now, referral)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +1091,7 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 	if err != nil {
 		return nil, err
 	}
-	return c.decodeFASTTGSRep(response, tgt.Client, service, service, true, nonce,
+	return c.decodeFASTTGSRep(response, tgt.Client, service, service, serviceRealmKnown, nonce,
 		replyKey, armor, now)
 }
 
@@ -1376,6 +1522,48 @@ func ServiceRealm(cfg *config.Config, service principal.Principal) (string, bool
 		return cfg.DefaultRealm, false
 	}
 	return "", false
+}
+
+func (c *Client) resolveServiceRealm(ctx context.Context, service principal.Principal) (string, bool, error) {
+	if service.Realm != "" {
+		return service.Realm, true, nil
+	}
+	if service.NameType == principal.NTSrvHst && len(service.Components) > 1 {
+		realm, authoritative, err := hostrealm.HostRealm(ctx, c.Config, service.Components[1], hostrealm.Options{})
+		if err != nil {
+			return "", false, err
+		}
+		if realm != "" {
+			return realm, authoritative, nil
+		}
+	}
+	realm, mapped := ServiceRealm(c.Config, service)
+	return realm, mapped, nil
+}
+
+func (c *Client) serviceCandidates(ctx context.Context, service principal.Principal) ([]principal.Principal, error) {
+	if c == nil {
+		return nil, fmt.Errorf("client: nil client")
+	}
+	if service.NameType == 0 {
+		service.NameType = principal.NTSrvInstance
+	}
+	candidates, err := hostrealm.CanonicalizePrincipalCandidates(ctx, c.Config, service, hostrealm.Options{})
+	if err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+func isUnknownServiceError(err error) bool {
+	var kerberosError *krberrors.KRBError
+	return errors.As(err, &kerberosError) &&
+		kerberosError.Code == krberrors.KDCErrSPrincipalUnknown
+}
+
+func isKRBError(err error) bool {
+	var kerberosError *krberrors.KRBError
+	return errors.As(err, &kerberosError)
 }
 
 func isReferralPrincipal(value protocol.PrincipalName, requested principal.Principal) bool {

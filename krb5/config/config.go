@@ -21,6 +21,7 @@ type Config struct {
 	QualifyShortnameSet     bool
 	DNSCanonicalizeHostname string
 	RealmTryDomains         int
+	RealmTryDomainsSet      bool
 	ClockSkew               time.Duration
 	TicketLifetime          time.Duration
 	RenewLifetime           time.Duration
@@ -370,6 +371,7 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 				return fmt.Errorf("invalid realm_try_domains")
 			}
 			cfg.RealmTryDomains = limit
+			cfg.RealmTryDomainsSet = true
 		case "canonicalize":
 			cfg.Canonicalize = parseBool(value)
 		case "clockskew":

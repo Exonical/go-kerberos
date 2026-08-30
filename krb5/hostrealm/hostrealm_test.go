@@ -6,12 +6,27 @@ import (
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/discovery"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 type txtResolver struct {
 	records map[string][]string
 	queries []string
+}
+
+type hostRealmResolver struct {
+	records map[string][]discovery.SRVRecord
+	queries []string
+}
+
+func (r *hostRealmResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *hostRealmResolver) LookupSRV(_ context.Context, _, _, name string) ([]discovery.SRVRecord, error) {
+	r.queries = append(r.queries, name)
+	return r.records[name], nil
 }
 
 func (r *txtResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
@@ -73,6 +88,93 @@ func TestExpandHostnameReverseAndFallback(t *testing.T) {
 	}
 }
 
+func TestExpandHostnameExplicitRDNSFalse(t *testing.T) {
+	cfg := &config.Config{DNSCanonicalizeHostname: "true", RDNS: false, RDNSSet: true}
+	reversed := false
+	got, err := ExpandHostname(context.Background(), cfg, "alias", Options{
+		ForwardLookup: func(context.Context, string) (string, error) {
+			return "canonical.example.test", nil
+		},
+		ResolveAddress: func(context.Context, string) (string, error) {
+			t.Fatal("address lookup called with rdns disabled")
+			return "", nil
+		},
+		ReverseLookup: func(context.Context, string) (string, error) {
+			reversed = true
+			return "", nil
+		},
+	})
+	if err != nil || got != "canonical.example.test" || reversed {
+		t.Fatalf("rdns=false expansion = %q, reversed=%v, err=%v", got, reversed, err)
+	}
+}
+
+func TestExpandHostnameEmptySearchDomainsOverrideSystem(t *testing.T) {
+	cfg := &config.Config{DNSCanonicalizeHostname: "false"}
+	got, err := ExpandHostname(context.Background(), cfg, "short", Options{SearchDomains: []string{}})
+	if err != nil || got != "short" {
+		t.Fatalf("empty search override = %q, %v", got, err)
+	}
+}
+
+func TestHostRealmRealmTryDomains(t *testing.T) {
+	cfg := &config.Config{DNSLookupRealm: true, RealmTryDomainsSet: true, RealmTryDomains: 1}
+	var tried []string
+	realm, authoritative, err := HostRealm(context.Background(), cfg, "a.b.example.test", Options{
+		Resolver: &txtResolver{},
+		RealmExists: func(_ context.Context, value string) bool {
+			tried = append(tried, value)
+			return value == "B.EXAMPLE.TEST"
+		},
+	})
+	if err != nil || authoritative || realm != "B.EXAMPLE.TEST" {
+		t.Fatalf("realm_try_domains result = %q, authoritative=%v, err=%v", realm, authoritative, err)
+	}
+	if !reflect.DeepEqual(tried, []string{"A.B.EXAMPLE.TEST", "B.EXAMPLE.TEST"}) {
+		t.Fatalf("realm_try_domains probes = %v", tried)
+	}
+
+	cfg.RealmTryDomains = -1
+	tried = nil
+	realm, _, err = HostRealm(context.Background(), cfg, "a.b.example.test", Options{
+		Resolver: &txtResolver{},
+		RealmExists: func(_ context.Context, value string) bool {
+			tried = append(tried, value)
+			return true
+		},
+	})
+	if err != nil || realm != "B.EXAMPLE.TEST" || len(tried) != 0 {
+		t.Fatalf("realm_try_domains=-1 result = %q, probes=%v, err=%v", realm, tried, err)
+	}
+}
+
+func TestHostRealmRealmTryDomainsUsesDefaultLocator(t *testing.T) {
+	cfg := &config.Config{DNSLookupRealm: true, RealmTryDomainsSet: true, RealmTryDomains: 0}
+	resolver := &hostRealmResolver{records: map[string][]discovery.SRVRecord{
+		"A.B.EXAMPLE.TEST": {{Target: "kdc.example.test.", Port: 88}},
+	}}
+	realm, authoritative, err := HostRealm(context.Background(), cfg, "a.b.example.test", Options{
+		Resolver: resolver,
+	})
+	if err != nil || authoritative || realm != "A.B.EXAMPLE.TEST" {
+		t.Fatalf("default realm locator result = %q, authoritative=%v, err=%v", realm, authoritative, err)
+	}
+	if !reflect.DeepEqual(resolver.queries, []string{"A.B.EXAMPLE.TEST", "A.B.EXAMPLE.TEST"}) {
+		t.Fatalf("default realm locator queries = %v", resolver.queries)
+	}
+	resolver.records = nil
+	resolver.queries = nil
+	realm, authoritative, err = HostRealm(context.Background(), cfg, "a.b.example.test", Options{
+		Resolver: resolver,
+	})
+	if err != nil || authoritative || realm != "B.EXAMPLE.TEST" {
+		t.Fatalf("missing KDC fallback result = %q, authoritative=%v, err=%v", realm, authoritative, err)
+	}
+	if !reflect.DeepEqual(resolver.queries, []string{"A.B.EXAMPLE.TEST", "A.B.EXAMPLE.TEST"}) {
+		t.Fatalf("missing KDC locator queries = %v", resolver.queries)
+	}
+}
+
 func TestCanonicalizePrincipalPreservesTrailer(t *testing.T) {
 	cfg := &config.Config{DNSCanonicalizeHostname: "false", QualifyShortname: "example.test", QualifyShortnameSet: true}
 	p := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"HTTP", "web:8443"}}
@@ -109,7 +211,10 @@ func TestHostRealmModuleOrderAndFallback(t *testing.T) {
 	}
 
 	resolver.records = map[string][]string{}
-	realm, authoritative, err = HostRealm(context.Background(), cfg, "host.example.test", Options{Resolver: resolver})
+	realm, authoritative, err = HostRealm(context.Background(), cfg, "host.example.test", Options{
+		Resolver:    resolver,
+		RealmExists: func(context.Context, string) bool { return false },
+	})
 	if err != nil || realm != "EXAMPLE.TEST" || authoritative {
 		t.Fatalf("fallback realm = %q, authoritative=%v, err=%v", realm, authoritative, err)
 	}

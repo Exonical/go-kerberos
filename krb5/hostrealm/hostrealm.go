@@ -23,6 +23,9 @@ type Options struct {
 	ForwardLookup  func(context.Context, string) (string, error)
 	ResolveAddress func(context.Context, string) (string, error)
 	ReverseLookup  func(context.Context, string) (string, error)
+	// RealmExists optionally reports whether a realm has a locatable KDC.
+	// It makes the realm_try_domains heuristic injectable for tests.
+	RealmExists func(context.Context, string) bool
 }
 
 // NetResolver adapts net.Resolver for hostname canonicalization and TXT
@@ -48,6 +51,16 @@ func (r NetResolver) Forward(ctx context.Context, host string) (string, error) {
 }
 
 func (r NetResolver) Reverse(ctx context.Context, host string) (string, error) {
+	if net.ParseIP(host) == nil {
+		addresses, err := r.resolver().LookupHost(ctx, host)
+		if err != nil {
+			return "", err
+		}
+		if len(addresses) == 0 {
+			return "", fmt.Errorf("reverse hostname %q: no addresses", host)
+		}
+		host = addresses[0]
+	}
 	names, err := r.resolver().LookupAddr(ctx, host)
 	if err != nil || len(names) == 0 {
 		return "", err
@@ -82,7 +95,10 @@ func qualifyDomain(cfg *config.Config, opts Options) string {
 	if cfg != nil && cfg.QualifyShortname != "" {
 		return strings.TrimSuffix(strings.TrimSpace(cfg.QualifyShortname), ".")
 	}
-	if len(opts.SearchDomains) > 0 {
+	if opts.SearchDomains != nil {
+		if len(opts.SearchDomains) == 0 {
+			return ""
+		}
 		return strings.TrimSuffix(strings.TrimSpace(opts.SearchDomains[0]), ".")
 	}
 	file, err := os.Open("/etc/resolv.conf")
@@ -132,7 +148,11 @@ func ExpandHostname(ctx context.Context, cfg *config.Config, host string, opts O
 		if value, err := lookup(ctx, host); err == nil && value != "" {
 			canon = value
 			dnsReplaced = true
-			if cfg != nil && cfg.RDNS {
+			rdns := true
+			if cfg != nil && cfg.RDNSSet {
+				rdns = cfg.RDNS
+			}
+			if rdns {
 				resolveAddress := opts.ResolveAddress
 				if resolveAddress == nil {
 					r := resolverFor(opts)
@@ -175,6 +195,43 @@ func CanonicalizePrincipal(ctx context.Context, cfg *config.Config, p principal.
 	return p, nil
 }
 
+// CanonicalizePrincipalCandidates returns the first principal requested by
+// MIT's fallback mode and the DNS-canonicalized retry candidate, if distinct.
+// The caller must retry the latter only after KDC_ERR_S_PRINCIPAL_UNKNOWN.
+func CanonicalizePrincipalCandidates(ctx context.Context, cfg *config.Config,
+	p principal.Principal, opts Options) ([]principal.Principal, error) {
+	first, err := CanonicalizePrincipal(ctx, cfg, p, opts)
+	if err != nil {
+		return nil, err
+	}
+	if canonicalMode(cfg) != "fallback" || p.NameType != principal.NTSrvHst ||
+		len(p.Components) < 2 {
+		return []principal.Principal{first}, nil
+	}
+	secondCfg := &config.Config{}
+	if cfg != nil {
+		*secondCfg = *cfg
+	}
+	secondCfg.DNSCanonicalizeHostname = "true"
+	second, err := CanonicalizePrincipal(ctx, secondCfg, p, opts)
+	if err != nil {
+		return nil, err
+	}
+	if second.Realm == first.Realm && len(second.Components) == len(first.Components) {
+		same := true
+		for i := range first.Components {
+			if first.Components[i] != second.Components[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return []principal.Principal{first}, nil
+		}
+	}
+	return []principal.Principal{first, second}, nil
+}
+
 func splitTrailer(host string) (string, string) {
 	index := strings.IndexByte(host, ':')
 	if index < 0 || index == len(host)-1 ||
@@ -212,7 +269,7 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 		}
 	}
 	if cfg != nil {
-		if realm, ok := cfg.RealmForHostWithFallback(host); ok {
+		if realm, ok := fallbackRealm(ctx, cfg, host, opts); ok {
 			return realm, false, nil
 		}
 		if cfg.DefaultRealm != "" {
@@ -220,6 +277,44 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 		}
 	}
 	return "", false, nil
+}
+
+func fallbackRealm(ctx context.Context, cfg *config.Config, host string, opts Options) (string, bool) {
+	if cfg == nil || net.ParseIP(host) != nil {
+		return "", false
+	}
+	limit := -1
+	if cfg.RealmTryDomainsSet {
+		limit = cfg.RealmTryDomains
+	}
+	realmExists := opts.RealmExists
+	if realmExists == nil {
+		realmExists = func(ctx context.Context, realm string) bool {
+			resolver, ok := opts.Resolver.(discovery.Resolver)
+			if !ok {
+				resolver = discovery.NetResolver{}
+			}
+			servers, err := discovery.Discover(ctx, resolver, realm)
+			return err == nil && len(servers) > 0
+		}
+	}
+	upper := strings.ToUpper(strings.TrimSuffix(host, "."))
+	suffix := upper
+	for limit >= 0 {
+		dot := strings.IndexByte(suffix, '.')
+		if dot < 0 {
+			break
+		}
+		if realmExists(ctx, suffix) {
+			return suffix, true
+		}
+		suffix = suffix[dot+1:]
+		limit--
+	}
+	if dot := strings.IndexByte(upper, '.'); dot >= 0 && dot+1 < len(upper) {
+		return upper[dot+1:], true
+	}
+	return "", false
 }
 
 // FallbackRealm returns the non-authoritative realm selected by MIT's domain
