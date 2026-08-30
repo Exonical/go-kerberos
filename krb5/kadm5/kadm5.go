@@ -754,9 +754,11 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 	if e != nil {
 		return PrincipalEntry{}, e
 	}
+	tlCount := 0
 	if !more {
 		more, e = r.boolean()
 		for more {
+			tlCount++
 			if _, e = r.i16(); e != nil {
 				return PrincipalEntry{}, e
 			}
@@ -769,12 +771,18 @@ func decodeEntry(r *xdrReader, api uint32) (PrincipalEntry, error) {
 			}
 		}
 	}
+	if tlCount != int(nTLData) {
+		return PrincipalEntry{}, errors.New("kadm5: principal TL data count mismatch")
+	}
 	n, e := r.u32()
 	if e != nil {
 		return PrincipalEntry{}, e
 	}
 	if n > 1<<20 {
 		return PrincipalEntry{}, errors.New("kadm5: oversized key data array")
+	}
+	if n != uint32(nKeyData) {
+		return PrincipalEntry{}, errors.New("kadm5: principal key data count mismatch")
 	}
 	for i := uint32(0); i < n; i++ {
 		ver, e := r.i16()
