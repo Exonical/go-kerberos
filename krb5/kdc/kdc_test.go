@@ -2740,8 +2740,11 @@ func TestCrossRealmTGSExchange(t *testing.T) {
 	serverA := &Server{Realm: realmA, DB: dbA, Now: func() time.Time { return now }}
 	serverB := &Server{Realm: realmB, DB: dbB, Now: func() time.Time { return now }}
 	kclient := &client.Client{
-		Config: &config.Config{DNSCanonicalizeHostname: "false"},
-		Now:    func() time.Time { return now },
+		Config: &config.Config{
+			DNSCanonicalizeHostname: "false",
+			QualifyShortnameSet:     true,
+		},
+		Now: func() time.Time { return now },
 		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
 			switch realm {
 			case realmA:
@@ -2853,6 +2856,7 @@ func TestCapathMultiHopTGSExchange(t *testing.T) {
 	kclient := &client.Client{
 		Config: &config.Config{
 			DNSCanonicalizeHostname: "false",
+			QualifyShortnameSet:     true,
 			CapathOptions:           clientConfig.CapathOptions,
 		},
 		Now: func() time.Time { return now },

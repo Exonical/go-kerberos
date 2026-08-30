@@ -914,6 +914,8 @@ func TestTGSExchangeFollowsConfiguredCapath(t *testing.T) {
 	var requests []string
 	cfg := &config.Config{
 		DNSCanonicalizeHostname: "false",
+		QualifyShortname:        "",
+		QualifyShortnameSet:     true,
 		CapathOptions:           map[string]map[string][]string{"HOME": {"OTHER": {"MIDDLE"}}},
 	}
 	c := &Client{
