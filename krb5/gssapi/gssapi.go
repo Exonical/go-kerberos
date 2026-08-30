@@ -61,6 +61,7 @@ type Initiator struct {
 // Acceptor accepts Kerberos GSS security contexts using a service keytab.
 type Acceptor struct {
 	keytab          *keytab.Keytab
+	name            *principal.Principal
 	replayCache     rcache.Cache
 	replayCacheName string
 	channelBindings *ChannelBindings
@@ -92,6 +93,10 @@ type Context struct {
 	dceStyle             bool
 	DelegatedCredentials []*client.Credentials
 	acceptorSubkey       bool
+	acceptorSubkeyKey    *protocol.EncryptionKey
+	source               principal.Principal
+	target               principal.Principal
+	endtime              time.Time
 	sendSeq              uint64
 	recvSeq              uint64
 }
@@ -166,6 +171,18 @@ func (i *Initiator) SetForwardedCredential(cred *client.Credentials) error {
 // NewAcceptor creates an acceptor backed by a service keytab.
 func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 	return &Acceptor{keytab: kt}
+}
+
+// NewAcceptorWithPrincipal creates an acceptor restricted to the requested
+// service principal. A nil principal accepts any keytab principal.
+func NewAcceptorWithPrincipal(kt *keytab.Keytab, name *principal.Principal) *Acceptor {
+	var copyName *principal.Principal
+	if name != nil {
+		value := *name
+		value.Components = append([]string(nil), name.Components...)
+		copyName = &value
+	}
+	return &Acceptor{keytab: kt, name: copyName}
 }
 
 // NewAcceptorWithOptions creates a GSS acceptor with optional AP replay-cache
@@ -299,6 +316,9 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		initiator:  true,
 		flags:      i.flags &^ GSSChannelBoundFlag,
 		sendSeq:    sequenceValue(state.SeqNumber),
+		source:     i.creds.Client,
+		target:     i.creds.Server,
+		endtime:    i.creds.EndTime.Time,
 	}
 	if legacy {
 		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
@@ -323,6 +343,7 @@ func (i *Initiator) VerifyToken(token []byte) error {
 		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
 		i.ctx.prfFull = contextKey(i.state.SessionKey, details.SubKey)
 		i.ctx.acceptorSubkey = true
+		i.ctx.acceptorSubkeyKey = cloneEncryptionKey(details.SubKey)
 	}
 	if details.SeqNumber != nil {
 		i.ctx.recvSeq = sequenceValue(details.SeqNumber)
@@ -364,6 +385,9 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	}
 	if err := verifyChannelBindings(verified.Checksum, a.channelBindings); err != nil {
 		return nil, principal.Principal{}, nil, err
+	}
+	if a.name != nil && !gssPrincipalEqual(*a.name, verified.Server) {
+		return nil, principal.Principal{}, nil, fmt.Errorf("GSS acceptor: service principal mismatch")
 	}
 	clientCBT, err := channelBindingAsserted(verified.AuthenticatorAuthorizationData)
 	if err != nil {
@@ -423,6 +447,9 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 		prfFull:    contextKey(verified.SessionKey, verified.SubKey),
 		flags:      flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
 		recvSeq:    sequenceValue(verified.SeqNumber),
+		source:     verified.Client,
+		target:     verified.Server,
+		endtime:    verified.EndTime.Time,
 	}
 	if len(delegation) != 0 {
 		var delegated []*client.Credentials
@@ -807,6 +834,28 @@ func contextKey(session protocol.EncryptionKey, subkey *protocol.EncryptionKey) 
 		return protocol.EncryptionKey{KeyType: subkey.KeyType, KeyValue: append([]byte(nil), subkey.KeyValue...)}
 	}
 	return protocol.EncryptionKey{KeyType: session.KeyType, KeyValue: append([]byte(nil), session.KeyValue...)}
+}
+
+func cloneEncryptionKey(key *protocol.EncryptionKey) *protocol.EncryptionKey {
+	if key == nil {
+		return nil
+	}
+	result := *key
+	result.KeyValue = append([]byte(nil), key.KeyValue...)
+	return &result
+}
+
+func gssPrincipalEqual(left, right principal.Principal) bool {
+	if left.Realm != right.Realm || left.NameType != right.NameType ||
+		len(left.Components) != len(right.Components) {
+		return false
+	}
+	for i := range left.Components {
+		if left.Components[i] != right.Components[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func checksumFlags(checksum *protocol.Checksum) (uint32, error) {
