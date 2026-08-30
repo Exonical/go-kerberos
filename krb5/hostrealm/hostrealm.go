@@ -131,6 +131,7 @@ func ExpandHostname(ctx context.Context, cfg *config.Config, host string, opts O
 		}
 		if value, err := lookup(ctx, host); err == nil && value != "" {
 			canon = value
+			dnsReplaced = true
 			if cfg != nil && cfg.RDNS {
 				resolveAddress := opts.ResolveAddress
 				if resolveAddress == nil {
@@ -148,7 +149,6 @@ func ExpandHostname(ctx context.Context, cfg *config.Config, host string, opts O
 					}
 				}
 			}
-			dnsReplaced = canon != host
 		}
 	}
 	if !dnsReplaced && !strings.Contains(host, ".") {
