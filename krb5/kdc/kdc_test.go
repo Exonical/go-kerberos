@@ -1345,6 +1345,78 @@ func TestServerFASTASExchange(t *testing.T) {
 	}
 }
 
+func TestServerFASTASExchangeMixedEnctypes(t *testing.T) {
+	now := time.Unix(2000000052, 0).UTC()
+	server, _ := testServer(t, now)
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		return server.HandleMessage(payload), nil
+	}
+	armorClient := &client.Client{
+		Now:      func() time.Time { return now },
+		Config:   &config.Config{DefaultTKTEnctypes: []int32{crypto.EnctypeAES256SHA1}},
+		Exchange: exchange,
+	}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := armorClient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	passwordClient := &client.Client{
+		Now:      func() time.Time { return now },
+		Config:   &config.Config{DefaultTKTEnctypes: []int32{crypto.EnctypeAES128SHA1}},
+		Exchange: exchange,
+	}
+	credentials, err := passwordClient.ASExchangeFAST(
+		context.Background(), user, "alice-password", armorTGT)
+	if err != nil {
+		t.Fatalf("mixed-enctype FAST ASExchange: %v", err)
+	}
+	if credentials.Key.KeyType != crypto.EnctypeAES128SHA1 {
+		t.Fatalf("FAST credentials enctype = %d, want %d",
+			credentials.Key.KeyType, crypto.EnctypeAES128SHA1)
+	}
+}
+
+func TestServerFASTASExchangeWrongPassword(t *testing.T) {
+	now := time.Unix(2000000055, 0).UTC()
+	_, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	if _, err := kclient.ASExchangeFAST(context.Background(), user, "wrong-password", armorTGT); err == nil {
+		t.Fatal("FAST ASExchange with wrong password unexpectedly succeeded")
+	}
+}
+
+func TestServerRejectsEncryptedChallengeOutsideFAST(t *testing.T) {
+	now := time.Unix(2000000056, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := preauth.BuildEncryptedChallenge(etype,
+		bytes.Repeat([]byte{0x11}, etype.KeySize()),
+		bytes.Repeat([]byte{0x22}, etype.KeySize()), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := asRequest(user, service, 1234)
+	request.PAData = protocol.MethodData{challenge}
+	response := server.HandleMessage(mustMarshal(t, request))
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("decode KRB-ERROR: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrPreauthFailed {
+		t.Fatalf("error code = %d, want %d", kerberosError.ErrorCode, kdcErrPreauthFailed)
+	}
+}
+
 func TestServerOTPFASTASExchange(t *testing.T) {
 	now := time.Unix(2000000060, 0).UTC()
 	server, kclient := testServer(t, now)

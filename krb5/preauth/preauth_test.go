@@ -81,6 +81,40 @@ func TestSelectETypeInfoFallsBackToDefaultSalt(t *testing.T) {
 	}
 }
 
+func TestEncryptedChallengeRoundTrip(t *testing.T) {
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	armorKey := bytes.Repeat([]byte{0x11}, etype.KeySize())
+	clientKey := bytes.Repeat([]byte{0x22}, etype.KeySize())
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	request, err := BuildEncryptedChallenge(etype, armorKey, clientKey, now)
+	if err != nil {
+		t.Fatalf("BuildEncryptedChallenge: %v", err)
+	}
+	if request.PADataType != PADataEncryptedChallenge {
+		t.Fatalf("padata type = %d, want %d", request.PADataType, PADataEncryptedChallenge)
+	}
+	got, err := DecryptEncryptedChallenge(etype, armorKey, clientKey, request.PADataValue)
+	if err != nil {
+		t.Fatalf("DecryptEncryptedChallenge: %v", err)
+	}
+	if !got.Equal(now) {
+		t.Fatalf("request timestamp = %v, want %v", got, now)
+	}
+	reply, err := BuildEncryptedChallengeReply(etype, armorKey, clientKey, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("BuildEncryptedChallengeReply: %v", err)
+	}
+	if err := VerifyEncryptedChallengeReply(etype, armorKey, clientKey, reply.PADataValue); err != nil {
+		t.Fatalf("VerifyEncryptedChallengeReply: %v", err)
+	}
+	if _, err := DecryptEncryptedChallenge(etype, armorKey, bytes.Repeat([]byte{0x33}, etype.KeySize()), request.PADataValue); err == nil {
+		t.Fatal("wrong client key unexpectedly decrypted challenge")
+	}
+}
+
 func mustMarshal(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := asn1.Marshal(value)

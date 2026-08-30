@@ -290,6 +290,23 @@ func TestMITClientAgainstGoKDC(t *testing.T) {
 	}
 }
 
+func TestMITClientEncryptedChallengeAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	armorCache := filepath.Join(filepath.Dir(k.cache), "encrypted-challenge-armor.ccache")
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "-c", armorCache, "alice")
+	markFASTAvailable(t, armorCache)
+	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "-T", armorCache, "alice")
+	if err != nil {
+		t.Fatalf("MIT FAST kinit against Go KDC: %v\n%s", err, output)
+	}
+	t.Logf("MIT encrypted-challenge FAST trace:\n%s", output)
+	trace := strings.ToLower(output)
+	if !strings.Contains(trace, "encrypted_challenge") &&
+		!strings.Contains(trace, "produced preauth for next request: pa-fx-cookie (133), pa-encrypted-challenge (138)") {
+		t.Fatalf("MIT FAST trace did not demonstrate encrypted challenge padata:\n%s", output)
+	}
+}
+
 func TestMITClientSPAKEAgainstGoKDC(t *testing.T) {
 	k := startGoSPAKEKDC(t)
 	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")

@@ -12,7 +12,8 @@ disposable integration test environments.
 - **AS exchange** with PA-ENC-TIMESTAMP preauthentication (password-based
   `kinit` equivalent), MIT-compatible PA-SPAKE (Edwards25519, P-256, P-384,
   and P-521), and
-  RFC 6113 **FAST** armored exchanges.
+  RFC 6113 **FAST** armored exchanges, including the RFC 6113
+  PA-ENCRYPTED-CHALLENGE password factor.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
 - **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and
@@ -220,6 +221,17 @@ opaque token returned in `PREAUTH_REQUIRED` inside the signed
 PKINIT behavior. Set `Server.PKINITRequireFreshness` to require a valid token;
 the KDC uses a ten-minute, `krbtgt`-keyed token lifetime and returns
 `KDC_ERR_PREAUTH_EXPIRED` for stale or invalid tokens.
+
+RFC 6113 PA-ENCRYPTED-CHALLENGE (padata type 138) is supported as a
+MIT-compatible FAST-only password factor. The Go client prefers it over
+PA-ENC-TIMESTAMP when the KDC advertises it, derives the challenge key with
+the FAST armor key, and verifies the KDC's usage-55 response challenge. The
+KDC tries the client's available long-term keys with the
+`clientchallengearmor` CF2 derivation, validates the timestamp, and returns
+the advisory `kdcchallengearmor` response. MIT's optional
+`encrypted_challenge_indicator` realm setting is not exposed yet; callers
+which need that auth indicator should continue using the existing
+`Server.AuthIndicators` configuration.
 
 RFC 6560 OTP preauthentication is available through
 `Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,

@@ -431,11 +431,17 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		if err != nil {
 			return nil, fmt.Errorf("FAST AS exchange string-to-key: %w", err)
 		}
-		timestamp, err := preauth.BuildEncryptedTimestamp(etype, clientKey, now, 0)
-		if err != nil {
-			return nil, err
+		var retryPA protocol.PAData
+		if challengePA := preauth.FindPAData(fastReply.PAData, preauth.PADataEncryptedChallenge); challengePA != nil {
+			retryPA, err = preauth.BuildEncryptedChallengeWithKeyEType(
+				armor.EType, armor.Key, etype, clientKey, now)
+		} else {
+			retryPA, err = preauth.BuildEncryptedTimestamp(etype, clientKey, now, 0)
 		}
-		fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{timestamp})
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
+		}
+		fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{retryPA})
 		if err != nil {
 			return nil, err
 		}
@@ -567,6 +573,16 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 	fastReply, err := armor.UnwrapReply(reply.PAData, ticket, nonce)
 	if err != nil {
 		return nil, err
+	}
+	if challengePA := preauth.FindPAData(fastReply.PAData, preauth.PADataEncryptedChallenge); challengePA != nil {
+		clientEType, err := crypto.NewRegistry().Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		if err := preauth.VerifyEncryptedChallengeReplyWithKeyEType(
+			armor.EType, armor.Key, clientEType, key, challengePA.PADataValue); err != nil {
+			return nil, fmt.Errorf("FAST AS exchange encrypted challenge: %w", err)
+		}
 	}
 	replyKey, err := armor.ReplyKey(protocol.EncryptionKey{KeyType: etypeID, KeyValue: key}, fastReply.StrengthenKey)
 	if err != nil {

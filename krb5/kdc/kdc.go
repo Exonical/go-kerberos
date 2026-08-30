@@ -45,6 +45,7 @@ const (
 	spakeCookieLifetime    = 10 * time.Minute
 	paTGSReq               = 1
 	paEncTimestamp         = 2
+	paEncryptedChallenge   = protocol.PADataEncryptedChallenge
 	paFXCookie             = 133
 	paSPAKE                = 151
 	kdcErrCPrincipal       = 6
@@ -553,6 +554,72 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	if otpEnabled && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
+	encryptedChallengePA := findPA(request.PAData, paEncryptedChallenge)
+	if encryptedChallengePA != nil {
+		if armor == nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		candidates := make([]kdb.Key, 0, len(clientRecord.Keys))
+		seen := make(map[int32]bool, len(clientRecord.Keys))
+		for _, requestedEType := range request.ReqBody.EType {
+			if key, exists := clientRecord.Keys[requestedEType]; exists {
+				key.Enctype = requestedEType
+				candidates = append(candidates, key)
+				seen[requestedEType] = true
+			}
+		}
+		for enctype, key := range clientRecord.Keys {
+			if seen[enctype] {
+				continue
+			}
+			key.Enctype = enctype
+			candidates = append(candidates, key)
+		}
+		var matchedKey kdb.Key
+		var matchedKeyEType crypto.EType
+		var timestamp time.Time
+		for _, candidate := range candidates {
+			candidateEType, candidateErr := crypto.NewRegistry().Get(candidate.Enctype)
+			if candidateErr != nil {
+				continue
+			}
+			candidateTimestamp, candidateErr := preauth.DecryptEncryptedChallengeWithKeyEType(
+				armor.etype, armor.key, candidateEType, candidate.Key,
+				encryptedChallengePA.PADataValue)
+			if candidateErr == nil {
+				matchedKey = candidate
+				matchedKeyEType = candidateEType
+				timestamp = candidateTimestamp
+				break
+			}
+		}
+		if matchedKey.Enctype == 0 {
+			s.recordPreauthFailure(clientName, &clientRecord)
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if !s.withinSkew(timestamp) {
+			return s.fastErrorResponse(krbAPErrSkew, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		clientKey = matchedKey
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if s.passwordExpired(clientRecord) {
+			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
+			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
+		if replyErr != nil {
+			return s.fastErrorResponse(kdcErrGeneric, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
+			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA})
+	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
@@ -757,8 +824,14 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, false, nil, nil)
 		}
-		methodData := protocol.MethodData{
-			{PADataType: paEncTimestamp, PADataValue: []byte{}},
+		var methodData protocol.MethodData
+		// MIT does not advertise encrypted-timestamp inside FAST.  Offering
+		// it before encrypted challenge causes the MIT client to select the
+		// fallback factor and never exercise PA-ENCRYPTED-CHALLENGE.
+		if armor == nil {
+			methodData = append(methodData, protocol.PAData{
+				PADataType: paEncTimestamp, PADataValue: []byte{},
+			})
 		}
 		if clientKey.Enctype != 0 {
 			methodData = append(methodData, protocol.PAData{
@@ -768,6 +841,9 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 					Salt:  stringPointer(principalSalt(clientKey, clientName)),
 				}}),
 			})
+		}
+		if armor != nil && clientKey.Enctype != 0 {
+			methodData = append(methodData, protocol.PAData{PADataType: paEncryptedChallenge})
 		}
 		if s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
 			methodData = append(methodData, protocol.PAData{PADataType: protocol.PADataPKASReq})
@@ -782,9 +858,6 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			}
 		}
 		if armor != nil {
-			if cookie := findPA(request.PAData, fast.PAFXCookie); cookie != nil {
-				methodData = append(methodData, *cookie)
-			}
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
@@ -1347,12 +1420,13 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	replyKey, err := crypto.CF2(armor.etype, strengthenValue, clientKey.Key,
-		[]byte("strengthenkey"), []byte("replykey"))
+	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	replyKey, err := crypto.CF2WithKeyEType(armor.etype, strengthenValue,
+		replyEType, clientKey.Key,
+		[]byte("strengthenkey"), []byte("replykey"))
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
@@ -1360,11 +1434,11 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	replyCipher, err := replyEType.Encrypt(replyKey, 3, replyPlain)
+	replyCipher, err := armor.etype.Encrypt(replyKey, 3, replyPlain)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	reply.EncPart = protocol.EncryptedData{EType: reply.EncPart.EType, Cipher: replyCipher}
+	reply.EncPart = protocol.EncryptedData{EType: armor.etype.ID(), Cipher: replyCipher}
 	ticketDER := marshalDER(reply.Ticket)
 	ticketChecksum, err := armor.etype.Checksum(armor.key, fast.UsageFinished, ticketDER)
 	if err != nil {
@@ -1408,12 +1482,13 @@ func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.Encrypt
 	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	effectiveKey, err := crypto.CF2(armor.etype, strengthenValue, replyKey.KeyValue,
-		[]byte("strengthenkey"), []byte("replykey"))
+	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
+	effectiveKey, err := crypto.CF2WithKeyEType(armor.etype, strengthenValue,
+		replyEType, replyKey.KeyValue,
+		[]byte("strengthenkey"), []byte("replykey"))
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
@@ -1421,11 +1496,11 @@ func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.Encrypt
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	replyCipher, err := replyEType.Encrypt(effectiveKey, replyUsage, replyPlain)
+	replyCipher, err := armor.etype.Encrypt(effectiveKey, replyUsage, replyPlain)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
-	reply.EncPart = protocol.EncryptedData{EType: reply.EncPart.EType, Cipher: replyCipher}
+	reply.EncPart = protocol.EncryptedData{EType: armor.etype.ID(), Cipher: replyCipher}
 	ticketChecksum, err := armor.etype.Checksum(armor.key, fast.UsageFinished, marshalDER(reply.Ticket))
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
@@ -1470,6 +1545,13 @@ func (s *Server) fastErrorResponseWithText(code int32, service *protocol.Princip
 	var inner protocol.MethodData
 	if armor.cookie != nil {
 		inner = append(inner, *armor.cookie)
+	} else {
+		// MIT's FAST error processing only retries when the protected response
+		// carries a PA-FX-COOKIE.  A trivial cookie is sufficient when there is
+		// no server-side preauthentication state to preserve.
+		inner = append(inner, protocol.PAData{
+			PADataType: fast.PAFXCookie, PADataValue: []byte("MIT"),
+		})
 	}
 	if len(data) > 0 {
 		var errorData protocol.MethodData
