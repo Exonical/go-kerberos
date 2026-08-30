@@ -166,6 +166,65 @@ func TestOptionalRawDERDoesNotConsumeFollowingContextField(t *testing.T) {
 	}
 }
 
+func TestOptionalRawDERContextSpecificValue(t *testing.T) {
+	type value struct {
+		A *types.RawDER `krb5:"tag:0,optional,bare"`
+		B *int32        `krb5:"tag:1,optional"`
+	}
+	b := int32(7)
+	tests := []struct {
+		name  string
+		input []byte
+		check func(t *testing.T, decoded value)
+	}{
+		{
+			name:  "A absent B present",
+			input: []byte{0x30, 0x05, 0xa1, 0x03, 0x02, 0x01, 0x07},
+			check: func(t *testing.T, decoded value) {
+				if decoded.A != nil || decoded.B == nil || *decoded.B != b {
+					t.Fatalf("decoded value = %#v", decoded)
+				}
+			},
+		},
+		{
+			name:  "A context-specific B present",
+			input: []byte{0x30, 0x08, 0xa5, 0x01, 0x00, 0xa1, 0x03, 0x02, 0x01, 0x07},
+			check: func(t *testing.T, decoded value) {
+				if decoded.A == nil || !bytes.Equal(*decoded.A, []byte{0xa5, 0x01, 0x00}) ||
+					decoded.B == nil || *decoded.B != b {
+					t.Fatalf("decoded value = %#v", decoded)
+				}
+			},
+		},
+		{
+			name:  "A NULL B absent",
+			input: []byte{0x30, 0x02, 0x05, 0x00},
+			check: func(t *testing.T, decoded value) {
+				if decoded.A == nil || !bytes.Equal(*decoded.A, []byte{0x05, 0x00}) ||
+					decoded.B != nil {
+					t.Fatalf("decoded value = %#v", decoded)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var decoded value
+			if err := Unmarshal(test.input, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			test.check(t, decoded)
+			encoded, err := Marshal(decoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(encoded, test.input) {
+				t.Fatalf("round trip = %x, want %x", encoded, test.input)
+			}
+		})
+	}
+}
+
 func TestObjectIdentifierDERValidation(t *testing.T) {
 	valid := []types.ObjectIdentifier{
 		{0x2a, 0x03},

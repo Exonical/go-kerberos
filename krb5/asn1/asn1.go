@@ -499,8 +499,7 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		if tag.bare {
 			expectedTag := tagForImplicitField(destination.Field(i))
 			if expectedTag == 0 {
-				if tag.optional && isContextSpecificTag(nextTag) &&
-					hasTaggedFieldAfter(destination.Type(), i) {
+				if tag.optional && isLaterContextSpecificTag(destination.Type(), i, nextTag) {
 					continue
 				}
 			} else if nextTag != expectedTag {
@@ -826,12 +825,19 @@ func isContextSpecificTag(tag byte) bool {
 	return tag&0xc0 == 0x80
 }
 
-func hasTaggedFieldAfter(typ reflect.Type, index int) bool {
+func isLaterContextSpecificTag(typ reflect.Type, index int, nextTag byte) bool {
 	for i := index + 1; i < typ.NumField(); i++ {
 		field := typ.Field(i)
 		if field.PkgPath == "" {
-			_, present, _ := parseFieldTag(field)
-			if present {
+			tag, present, err := parseFieldTag(field)
+			if err != nil || !present || tag.bare {
+				continue
+			}
+			expectedTag := byte(0xa0 | tag.number)
+			if tag.implicit {
+				expectedTag = 0x80 | byte(tag.number)
+			}
+			if nextTag == expectedTag {
 				return true
 			}
 		}
