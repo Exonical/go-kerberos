@@ -98,6 +98,7 @@ type VerifiedPAASReq struct {
 	PublicValue   []byte
 	SupportedKDFs [][]byte
 	Certificate   *x509.Certificate
+	Intermediates []*x509.Certificate
 	Signed        bool
 }
 
@@ -254,7 +255,8 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if err := requireSingleTLV(data); err != nil {
 		return VerifiedPAASReq{}, err
 	}
-	content, cert, signed, err := verifyCMSChoiceStatus(data, nil)
+	content, cert, signed, intermediates, err :=
+		verifyCMSChoiceStatusWithCertificates(data, nil)
 	if err != nil {
 		return VerifiedPAASReq{}, err
 	}
@@ -266,7 +268,9 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if len(auth.PAChecksum) != len(sum) || subtle.ConstantTimeCompare(auth.PAChecksum, sum[:]) != 1 {
 		return VerifiedPAASReq{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
 	}
-	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue, SupportedKDFs: supportedKDFs, Certificate: cert, Signed: signed}, nil
+	return VerifiedPAASReq{Authenticator: auth, PublicValue: publicValue,
+		SupportedKDFs: supportedKDFs, Certificate: cert,
+		Intermediates: intermediates, Signed: signed}, nil
 }
 
 // ValidateClientCertificate verifies a PKINIT client certificate chain,
@@ -278,32 +282,47 @@ func ValidateClientCertificate(cert *x509.Certificate, anchors *x509.CertPool, r
 	if !HasClientAuthEKU(cert) {
 		return errors.New("pkinit: client certificate lacks id-pkinit-KPClientAuth EKU")
 	}
-	gotRealm, gotComponents, err := ClientSAN(cert)
+	principals, err := ClientSANs(cert)
 	if err != nil {
 		return err
 	}
-	if gotRealm != realm || len(gotComponents) != len(components) {
-		return errors.New("pkinit: client certificate SAN principal mismatch")
-	}
-	for i := range components {
-		if gotComponents[i] != components[i] {
-			return errors.New("pkinit: client certificate SAN principal mismatch")
+	for _, got := range principals {
+		if got.Realm != realm || len(got.Components) != len(components) {
+			continue
+		}
+		matched := true
+		for i := range components {
+			if got.Components[i] != components[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return nil
 		}
 	}
-	return nil
+	return errors.New("pkinit: client certificate SAN principal mismatch")
 }
 
 // VerifyClientCertificateTrust verifies the certificate against anchors
 // without applying PKINIT authorization policy.
-func VerifyClientCertificateTrust(cert *x509.Certificate, anchors *x509.CertPool) error {
+func VerifyClientCertificateTrust(cert *x509.Certificate, anchors *x509.CertPool,
+	intermediates ...*x509.Certificate) error {
 	if cert == nil {
 		return errors.New("pkinit: missing client certificate")
 	}
 	if anchors == nil {
 		return errors.New("pkinit: client certificate trust roots are required")
 	}
+	pool := x509.NewCertPool()
+	for _, intermediate := range intermediates {
+		if intermediate != nil {
+			pool.AddCert(intermediate)
+		}
+	}
 	if _, err := cert.Verify(x509.VerifyOptions{
-		Roots: anchors, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		Roots: anchors, Intermediates: pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}); err != nil {
 		return errors.New("pkinit: client certificate is not trusted")
 	}
@@ -324,21 +343,28 @@ func HasClientAuthEKU(cert *x509.Certificate) bool {
 	return false
 }
 
-// ClientSAN returns the Kerberos principal encoded in id-pkinit-san.
+// ClientSAN returns the first Kerberos principal encoded in id-pkinit-san SANs.
 func ClientSAN(cert *x509.Certificate) (string, []string, error) {
-	return clientSAN(cert)
+	principals, err := ClientSANs(cert)
+	if err != nil {
+		return "", nil, err
+	}
+	components := principals[0].Components
+	return principals[0].Realm, components, nil
 }
 
-func clientSAN(cert *x509.Certificate) (string, []string, error) {
+// ClientSANs returns all Kerberos principals encoded in id-pkinit-san SANs.
+func ClientSANs(cert *x509.Certificate) ([]principal.Principal, error) {
 	const sanOID = "1.3.6.1.5.2.2"
 	const extensionOID = "2.5.29.17"
+	var principals []principal.Principal
 	for _, ext := range cert.Extensions {
 		if ext.Id.String() != extensionOID {
 			continue
 		}
 		fields, err := sequenceFields(ext.Value)
 		if err != nil {
-			return "", nil, errors.New("pkinit: malformed client subject alternative name")
+			return nil, errors.New("pkinit: malformed client subject alternative name")
 		}
 		for _, field := range fields {
 			if len(field) == 0 || field[0] != 0xa0 {
@@ -354,19 +380,25 @@ func clientSAN(cert *x509.Certificate) (string, []string, error) {
 			}
 			value, err := tlvContent(other[1])
 			if err != nil {
-				return "", nil, errors.New("pkinit: malformed client subject alternative name")
+				return nil, errors.New("pkinit: malformed client subject alternative name")
 			}
-			principal, err := parseKRB5SANPrincipal(value)
+			parts, err := parseKRB5SANPrincipal(value)
 			if err != nil {
-				return "", nil, err
+				return nil, err
 			}
-			if len(principal) < 2 {
-				return "", nil, errors.New("pkinit: malformed client principal SAN")
+			if len(parts) < 2 {
+				return nil, errors.New("pkinit: malformed client principal SAN")
 			}
-			return principal[len(principal)-1], principal[:len(principal)-1], nil
+			principals = append(principals, principal.Principal{
+				Realm:      parts[len(parts)-1],
+				Components: parts[:len(parts)-1],
+			})
 		}
 	}
-	return "", nil, ErrClientSANNotFound
+	if len(principals) == 0 {
+		return nil, ErrClientSANNotFound
+	}
+	return principals, nil
 }
 
 // ParseAuthPack decodes an AuthPack DER value.
@@ -897,7 +929,8 @@ func signCMS(content []byte, cert *x509.Certificate, signer crypto.Signer) ([]by
 }
 
 func signCMSWithContentType(content []byte, contentType asn1.ObjectIdentifier,
-	cert *x509.Certificate, signer crypto.Signer) ([]byte, error) {
+	cert *x509.Certificate, signer crypto.Signer,
+	additional ...*x509.Certificate) ([]byte, error) {
 	contentDigest := sha256.Sum256(content)
 	attrs := derSet(
 		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}), derSet(derOID(contentType))),
@@ -911,7 +944,13 @@ func signCMSWithContentType(content []byte, contentType asn1.ObjectIdentifier,
 	issuerSerial := derSeq(cert.RawIssuer, derIntBig(cert.SerialNumber))
 	// IssuerAndSerialNumber requires CMS SignerInfo version 1.
 	signerInfo := derSeq(derInt(1), issuerSerial, derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull()), derExplicitImplicit(0, attrs[2:]), derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}), derNull()), derOctet(sig))
-	signed := derSeq(derInt(3), derSet(derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull())), derSeq(derOID(contentType), derExplicit(0, derOctet(content))), derExplicitImplicit(0, cert.Raw), derSet(signerInfo))
+	certificates := append([]byte(nil), cert.Raw...)
+	for _, additionalCert := range additional {
+		if additionalCert != nil {
+			certificates = append(certificates, additionalCert.Raw...)
+		}
+	}
+	signed := derSeq(derInt(3), derSet(derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull())), derSeq(derOID(contentType), derExplicit(0, derOctet(content))), derExplicitImplicit(0, certificates), derSet(signerInfo))
 	return derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}), derExplicit(0, signed)), nil
 }
 
@@ -929,13 +968,20 @@ func unsignedCMS(content []byte, contentType asn1.ObjectIdentifier) []byte {
 }
 
 func verifyCMSChoice(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, error) {
-	content, cert, _, err := verifyCMSChoiceStatus(data, anchors)
+	content, cert, _, _, err := verifyCMSChoiceStatusWithCertificates(data, anchors)
 	return content, cert, err
 }
 
 func verifyCMSChoiceStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, bool, error) {
+	content, cert, signed, _, err :=
+		verifyCMSChoiceStatusWithCertificates(data, anchors)
+	return content, cert, signed, err
+}
+
+func verifyCMSChoiceStatusWithCertificates(data []byte,
+	anchors *x509.CertPool) ([]byte, *x509.Certificate, bool, []*x509.Certificate, error) {
 	if err := requireSingleTLV(data); err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	var choice []byte
 	if len(data) > 0 && (data[0] == 0xa0 || data[0] == 0x80) {
@@ -943,77 +989,83 @@ func verifyCMSChoiceStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.C
 	} else {
 		fields, err := sequenceFields(data)
 		if err != nil || len(fields) == 0 || len(fields[0]) == 0 || (fields[0][0] != 0xa0 && fields[0][0] != 0x80) {
-			return nil, nil, false, errors.New("pkinit: PA-PK-AS-REP is not DH signed data")
+			return nil, nil, false, nil, errors.New("pkinit: PA-PK-AS-REP is not DH signed data")
 		}
 		choice = fields[0]
 	}
 	choice, err := tlvContent(choice)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	if len(choice) > 0 && choice[0] == 0x04 {
 		choice, err = tlvContent(choice)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, nil, err
 		}
 	}
-	content, cert, signed, err := verifyCMSStatus(choice, anchors)
-	return content, cert, signed, err
+	return verifyCMSStatusWithCertificates(choice, anchors)
 }
 
 func verifyCMS(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, error) {
-	content, cert, _, err := verifyCMSStatus(data, anchors)
+	content, cert, _, _, err := verifyCMSStatusWithCertificates(data, anchors)
 	return content, cert, err
 }
 
 func verifyCMSStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certificate, bool, error) {
+	content, cert, signed, _, err :=
+		verifyCMSStatusWithCertificates(data, anchors)
+	return content, cert, signed, err
+}
+
+func verifyCMSStatusWithCertificates(data []byte, anchors *x509.CertPool) (
+	[]byte, *x509.Certificate, bool, []*x509.Certificate, error) {
 	if err := requireSingleTLV(data); err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	// CMS ContentInfo wraps SignedData; accept the inner SignedData form too.
 	outer, outerErr := sequenceFields(data)
 	if outerErr == nil && len(outer) == 2 && len(outer[0]) > 0 && outer[0][0] == 0x06 {
 		_, wrapped, unwrapErr := tlv(outer[1])
 		if unwrapErr != nil {
-			return nil, nil, false, unwrapErr
+			return nil, nil, false, nil, unwrapErr
 		}
 		if len(wrapped) > 0 && wrapped[0] == 0x04 {
 			content, contentErr := tlvContent(wrapped)
 			if contentErr != nil {
-				return nil, nil, false, contentErr
+				return nil, nil, false, nil, contentErr
 			}
 			if err := requireSingleTLV(content); err != nil {
-				return nil, nil, false, errors.New("pkinit: malformed CMS content")
+				return nil, nil, false, nil, errors.New("pkinit: malformed CMS content")
 			}
-			return content, nil, false, nil
+			return content, nil, false, nil, nil
 		}
 		data = wrapped
 	}
 	fields, err := sequenceFields(data)
 	if err != nil || len(fields) < 4 {
-		return nil, nil, false, fmt.Errorf("pkinit: malformed CMS SignedData (fields=%d err=%v)", len(fields), err)
+		return nil, nil, false, nil, fmt.Errorf("pkinit: malformed CMS SignedData (fields=%d err=%v)", len(fields), err)
 	}
 	encap, err := sequenceFields(fields[2])
 	if err != nil || len(encap) < 2 {
-		return nil, nil, false, errors.New("pkinit: malformed CMS content")
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS content")
 	}
 	_, econtent, err := tlv(encap[1])
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	_, content, err := tlv(econtent)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	if len(fields) == 4 && len(fields[3]) > 0 && fields[3][0] == 0x31 {
 		if _, err := collectionFields(fields[3]); err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, nil, err
 		}
-		return content, nil, false, nil
+		return content, nil, false, nil, nil
 	}
 	certFields, err := collectionFields(fields[3])
 	if err != nil || len(certFields) == 0 {
-		return nil, nil, false, errors.New("pkinit: malformed CMS certificate set")
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS certificate set")
 	}
 	certificates := make([]*x509.Certificate, 0, len(certFields))
 	for _, certDER := range certFields {
@@ -1024,26 +1076,26 @@ func verifyCMSStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certifi
 		certificates = append(certificates, cert)
 	}
 	if len(certificates) == 0 {
-		return nil, nil, false, errors.New("pkinit: missing KDC certificate")
+		return nil, nil, false, nil, errors.New("pkinit: missing KDC certificate")
 	}
 	if len(fields) < 5 {
-		return nil, nil, false, errors.New("pkinit: missing CMS signer")
+		return nil, nil, false, nil, errors.New("pkinit: missing CMS signer")
 	}
 	infos, err := collectionFields(fields[4])
 	if err != nil || len(infos) == 0 {
-		return nil, nil, false, errors.New("pkinit: missing CMS signer")
+		return nil, nil, false, nil, errors.New("pkinit: missing CMS signer")
 	}
 	si, err := sequenceFields(infos[0])
 	if err != nil || len(si) < 6 {
-		return nil, nil, false, errors.New("pkinit: malformed CMS signer")
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS signer")
 	}
 	issuerSerial, err := sequenceFields(si[1])
 	if err != nil || len(issuerSerial) != 2 {
-		return nil, nil, false, errors.New("pkinit: malformed CMS signer identifier")
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS signer identifier")
 	}
 	serial, err := parseInteger(issuerSerial[1])
 	if err != nil {
-		return nil, nil, false, errors.New("pkinit: malformed CMS signer serial")
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS signer serial")
 	}
 	var cert *x509.Certificate
 	for _, candidate := range certificates {
@@ -1053,29 +1105,29 @@ func verifyCMSStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certifi
 		}
 	}
 	if cert == nil {
-		return nil, nil, false, errors.New("pkinit: CMS signer certificate not found")
+		return nil, nil, false, nil, errors.New("pkinit: CMS signer certificate not found")
 	}
 	attrsContent, err := tlvContent(si[3])
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	attrs := derSetContent(attrsContent)
 	hashID, err := cmsDigestHash(si[2])
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	contentDigest := hashBytes(hashID, content)
 	if !bytes.Contains(attrs, derOctet(contentDigest)) {
-		return nil, nil, false, errors.New("pkinit: CMS messageDigest mismatch")
+		return nil, nil, false, nil, errors.New("pkinit: CMS messageDigest mismatch")
 	}
 	sig, err := tlvContent(si[5])
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, nil, err
 	}
 	sigHash := hashBytes(hashID, derSet(attrsContent))
 	rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
 	if !ok || rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) != nil {
-		return nil, nil, false, errors.New("pkinit: invalid CMS signature")
+		return nil, nil, false, nil, errors.New("pkinit: invalid CMS signature")
 	}
 	if anchors != nil {
 		intermediates := x509.NewCertPool()
@@ -1085,10 +1137,16 @@ func verifyCMSStatus(data []byte, anchors *x509.CertPool) ([]byte, *x509.Certifi
 			}
 		}
 		if _, err := cert.Verify(x509.VerifyOptions{Roots: anchors, Intermediates: intermediates, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
-			return nil, nil, false, errors.New("pkinit: KDC certificate is not trusted")
+			return nil, nil, false, nil, errors.New("pkinit: KDC certificate is not trusted")
 		}
 	}
-	return content, cert, true, nil
+	var intermediates []*x509.Certificate
+	for _, candidate := range certificates {
+		if candidate != cert {
+			intermediates = append(intermediates, candidate)
+		}
+	}
+	return content, cert, true, intermediates, nil
 }
 
 func requireSingleTLV(data []byte) error {

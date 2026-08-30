@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
 	"unicode/utf16"
 
 	"github.com/Exonical/go-kerberos/krb5/kdb"
@@ -71,7 +70,7 @@ type pkinitSANModule struct{}
 
 func (pkinitSANModule) Authorize(cert *x509.Certificate, client principal.Principal,
 	entry *kdb.PrincipalRecord) (CertAuthDecision, []string, error) {
-	realm, components, err := pkinit.ClientSAN(cert)
+	principals, err := pkinit.ClientSANs(cert)
 	if errors.Is(err, pkinit.ErrClientSANNotFound) {
 		return CertAuthPass, nil, nil
 	}
@@ -79,17 +78,23 @@ func (pkinitSANModule) Authorize(cert *x509.Certificate, client principal.Princi
 		return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
 			"pkinit: malformed client subject alternative name")
 	}
-	if realm != client.Realm || len(components) != len(client.Components) {
-		return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
-			"pkinit: client certificate SAN principal mismatch")
-	}
-	for i := range components {
-		if components[i] != client.Components[i] {
-			return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
-				"pkinit: client certificate SAN principal mismatch")
+	for _, got := range principals {
+		if got.Realm != client.Realm || len(got.Components) != len(client.Components) {
+			continue
+		}
+		matched := true
+		for i := range got.Components {
+			if got.Components[i] != client.Components[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return CertAuthAccept, nil, nil
 		}
 	}
-	return CertAuthAccept, nil, nil
+	return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
+		"pkinit: client certificate SAN principal mismatch")
 }
 
 type pkinitEKUModule struct{}
@@ -166,7 +171,7 @@ func MatchCertificate(cert *x509.Certificate, rule string) (bool, error) {
 			return false, fmt.Errorf("pkinit: unsupported certificate match keyword %s", kind)
 		}
 		rule = rule[end+1:]
-		next := strings.IndexByte(rule, '<')
+		next := nextCertificateMatchKeyword(rule)
 		value := rule
 		if next >= 0 {
 			value, rule = rule[:next], rule[next:]
@@ -225,6 +230,23 @@ func MatchCertificate(cert *x509.Certificate, rule string) (bool, error) {
 	return true, nil
 }
 
+func nextCertificateMatchKeyword(rule string) int {
+	keywords := []string{"<SUBJECT>", "<ISSUER>", "<SAN>", "<EKU>", "<KU>"}
+	for offset := strings.IndexByte(rule, '<'); offset >= 0; {
+		for _, keyword := range keywords {
+			if strings.HasPrefix(rule[offset:], keyword) {
+				return offset
+			}
+		}
+		next := strings.IndexByte(rule[offset+1:], '<')
+		if next < 0 {
+			return -1
+		}
+		offset += next + 1
+	}
+	return -1
+}
+
 func matchRegexp(pattern, value string) (bool, error) {
 	re, err := regexp.Compile(pattern)
 	if err != nil {
@@ -238,11 +260,12 @@ func matchSAN(cert *x509.Certificate, pattern string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	realm, components, err := pkinit.ClientSAN(cert)
+	principals, err := pkinit.ClientSANs(cert)
 	if err == nil {
-		p := principal.Principal{Realm: realm, Components: components}.String()
-		if regexpMatcher.MatchString(p) {
-			return true, nil
+		for _, p := range principals {
+			if regexpMatcher.MatchString(p.String()) {
+				return true, nil
+			}
 		}
 	}
 	for _, value := range certificateUPNSANs(cert) {
@@ -306,20 +329,7 @@ func escapeCertificateNameValue(value any) string {
 			text = fmt.Sprint(value)
 		}
 	}
-	var result strings.Builder
-	for i, r := range text {
-		if (i == 0 && (r == ' ' || r == '#')) ||
-			(i == len(text)-1 && r == ' ') ||
-			strings.ContainsRune(",+\\=", r) {
-			result.WriteByte('\\')
-		}
-		if unicode.IsControl(r) {
-			result.WriteString(fmt.Sprintf("\\%02X", r))
-		} else {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
+	return text
 }
 
 const microsoftUPNSANOID = "1.3.6.1.4.1.311.20.2.3"

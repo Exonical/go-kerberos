@@ -217,9 +217,11 @@ prefixes, subject/issuer/SAN regular expressions, and EKU/KU lists. Subject
 and issuer matching preserves the certificate RDN order and uses the comma
 and plus separators emitted by MIT's `X509_NAME_print_ex`. PKINIT principal
 SANs and UPN otherName SANs are supported; arbitrary non-PKINIT SAN forms are
-not considered by `<SAN>`. Client-side certificate selection via the
-`pkinit_cert_match` profile option remains unsupported because the Go client
-does not expose MIT's multi-certificate identity store.
+not considered by `<SAN>`, and all PKINIT principal SAN entries are checked.
+Signed CMS requests retain their additional certificates as trust-chain
+intermediates for client certificate verification. Client-side certificate
+selection via the `pkinit_cert_match` profile option remains unsupported
+because the Go client does not expose MIT's multi-certificate identity store.
 
 The client and server implement RFC 3244 password changes and set-password requests
 against MIT `kadmind` on the kpasswd service port (464 by default; the isolated

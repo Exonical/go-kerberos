@@ -5,6 +5,7 @@ import (
 	"crypto/x509/pkix"
 	stdasn1 "encoding/asn1"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
@@ -147,20 +148,109 @@ func TestMatchCertificateMITComponents(t *testing.T) {
 func TestCertificateNameUsesMITRDNOrder(t *testing.T) {
 	raw, err := stdasn1.Marshal(pkix.RDNSequence{
 		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 6}, Value: "US"}},
-		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 10}, Value: "Example"}},
-		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 3}, Value: "alice"}},
+		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 10}, Value: `Comma,Plus+Equal=Quote"Semi;`}},
+		{{Type: stdasn1.ObjectIdentifier{2, 5, 4, 3}, Value: " Alice "},
+			{Type: stdasn1.ObjectIdentifier{1, 2, 3, 4}, Value: "é"}},
+		{{Type: stdasn1.ObjectIdentifier{1, 2, 3, 5}, Value: "\x01x"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cert := &x509.Certificate{RawSubject: raw, RawIssuer: raw}
-	const want = "C=US,O=Example,CN=alice"
+	const want = "C=US,O=Comma,Plus+Equal=Quote\"Semi;,1.2.3.4=é+CN= Alice ,1.2.3.5=\x01x"
 	if got := certificateName(cert.Subject, cert.RawSubject); got != want {
 		t.Fatalf("subject = %q, want %q", got, want)
 	}
-	if got, err := MatchCertificate(cert, "<SUBJECT>^"+want+"$"); err != nil || !got {
+	if got, err := MatchCertificate(cert, "<SUBJECT>^"+regexp.QuoteMeta(want)+"$"); err != nil || !got {
 		t.Fatalf("MIT-order subject match = %v, %v", got, err)
 	}
+	if got, err := MatchCertificate(cert, "<ISSUER>^"+regexp.QuoteMeta(want)+"$"); err != nil || !got {
+		t.Fatalf("MIT-order issuer match = %v, %v", got, err)
+	}
+}
+
+func TestPKINITSANMatchesSecondPrincipal(t *testing.T) {
+	_, _, cert, _ := makePKINITTestCertificate(t, "wrong", "TEST.REALM", false)
+	for i := range cert.Extensions {
+		if cert.Extensions[i].Id.Equal(stdasn1.ObjectIdentifier{2, 5, 29, 17}) {
+			cert.Extensions[i].Value = testDERSequence(
+				testPKINITOtherName("wrong", "TEST.REALM"),
+				testPKINITOtherName("alice", "TEST.REALM"),
+			)
+			break
+		}
+	}
+	client := principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}}
+	if decision, _, err := (pkinitSANModule{}).Authorize(cert, client, nil); err != nil ||
+		decision != CertAuthAccept {
+		t.Fatalf("second PKINIT SAN authorization = %v, %v, want accept", decision, err)
+	}
+	if got, err := MatchCertificate(cert, `<SAN>alice@TEST\.REALM`); err != nil || !got {
+		t.Fatalf("second PKINIT SAN match = %v, %v, want true", got, err)
+	}
+}
+
+func TestMatchCertificateLiteralAngleBrackets(t *testing.T) {
+	raw, err := stdasn1.Marshal(pkix.RDNSequence{{
+		{Type: stdasn1.ObjectIdentifier{2, 5, 4, 3}, Value: "Alice <Admin>"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &x509.Certificate{
+		RawSubject: raw,
+		KeyUsage:   x509.KeyUsageDigitalSignature,
+	}
+	for _, rule := range []string{
+		`<SUBJECT>CN=Alice <Admin>`,
+		`<SUBJECT>CN=Alice <Admin><KU>digitalSignature`,
+	} {
+		if got, err := MatchCertificate(cert, rule); err != nil || !got {
+			t.Fatalf("literal angle-bracket rule %q = %v, %v, want true", rule, got, err)
+		}
+	}
+}
+
+func testPKINITOtherName(component, realm string) []byte {
+	principal := testDERSequence(
+		testDERExplicit(0, testDER(0x1b, []byte(realm))),
+		testDERExplicit(1, testDERSequence(
+			testDERExplicit(0, testDERInteger(1)),
+			testDERExplicit(1, testDERSequence(testDER(0x1b, []byte(component)))),
+		)),
+	)
+	return testDER(0xa0, append(
+		testDEROID(stdasn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 2}),
+		testDER(0xa0, principal)...,
+	))
+}
+
+func testDERSequence(values ...[]byte) []byte {
+	var content []byte
+	for _, value := range values {
+		content = append(content, value...)
+	}
+	return testDER(0x30, content)
+}
+
+func testDERExplicit(tag byte, value []byte) []byte {
+	return testDER(0xa0|tag, value)
+}
+
+func testDERInteger(value byte) []byte {
+	return testDER(0x02, []byte{value})
+}
+
+func testDEROID(value stdasn1.ObjectIdentifier) []byte {
+	encoded, _ := stdasn1.Marshal(value)
+	return encoded
+}
+
+func testDER(tag byte, content []byte) []byte {
+	if len(content) < 128 {
+		return append([]byte{tag, byte(len(content))}, content...)
+	}
+	panic("test DER value too long")
 }
 
 func makeUPNSANExtension(t *testing.T, upn string) []byte {

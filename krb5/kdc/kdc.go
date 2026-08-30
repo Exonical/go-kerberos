@@ -804,7 +804,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
 			if err := pkinit.VerifyClientCertificateTrust(verified.Certificate,
-				s.PKINITClientCAs); err != nil {
+				s.PKINITClientCAs, verified.Intermediates...); err != nil {
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 			accepted, hwauth, certIndicators, err = s.authorizeCertificate(

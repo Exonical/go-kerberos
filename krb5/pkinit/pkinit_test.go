@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -460,6 +462,94 @@ func TestPAASReqChecksumAndNonce(t *testing.T) {
 	}
 }
 
+func TestVerifyPAASReqForKDCExposesCMSIntermediates(t *testing.T) {
+	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	rootTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "root"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate,
+		&rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "intermediate"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	intermediateDER, err := x509.CreateCertificate(rand.Reader, intermediateTemplate,
+		root, &intermediateKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intermediate, err := x509.ParseCertificate(intermediateDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "leaf"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate,
+		intermediate, &leafKey.PublicKey, intermediateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x30, 0x02, 0x05, 0x00}
+	sum := sha1.Sum(body)
+	pack := authPackDER(PKAuthenticator{
+		CTime: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Nonce: 42, PAChecksum: sum[:],
+	}, derInt(2))
+	signed, err := signCMSWithContentType(pack,
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}, leaf, leafKey, intermediate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := derSeq(der(0x80, signed))
+	verified, err := VerifyPAASReqForKDC(data, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Certificate.SerialNumber.Cmp(leaf.SerialNumber) != 0 {
+		t.Fatalf("signer certificate = %v, want leaf %v",
+			verified.Certificate.SerialNumber, leaf.SerialNumber)
+	}
+	if len(verified.Intermediates) != 1 ||
+		verified.Intermediates[0].SerialNumber.Cmp(intermediate.SerialNumber) != 0 {
+		t.Fatalf("CMS intermediates = %v, want intermediate", len(verified.Intermediates))
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	if err := VerifyClientCertificateTrust(verified.Certificate, roots,
+		verified.Intermediates...); err != nil {
+		t.Fatalf("trust with CMS intermediate = %v", err)
+	}
+}
+
 func TestLegacyPAASReqDoesNotAdvertiseKDFs(t *testing.T) {
 	cert, key := testCertificate(t)
 	client, err := NewClient(cert, key)
@@ -557,6 +647,51 @@ func TestValidateClientCertificate(t *testing.T) {
 	if err := ValidateClientCertificate(otherCA, roots, "PKINIT.TEST", []string{"alice"}); err == nil {
 		t.Fatal("untrusted client certificate accepted")
 	}
+}
+
+func TestClientSANsDistinguishesMissingAndMalformedSAN(t *testing.T) {
+	if _, err := ClientSANs(&x509.Certificate{}); !errors.Is(err, ErrClientSANNotFound) {
+		t.Fatalf("missing SAN error = %v, want ErrClientSANNotFound", err)
+	}
+	_, err := ClientSANs(&x509.Certificate{Extensions: []pkix.Extension{{
+		Id:    asn1.ObjectIdentifier{2, 5, 29, 17},
+		Value: []byte{0x30, 0x01, 0x00},
+	}}})
+	if err == nil || errors.Is(err, ErrClientSANNotFound) {
+		t.Fatalf("malformed SAN error = %v, want distinct decode error", err)
+	}
+}
+
+func TestValidateClientCertificateChecksAllPKINITSANs(t *testing.T) {
+	cert, _, roots := testPKINITCertificateWithCA(t, "wrong", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 4})
+	for i := range cert.Extensions {
+		if cert.Extensions[i].Id.Equal(asn1.ObjectIdentifier{2, 5, 29, 17}) {
+			cert.Extensions[i].Value = derSeq(
+				testPrincipalOtherName("wrong", "PKINIT.TEST"),
+				testPrincipalOtherName("alice", "PKINIT.TEST"),
+			)
+			break
+		}
+	}
+	if err := ValidateClientCertificate(cert, roots, "PKINIT.TEST",
+		[]string{"alice"}); err != nil {
+		t.Fatalf("second PKINIT SAN validation = %v", err)
+	}
+}
+
+func testPrincipalOtherName(component, realm string) []byte {
+	principalDER := derSeq(
+		derExplicit(0, der(0x1b, []byte(realm))),
+		derExplicit(1, derSeq(
+			derExplicit(0, derInt(1)),
+			derExplicit(1, derSeq(der(0x1b, []byte(component)))),
+		)),
+	)
+	return der(0xa0, append(
+		derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 2}),
+		derExplicit(0, principalDER)...,
+	))
 }
 
 func testPKINITCertificate(t testing.TB, component, realm string, eku asn1.ObjectIdentifier) (*x509.Certificate, *rsa.PrivateKey) {
