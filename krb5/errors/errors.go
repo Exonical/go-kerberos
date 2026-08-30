@@ -17,6 +17,8 @@ var (
 	ErrClockSkew = stderrors.New("kerberos clock skew")
 	// ErrTicketExpired identifies an expired ticket.
 	ErrTicketExpired = stderrors.New("kerberos ticket expired")
+	// ErrTicketNotYetValid identifies a ticket that is not yet valid.
+	ErrTicketNotYetValid = stderrors.New("kerberos ticket not yet valid")
 	// ErrTicketInvalid identifies a ticket carrying TKT_FLG_INVALID.
 	ErrTicketInvalid = stderrors.New("kerberos ticket invalid")
 	// ErrUnsupportedEType identifies an unsupported encryption type.
@@ -39,6 +41,8 @@ const (
 	KDCErrSPrincipalUnknown ErrorCode = 7
 	// KRBAPErrBadIntegrity is KRB_AP_ERR_BAD_INTEGRITY.
 	KRBAPErrBadIntegrity ErrorCode = 31
+	// KRBAPErrTktNYV is KRB_AP_ERR_TKT_NYV.
+	KRBAPErrTktNYV ErrorCode = 33
 	// KRBAPErrSkew is KRB_AP_ERR_SKEW.
 	KRBAPErrSkew ErrorCode = 37
 )
@@ -89,6 +93,8 @@ func (e *KRBError) Is(target error) bool {
 	switch e.Code {
 	case KDCErrTktExpired:
 		return target == ErrTicketExpired
+	case KRBAPErrTktNYV:
+		return target == ErrTicketNotYetValid
 	case KDCErrEtypeNosp:
 		return target == ErrUnsupportedEType
 	case KRBAPErrBadIntegrity, KDCErrPreauthFailed:

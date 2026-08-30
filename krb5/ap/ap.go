@@ -306,8 +306,8 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketInvalid)
 	}
 	now = now.UTC()
-	if !ticketValid(ticketPart, now) {
-		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketExpired)
+	if err := ticketValid(ticketPart, now, skew); err != nil {
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", err)
 	}
 	if request.Authenticator.EType != ticketPart.Key.KeyType {
 		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrIntegrity)
@@ -513,11 +513,21 @@ func findServiceEntry(kt *keytab.Keytab, ticket protocol.Ticket) (keytab.Entry, 
 	return selected, nil
 }
 
-func ticketValid(part protocol.EncTicketPart, now time.Time) bool {
-	if part.StartTime != nil && now.Before(part.StartTime.Time) {
-		return false
+func ticketValid(part protocol.EncTicketPart, now time.Time, skew time.Duration) error {
+	if skew < 0 {
+		skew = -skew
 	}
-	return !now.After(part.EndTime.Time)
+	start := part.AuthTime.Time
+	if part.StartTime != nil && part.StartTime.Present {
+		start = part.StartTime.Time
+	}
+	if now.Before(start.Add(-skew)) {
+		return krberrors.ErrTicketNotYetValid
+	}
+	if now.After(part.EndTime.Time.Add(skew)) {
+		return krberrors.ErrTicketExpired
+	}
+	return nil
 }
 
 func withinSkew(value, now time.Time, skew time.Duration) bool {

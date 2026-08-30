@@ -150,7 +150,7 @@ func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 
 func TestVerifyAPReqRejectsExpiredTicket(t *testing.T) {
 	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
-	creds, kt := apFixture(t, now, now.Add(-time.Minute))
+	creds, kt := apFixture(t, now, now.Add(-6*time.Minute))
 	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x55}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
@@ -159,6 +159,129 @@ func TestVerifyAPReqRejectsExpiredTicket(t *testing.T) {
 	}
 	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketExpired) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrTicketExpired", err)
+	}
+}
+
+func TestVerifyAPReqRejectsNotYetValidTicket(t *testing.T) {
+	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
+	creds, kt := apFixture(t, now.Add(6*time.Minute), now.Add(time.Hour))
+	_, der, err := BuildAPReq(creds, 0, now.Add(6*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketNotYetValid) {
+		t.Fatalf("VerifyAPReq error = %v, want ErrTicketNotYetValid", err)
+	}
+}
+
+func TestTicketValidMatchesMIT(t *testing.T) {
+	present := func(seconds int64) types.KerberosTime {
+		return types.KerberosTime{Time: time.Unix(seconds, 0).UTC(), Present: true}
+	}
+	now := time.Unix(1000, 0).UTC()
+	skew := 300 * time.Second
+	tests := []struct {
+		name string
+		part protocol.EncTicketPart
+		want error
+	}{
+		{
+			name: "current time within lifetime",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), EndTime: present(1500),
+			},
+		},
+		{
+			name: "zero start falls back to auth time",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: &types.KerberosTime{},
+				EndTime: present(1500),
+			},
+		},
+		{
+			name: "start within clock skew",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1100, 0).UTC()),
+				EndTime: present(1500),
+			},
+		},
+		{
+			name: "start at clock skew boundary",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1300, 0).UTC()),
+				EndTime: present(1500),
+			},
+		},
+		{
+			name: "start beyond clock skew",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1400, 0).UTC()),
+				EndTime: present(1500),
+			},
+			want: krberrors.ErrTicketNotYetValid,
+		},
+		{
+			name: "end within clock skew",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
+				EndTime: present(800),
+			},
+		},
+		{
+			name: "end at clock skew boundary",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
+				EndTime: present(700),
+			},
+		},
+		{
+			name: "end beyond clock skew",
+			part: protocol.EncTicketPart{
+				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
+				EndTime: present(600),
+			},
+			want: krberrors.ErrTicketExpired,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ticketValid(test.part, now, skew); !errors.Is(err, test.want) {
+				t.Fatalf("ticketValid = %v, want %v", err, test.want)
+			}
+		})
+	}
+
+	const boundary = int64(-1 << 31)
+	boundaryNow := time.Unix(boundary-100, 0).UTC()
+	if err := ticketValid(protocol.EncTicketPart{
+		AuthTime: present(boundary - 200), EndTime: present(boundary + 500),
+	}, boundaryNow, skew); err != nil {
+		t.Fatalf("Y2038-boundary lifetime rejected: %v", err)
+	}
+	start := kerberosTime(time.Unix(boundary+100, 0).UTC())
+	if err := ticketValid(protocol.EncTicketPart{
+		AuthTime: present(boundary - 200), StartTime: start,
+		EndTime: present(boundary + 500),
+	}, boundaryNow, skew); err != nil {
+		t.Fatalf("Y2038-boundary start within skew rejected: %v", err)
+	}
+	start = kerberosTime(time.Unix(boundary+250, 0).UTC())
+	if err := ticketValid(protocol.EncTicketPart{
+		AuthTime: present(boundary - 200), StartTime: start,
+		EndTime: present(boundary + 500),
+	}, boundaryNow, skew); !errors.Is(err, krberrors.ErrTicketNotYetValid) {
+		t.Fatalf("Y2038-boundary start result = %v, want ErrTicketNotYetValid", err)
+	}
+	boundaryNow = time.Unix(boundary+100, 0).UTC()
+	if err := ticketValid(protocol.EncTicketPart{
+		AuthTime: present(boundary - 1000), EndTime: present(boundary - 100),
+	}, boundaryNow, skew); err != nil {
+		t.Fatalf("Y2038-boundary end within skew rejected: %v", err)
+	}
+	if err := ticketValid(protocol.EncTicketPart{
+		AuthTime: present(boundary - 1000), EndTime: present(boundary - 300),
+	}, boundaryNow, skew); !errors.Is(err, krberrors.ErrTicketExpired) {
+		t.Fatalf("Y2038-boundary end result = %v, want ErrTicketExpired", err)
 	}
 }
 
