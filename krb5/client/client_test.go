@@ -14,6 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -104,6 +105,146 @@ func TestASExchangePreauthRetry(t *testing.T) {
 		result.Client.Components[0] != clientPrincipal.Components[0] ||
 		result.Key.KeyType != crypto.EnctypeAES256SHA1 {
 		t.Fatalf("result = %#v, calls = %d", result, calls)
+	}
+}
+
+func TestASExchangeFASTEchoesKDCookie(t *testing.T) {
+	for _, encryptedChallenge := range []bool{false, true} {
+		name := "encrypted-timestamp"
+		if encryptedChallenge {
+			name = "encrypted-challenge"
+		}
+		t.Run(name, func(t *testing.T) {
+			testASExchangeFASTEchoesKDCookie(t, encryptedChallenge)
+		})
+	}
+}
+
+func testASExchangeFASTEchoesKDCookie(t *testing.T, encryptedChallenge bool) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	user := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := asn1.Marshal(protocol.Ticket{
+		TktVNO: 5, Realm: testRealm,
+		SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance),
+			NameString: []string{"krbtgt", testRealm}},
+		EncPart: protocol.EncryptedData{EType: etype.ID(), Cipher: []byte{1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	armorTGT := &Credentials{
+		Ticket: ticket, Client: user,
+		Key: protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: bytes.Repeat([]byte{0x11}, etype.KeySize())},
+	}
+	cookie := []byte("kdc-cookie")
+	var retryPA protocol.MethodData
+	var calls int
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.ASReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatalf("AS-REQ: %v", err)
+		}
+		if len(request.PAData) != 1 || request.PAData[0].PADataType != fast.PAFXFast {
+			t.Fatalf("AS-REQ padata = %#v", request.PAData)
+		}
+		var wrapped protocol.PAFXFastRequest
+		if err := asn1.Unmarshal(request.PAData[0].PADataValue, &wrapped); err != nil {
+			t.Fatalf("FAST request: %v", err)
+		}
+		var apReq protocol.APReq
+		if err := asn1.Unmarshal(wrapped.ArmoredData.Armor.ArmorValue, &apReq); err != nil {
+			t.Fatalf("FAST armor AP-REQ: %v", err)
+		}
+		authPlain, err := etype.Decrypt(armorTGT.Key.KeyValue, 11, apReq.Authenticator.Cipher)
+		if err != nil {
+			t.Fatalf("FAST armor authenticator: %v", err)
+		}
+		var authenticator protocol.Authenticator
+		if err := asn1.Unmarshal(authPlain, &authenticator); err != nil {
+			t.Fatalf("FAST authenticator: %v", err)
+		}
+		armorKey, err := crypto.CF2(etype, authenticator.SubKey.KeyValue, armorTGT.Key.KeyValue,
+			[]byte("subkeyarmor"), []byte("ticketarmor"))
+		if err != nil {
+			t.Fatalf("FAST armor key: %v", err)
+		}
+		plain, err := etype.Decrypt(armorKey, fast.UsageReq, wrapped.ArmoredData.EncFastReq.Cipher)
+		if err != nil {
+			t.Fatalf("FAST request decrypt: %v", err)
+		}
+		var inner protocol.KrbFastReq
+		if err := asn1.Unmarshal(plain, &inner); err != nil {
+			t.Fatalf("FAST request body: %v", err)
+		}
+		if calls > 0 {
+			retryPA = inner.PAData
+			return asn1.Marshal(protocol.KRBError{
+				PVNO: 5, MsgType: 30, STime: kerberosTime(now), Susec: 0,
+				ErrorCode: 24, Realm: testRealm,
+				SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance),
+					NameString: []string{"krbtgt", testRealm}},
+			})
+		}
+		calls++
+		salt := testRealm + "alice"
+		etypeInfo, err := asn1.Marshal(protocol.ETypeInfo2{{EType: etype.ID(), Salt: &salt}})
+		if err != nil {
+			t.Fatalf("ETYPE-INFO2: %v", err)
+		}
+		fastPAData := protocol.MethodData{
+			{PADataType: preauth.PADataETypeInfo2, PADataValue: etypeInfo},
+			{PADataType: preauth.PADataCookie, PADataValue: cookie},
+		}
+		if encryptedChallenge {
+			fastPAData = append(fastPAData, protocol.PAData{
+				PADataType: preauth.PADataEncryptedChallenge,
+			})
+		}
+		fastResponse, err := asn1.Marshal(protocol.KrbFastResponse{
+			PAData: fastPAData,
+			Nonce:  request.ReqBody.Nonce,
+		})
+		if err != nil {
+			t.Fatalf("FAST response: %v", err)
+		}
+		cipher, err := etype.Encrypt(armorKey, fast.UsageRep, fastResponse)
+		if err != nil {
+			t.Fatalf("FAST response encryption: %v", err)
+		}
+		fastPA, err := asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+			EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher},
+		}})
+		if err != nil {
+			t.Fatalf("FAST reply: %v", err)
+		}
+		errorData, err := asn1.Marshal(protocol.MethodData{{PADataType: fast.PAFXFast, PADataValue: fastPA}})
+		if err != nil {
+			t.Fatalf("FAST error data: %v", err)
+		}
+		return asn1.Marshal(protocol.KRBError{
+			PVNO: 5, MsgType: 30, STime: kerberosTime(now), Susec: 0,
+			ErrorCode: 25, Realm: testRealm,
+			SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance),
+				NameString: []string{"krbtgt", testRealm}},
+			EData: errorData,
+		})
+	}
+	kclient := &Client{
+		Now:      func() time.Time { return now },
+		Config:   &config.Config{DefaultTKTEnctypes: []int32{etype.ID()}},
+		Exchange: exchange,
+	}
+	_, _ = kclient.ASExchangeFAST(context.Background(), user, "alice-password", armorTGT)
+	if len(retryPA) != 2 {
+		t.Fatalf("FAST retry padata = %#v, want preauth and cookie", retryPA)
+	}
+	retryCookie := preauth.FindPAData(retryPA, preauth.PADataCookie)
+	if retryCookie == nil || !bytes.Equal(retryCookie.PADataValue, cookie) {
+		t.Fatalf("FAST retry cookie = %#v, want %q", retryCookie, cookie)
 	}
 }
 

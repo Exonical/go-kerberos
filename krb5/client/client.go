@@ -441,7 +441,11 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		if err != nil {
 			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
 		}
-		fastData, err = armor.WrapASReq(request.ReqBody, protocol.MethodData{retryPA})
+		retryPAData := protocol.MethodData{retryPA}
+		if cookie := preauth.FindPAData(fastReply.PAData, preauth.PADataCookie); cookie != nil {
+			retryPAData = append(retryPAData, *cookie)
+		}
+		fastData, err = armor.WrapASReq(request.ReqBody, retryPAData)
 		if err != nil {
 			return nil, err
 		}
