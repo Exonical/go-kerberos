@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -130,6 +131,179 @@ func TestWrapUnwrapIOVConfidentialityAndSignOnly(t *testing.T) {
 	}
 }
 
+func TestWrapUnwrapIOVInterleavedSignOnly(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	for _, sealed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sealed-%t", sealed), func(t *testing.T) {
+			iov := []IOVBuffer{
+				{Type: IOVHeader},
+				{Type: IOVSignOnly, Buffer: []byte("before")},
+				{Type: IOVData, Buffer: []byte("one")},
+				{Type: IOVSignOnly, Buffer: []byte("between")},
+				{Type: IOVData, Buffer: []byte("two")},
+				{Type: IOVTrailer},
+			}
+			sender := testPRFContext(key)
+			if err := sender.WrapIOV(iov, sealed); err != nil {
+				t.Fatal(err)
+			}
+			receiver := testPRFContext(key)
+			receiver.initiator = false
+			if err := receiver.UnwrapIOV(iov); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(iov[2].Buffer) + string(iov[4].Buffer); got != "onetwo" {
+				t.Fatalf("unwrapped interleaved data = %q", got)
+			}
+		})
+	}
+}
+
+func rotateIOVPayload(iov []IOVBuffer, rrc int) []IOVBuffer {
+	out := make([]IOVBuffer, len(iov))
+	for index, buffer := range iov {
+		out[index] = IOVBuffer{Type: buffer.Type, Buffer: append([]byte(nil), buffer.Buffer...)}
+	}
+	payload := append([]byte(nil), out[0].Buffer[16:]...)
+	for _, buffer := range out[1:] {
+		if buffer.Type == IOVData || buffer.Type == IOVPadding || buffer.Type == IOVTrailer {
+			payload = append(payload, buffer.Buffer...)
+		}
+	}
+	rrc %= len(payload)
+	rotated := append(append([]byte(nil), payload[len(payload)-rrc:]...), payload[:len(payload)-rrc]...)
+	binary.BigEndian.PutUint16(out[0].Buffer[6:8], uint16(rrc))
+	offset := 0
+	headerExtra := len(out[0].Buffer) - 16
+	out[0].Buffer = append(out[0].Buffer[:16], rotated[:headerExtra]...)
+	offset += headerExtra
+	for index := 1; index < len(out); index++ {
+		if out[index].Type != IOVData && out[index].Type != IOVPadding && out[index].Type != IOVTrailer {
+			continue
+		}
+		length := len(out[index].Buffer)
+		out[index].Buffer = append([]byte(nil), rotated[offset:offset+length]...)
+		offset += length
+	}
+	return out
+}
+
+func TestUnwrapIOVSignOnlyRRC(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	for _, sealed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sealed-%t", sealed), func(t *testing.T) {
+			iov := []IOVBuffer{
+				{Type: IOVHeader},
+				{Type: IOVSignOnly, Buffer: []byte("associated")},
+				{Type: IOVData, Buffer: []byte("payload")},
+				{Type: IOVTrailer},
+			}
+			sender := testPRFContext(key)
+			if err := sender.WrapIOV(iov, sealed); err != nil {
+				t.Fatal(err)
+			}
+			rotated := rotateIOVPayload(iov, 5)
+			receiver := testPRFContext(key)
+			receiver.initiator = false
+			if err := receiver.UnwrapIOV(rotated); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(rotated[2].Buffer); got != "payload" {
+				t.Fatalf("unwrapped RRC data = %q", got)
+			}
+		})
+	}
+}
+
+func TestUnwrapIOVRejectsShortPeerBuffers(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	ctx := testPRFContext(key)
+	tests := map[string][]IOVBuffer{
+		"short header": {
+			{Type: IOVHeader, Buffer: []byte{0x05}},
+			{Type: IOVData, Buffer: []byte("x")},
+			{Type: IOVTrailer, Buffer: make([]byte, 12)},
+		},
+		"short sealed trailer": {
+			{Type: IOVHeader, Buffer: append([]byte{0x05, 0x04, tokenFlagSealed, 0xff}, make([]byte, 12)...)},
+			{Type: IOVData, Buffer: []byte("x")},
+			{Type: IOVTrailer, Buffer: []byte{1}},
+		},
+	}
+	for name, iov := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := ctx.UnwrapIOV(iov); err == nil {
+				t.Fatal("malformed IOV unexpectedly accepted")
+			}
+		})
+	}
+}
+
+func standardSealedNonzeroECToken(t *testing.T) []byte {
+	t.Helper()
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := messageHeader([]byte{0x05, 0x04}, tokenFlagSealed, 16, 0, 0)
+	input := append([]byte("payload"), bytes.Repeat([]byte{0xff}, 16)...)
+	input = append(input, header...)
+	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 16)))
+	encrypted, err := etype.Encrypt(key, 24, input)
+	restore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(append([]byte(nil), header...), encrypted...)
+}
+
+func TestStandardSealedNonzeroEC(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	token := standardSealedNonzeroECToken(t)
+	receiver := testPRFContext(key)
+	receiver.initiator = false
+	plain, err := receiver.unwrap(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(plain) != "payload" {
+		t.Fatalf("standard EC plaintext = %q", plain)
+	}
+}
+
+func TestUnwrapIOVStandardSealedNonzeroEC(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	token := standardSealedNonzeroECToken(t)
+	iov := []IOVBuffer{
+		{Type: IOVHeader, Buffer: append([]byte(nil), token[:32]...)},
+		{Type: IOVData, Buffer: append([]byte(nil), token[32:39]...)},
+		{Type: IOVPadding, Buffer: append([]byte(nil), token[39:55]...)},
+		{Type: IOVTrailer, Buffer: append([]byte(nil), token[len(token)-28:]...)},
+	}
+	receiver := testPRFContext(key)
+	receiver.initiator = false
+	if err := receiver.UnwrapIOV(iov); err != nil {
+		t.Fatal(err)
+	}
+	if string(iov[1].Buffer) != "payload" {
+		t.Fatalf("fragmented standard EC plaintext = %q", iov[1].Buffer)
+	}
+}
+
+func TestUnwrapIOVStreamStandardSealedNonzeroEC(t *testing.T) {
+	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
+	iov := []IOVBuffer{{Type: IOVStream, Buffer: standardSealedNonzeroECToken(t)}}
+	receiver := testPRFContext(key)
+	receiver.initiator = false
+	if err := receiver.UnwrapIOV(iov); err != nil {
+		t.Fatal(err)
+	}
+	if string(iov[0].Buffer) != "payload" {
+		t.Fatalf("stream standard EC plaintext = %q", iov[0].Buffer)
+	}
+}
+
 func TestUnwrapIOVStream(t *testing.T) {
 	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
 	sender := testPRFContext(key)
@@ -167,6 +341,7 @@ func TestWrapIOVDCEStyle(t *testing.T) {
 	}
 	receiver := testPRFContext(key)
 	receiver.initiator = false
+	receiver.SetDCEStyle(true)
 	if err := receiver.UnwrapIOV(iov); err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +366,9 @@ func TestWrapIOVLengthAndBufferValidation(t *testing.T) {
 	if lengths != (IOVLengths{Header: 32, Padding: 0, Trailer: 28}) {
 		t.Fatalf("lengths = %+v", lengths)
 	}
-	if len(iov[0].Buffer) != lengths.Header || len(iov[3].Buffer) != lengths.Trailer {
-		t.Fatalf("query did not size output buffers: header=%d trailer=%d",
+	if len(iov[0].Buffer) != 0 || len(iov[3].Buffer) != 0 {
+		t.Fatalf("query mutated output buffers: header=%d trailer=%d",
 			len(iov[0].Buffer), len(iov[3].Buffer))
-	}
-	iov[0].Buffer = make([]byte, lengths.Header-1)
-	if _, err := ctx.WrapIOVLength(iov, true); err == nil {
-		t.Fatal("undersized header buffer unexpectedly accepted")
 	}
 }
 
@@ -212,6 +383,9 @@ func TestIOVRejectsMalformedLayouts(t *testing.T) {
 		},
 		"stream with data": {
 			{Type: IOVStream, Buffer: []byte("x")}, {Type: IOVData},
+		},
+		"wrap without trailer": {
+			{Type: IOVHeader}, {Type: IOVData, Buffer: []byte("x")},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

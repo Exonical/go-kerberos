@@ -78,17 +78,6 @@ func (c *Context) WrapIOVLength(iov []IOVBuffer, sealed bool) (IOVLengths, error
 	} else {
 		lengths = IOVLengths{Header: 16, Padding: 0, Trailer: etype.ChecksumSize()}
 	}
-	if err := sizeIOVBuffer(&iov[parseHeaderIndex(iov)], lengths.Header); err != nil {
-		return IOVLengths{}, err
-	}
-	if padding := parseBufferIndex(iov, IOVBufferTypePadding); padding >= 0 {
-		iov[padding].Buffer = iov[padding].Buffer[:0]
-	}
-	if trailer := parseBufferIndex(iov, IOVBufferTypeTrailer); trailer >= 0 {
-		if err := sizeIOVBuffer(&iov[trailer], lengths.Trailer); err != nil {
-			return IOVLengths{}, err
-		}
-	}
 	return lengths, nil
 }
 
@@ -102,10 +91,7 @@ func (c *Context) WrapIOVWithOptions(iov []IOVBuffer, sealed bool, options IOVOp
 	if c == nil {
 		return fmt.Errorf("GSS IOV wrap: nil context")
 	}
-	previous := c.dceStyle
-	c.dceStyle = options.DCEStyle
-	defer func() { c.dceStyle = previous }()
-	return c.WrapIOV(iov, sealed)
+	return c.wrapIOV(iov, sealed, options.DCEStyle)
 }
 
 // WrapIOV emits an RFC 4121 wrap token into typed IOV buffers.  It supports
@@ -116,25 +102,32 @@ func (c *Context) WrapIOV(iov []IOVBuffer, sealed bool) error {
 	if c == nil {
 		return fmt.Errorf("GSS IOV wrap: nil context")
 	}
+	return c.wrapIOV(iov, sealed, c.dceStyle)
+}
+
+func (c *Context) wrapIOV(iov []IOVBuffer, sealed, dceStyle bool) error {
 	parts, err := parseIOV(iov, false)
 	if err != nil {
 		return err
+	}
+	if parts.trailer < 0 {
+		return fmt.Errorf("GSS IOV: missing TRAILER buffer")
 	}
 	etype, err := crypto.NewRegistry().Get(c.key.KeyType)
 	if err != nil {
 		return err
 	}
 	checksumSize := etype.ChecksumSize()
-	lengths, err := c.WrapIOVLength(iov, sealed)
+	lengths, err := c.wrapIOVLength(iov, sealed, dceStyle)
 	if err != nil {
 		return err
 	}
 	plain := concatBuffers(iov, parts.data)
 	if len(parts.signOnly) != 0 {
-		return c.wrapIOVWithAssociatedData(iov, parts, sealed)
+		return c.wrapIOVWithAssociatedData(iov, parts, sealed, dceStyle)
 	}
 	var token []byte
-	if sealed && c.dceStyle {
+	if sealed && dceStyle {
 		token, err = c.wrapDCE(plain)
 	} else {
 		token, err = c.wrap(plain, sealed)
@@ -160,7 +153,7 @@ func (c *Context) WrapIOV(iov []IOVBuffer, sealed bool) error {
 			return err
 		}
 		trailer := make([]byte, lengths.Trailer)
-		if c.dceStyle {
+		if dceStyle {
 			for index := range trailer[:16] {
 				trailer[index] = 0xff
 			}
@@ -189,6 +182,24 @@ func (c *Context) WrapIOV(iov []IOVBuffer, sealed bool) error {
 		iov[parts.padding].Buffer = iov[parts.padding].Buffer[:0]
 	}
 	return nil
+}
+
+func (c *Context) wrapIOVLength(iov []IOVBuffer, sealed, dceStyle bool) (IOVLengths, error) {
+	if _, err := parseIOV(iov, false); err != nil {
+		return IOVLengths{}, err
+	}
+	etype, err := crypto.NewRegistry().Get(c.key.KeyType)
+	if err != nil {
+		return IOVLengths{}, err
+	}
+	if sealed {
+		ec := 0
+		if dceStyle {
+			ec = 16
+		}
+		return IOVLengths{Header: 32, Trailer: ec + 16 + etype.ChecksumSize()}, nil
+	}
+	return IOVLengths{Header: 16, Trailer: etype.ChecksumSize()}, nil
 }
 
 func (c *Context) wrapDCE(data []byte) ([]byte, error) {
@@ -250,21 +261,41 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 			return err
 		}
 		ec := int(binary.BigEndian.Uint16(header[4:6]))
+		rrc := int(binary.BigEndian.Uint16(header[6:8]))
 		sealed := header[2]&tokenFlagSealed != 0
 		if sealed {
-			body := append([]byte(nil), iov[parts.header].Buffer[16:]...)
-			for _, index := range parts.data {
-				body = append(body, iov[index].Buffer...)
+			checksumSize := etype.ChecksumSize()
+			trailerLen := 16 + checksumSize
+			if c.dceStyle {
+				trailerLen += ec
 			}
-			if parts.padding >= 0 {
-				body = append(body, iov[parts.padding].Buffer...)
-			}
-			ec := int(binary.BigEndian.Uint16(header[4:6]))
-			if len(iov[parts.trailer].Buffer) < ec {
+			if len(iov[parts.trailer].Buffer) != trailerLen {
 				return fmt.Errorf("GSS IOV unwrap: invalid trailer")
 			}
-			body = append(body, iov[parts.trailer].Buffer[ec:]...)
-			associated := concatBuffers(iov, parts.signOnly)
+			payload := append([]byte(nil), iov[parts.header].Buffer[16:]...)
+			for _, index := range parts.data {
+				payload = append(payload, iov[index].Buffer...)
+			}
+			if parts.padding >= 0 {
+				payload = append(payload, iov[parts.padding].Buffer...)
+			}
+			payload = append(payload, iov[parts.trailer].Buffer...)
+			payload, err = rotateLeft(payload, rrc)
+			if err != nil {
+				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+			}
+			if len(payload) < trailerLen {
+				return fmt.Errorf("GSS IOV unwrap: invalid trailer")
+			}
+			trailerStart := len(payload) - trailerLen
+			body := append([]byte(nil), payload...)
+			if c.dceStyle {
+				if ec > 0 {
+					copy(body[trailerStart:], body[trailerStart+ec:])
+					body = body[:len(body)-ec]
+				}
+			}
+			associated := orderedSignOnlyBuffers(iov)
 			usage := uint32(24)
 			if c.initiator {
 				usage = 22
@@ -274,10 +305,19 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
 			}
 			expected := plain[len(plain)-16:]
-			if !equalBytes(expected, header) {
+			expectedHeader := append([]byte(nil), header...)
+			expectedHeader[6], expectedHeader[7] = 0, 0
+			if !equalBytes(expected, expectedHeader) {
 				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
 			}
-			if err := distributeIOV(iov, parts.data, plain[:len(plain)-16]); err != nil {
+			body = plain[:len(plain)-16]
+			if !c.dceStyle {
+				if ec > len(body) {
+					return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+				}
+				body = body[:len(body)-ec]
+			}
+			if err := distributeIOV(iov, parts.data, body); err != nil {
 				return err
 			}
 			c.recvSeq++
@@ -286,22 +326,42 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 		if ec != etype.ChecksumSize() || len(iov[parts.trailer].Buffer) != ec {
 			return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
 		}
+		payload := append([]byte(nil), iov[parts.header].Buffer[16:]...)
+		for _, index := range parts.data {
+			payload = append(payload, iov[index].Buffer...)
+		}
+		if parts.padding >= 0 {
+			payload = append(payload, iov[parts.padding].Buffer...)
+		}
+		payload = append(payload, iov[parts.trailer].Buffer...)
+		payload, err = rotateLeft(payload, rrc)
+		if err != nil || len(payload) < ec {
+			return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+		}
+		mac := payload[len(payload)-ec:]
+		canonicalData := payload[:len(payload)-ec]
 		canonical := append([]byte(nil), header...)
-		canonical[4], canonical[5], canonical[6], canonical[7] = 0, 0, 0, 0
-		signed := concatBuffers(iov, parts.data)
-		signed = append(signed, concatBuffers(iov, parts.signOnly)...)
+		canonical[6], canonical[7] = 0, 0
+		canonical[4], canonical[5] = 0, 0
+		signed := orderedMessageBuffersWithData(iov, canonicalData)
 		signed = append(signed, canonical...)
 		usage := uint32(24)
 		if c.initiator {
 			usage = 22
 		}
-		if err := etype.VerifyChecksum(c.key.KeyValue, usage, signed, iov[parts.trailer].Buffer); err != nil {
+		if err := etype.VerifyChecksum(c.key.KeyValue, usage, signed, mac); err != nil {
 			return fmt.Errorf("GSS IOV unwrap: %w", err)
+		}
+		if err := distributeIOV(iov, parts.data, canonicalData); err != nil {
+			return err
 		}
 		c.recvSeq++
 		return nil
 	}
 	token := make([]byte, 0, 16+len(iov[parts.header].Buffer)-16+parts.dataLen+len(iov[parts.trailer].Buffer))
+	if len(iov[parts.header].Buffer) < 16 {
+		return fmt.Errorf("GSS IOV unwrap: invalid header")
+	}
 	token = append(token, iov[parts.header].Buffer[:16]...)
 	if len(iov[parts.header].Buffer) > 16 {
 		token = append(token, iov[parts.header].Buffer[16:]...)
@@ -313,17 +373,38 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 		token = append(token, iov[parts.padding].Buffer...)
 	}
 	if parts.trailer >= 0 {
-		if iov[parts.header].Buffer[2]&tokenFlagSealed != 0 {
-			ec := int(binary.BigEndian.Uint16(iov[parts.header].Buffer[4:6]))
-			if ec > len(iov[parts.trailer].Buffer) {
-				return fmt.Errorf("GSS IOV unwrap: invalid trailer")
-			}
-			token = append(token, iov[parts.trailer].Buffer[ec:]...)
-		} else {
-			token = append(token, iov[parts.trailer].Buffer...)
+		token = append(token, iov[parts.trailer].Buffer...)
+	}
+	header := append([]byte(nil), token[:16]...)
+	payload := append([]byte(nil), token[16:]...)
+	rrc := int(binary.BigEndian.Uint16(header[6:8]))
+	payload, err = rotateLeft(payload, rrc)
+	if err != nil {
+		return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+	}
+	if header[2]&tokenFlagSealed != 0 {
+		ec := int(binary.BigEndian.Uint16(header[4:6]))
+		etype, lookupErr := crypto.NewRegistry().Get(c.key.KeyType)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		trailerLen := 16 + etype.ChecksumSize()
+		if c.dceStyle {
+			trailerLen += ec
+		}
+		if len(payload) < trailerLen {
+			return fmt.Errorf("GSS IOV unwrap: invalid trailer")
+		}
+		trailerStart := len(payload) - trailerLen
+		if c.dceStyle && ec > 0 {
+			body := append([]byte(nil), payload[:trailerStart]...)
+			body = append(body, payload[trailerStart+ec:]...)
+			payload = body
 		}
 	}
-	plain, err := c.unwrap(token)
+	header[6], header[7] = 0, 0
+	token = append(header, payload...)
+	plain, err := c.unwrapToken(token, c.dceStyle)
 	if err != nil {
 		return err
 	}
@@ -407,6 +488,54 @@ func concatBuffers(iov []IOVBuffer, indices []int) []byte {
 	return value
 }
 
+func orderedMessageIndices(iov []IOVBuffer) []int {
+	indices := make([]int, 0, len(iov))
+	for index, buffer := range iov {
+		if buffer.Type == IOVBufferTypeData || buffer.Type == IOVBufferTypeSignOnly {
+			indices = append(indices, index)
+		}
+	}
+	return indices
+}
+
+func orderedMessageBuffers(iov []IOVBuffer) []byte {
+	return concatBuffers(iov, orderedMessageIndices(iov))
+}
+
+func orderedMessageBuffersWithData(iov []IOVBuffer, data []byte) []byte {
+	value := make([]byte, 0, len(data))
+	offset := 0
+	for _, buffer := range iov {
+		switch buffer.Type {
+		case IOVBufferTypeData:
+			length := len(buffer.Buffer)
+			if offset+length > len(data) {
+				length = len(data) - offset
+			}
+			if length > 0 {
+				value = append(value, data[offset:offset+length]...)
+				offset += length
+			}
+		case IOVBufferTypeSignOnly:
+			value = append(value, buffer.Buffer...)
+		}
+	}
+	if offset < len(data) {
+		value = append(value, data[offset:]...)
+	}
+	return value
+}
+
+func orderedSignOnlyBuffers(iov []IOVBuffer) []byte {
+	indices := make([]int, 0, len(iov))
+	for index, buffer := range iov {
+		if buffer.Type == IOVBufferTypeSignOnly {
+			indices = append(indices, index)
+		}
+	}
+	return concatBuffers(iov, indices)
+}
+
 func setIOVOutput(buffer *IOVBuffer, value []byte) error {
 	if buffer.Buffer != nil && cap(buffer.Buffer) < len(value) {
 		return fmt.Errorf("GSS IOV: buffer too small (have %d, need %d)", cap(buffer.Buffer), len(value))
@@ -473,7 +602,7 @@ func distributeIOV(iov []IOVBuffer, indices []int, value []byte) error {
 	return nil
 }
 
-func (c *Context) wrapIOVWithAssociatedData(iov []IOVBuffer, parts iovLayout, sealed bool) error {
+func (c *Context) wrapIOVWithAssociatedData(iov []IOVBuffer, parts iovLayout, sealed, dceStyle bool) error {
 	etype, err := crypto.NewRegistry().Get(c.key.KeyType)
 	if err != nil {
 		return err
@@ -493,12 +622,12 @@ func (c *Context) wrapIOVWithAssociatedData(iov []IOVBuffer, parts iovLayout, se
 	var token []byte
 	if sealed {
 		ec := 0
-		if c.dceStyle {
+		if dceStyle {
 			ec = 16
 		}
 		header := messageHeader([]byte{0x05, 0x04}, flags|tokenFlagSealed, ec, 0, c.sendSeq)
 		encrypted, err := crypto.EncryptWithAssociatedData(etype, c.key.KeyValue, usage,
-			append(append([]byte(nil), plain...), header...), concatBuffers(iov, parts.signOnly))
+			append(append([]byte(nil), plain...), header...), orderedSignOnlyBuffers(iov))
 		if err != nil {
 			return err
 		}
@@ -507,7 +636,7 @@ func (c *Context) wrapIOVWithAssociatedData(iov []IOVBuffer, parts iovLayout, se
 		header := messageHeader([]byte{0x05, 0x04}, flags, etype.ChecksumSize(), 0, c.sendSeq)
 		canonical := append([]byte(nil), header...)
 		canonical[4], canonical[5], canonical[6], canonical[7] = 0, 0, 0, 0
-		signed := append(append([]byte(nil), plain...), concatBuffers(iov, parts.signOnly)...)
+		signed := append([]byte(nil), orderedMessageBuffers(iov)...)
 		signed = append(signed, canonical...)
 		mac, err := etype.Checksum(c.key.KeyValue, usage, signed)
 		if err != nil {
@@ -533,7 +662,10 @@ func (c *Context) wrapIOVWithAssociatedData(iov []IOVBuffer, parts iovLayout, se
 			return err
 		}
 		trailer := make([]byte, lengths.Trailer)
-		ec := lengths.Trailer - 16 - checksumSize
+		ec := 0
+		if dceStyle {
+			ec = lengths.Trailer - 16 - checksumSize
+		}
 		for index := range trailer[:ec] {
 			trailer[index] = 0xff
 		}
