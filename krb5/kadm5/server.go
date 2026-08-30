@@ -49,6 +49,13 @@ type Server struct {
 	API            uint32
 	ErrorLog       func(error)
 	Now            func() time.Time
+	// PasswordQualityModules are evaluated after the named policy. A nil value
+	// uses MIT's built-in empty and princ modules.
+	PasswordQualityModules []PasswordQualityModule
+	// Hooks run in order around principal mutations.
+	Hooks []Kadm5Hook
+	// DictionaryFile configures the optional MIT dictionary module.
+	DictionaryFile string
 
 	wg sync.WaitGroup
 }
@@ -434,9 +441,39 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "create", entry.Principal) {
 			return status(authAdd)
 		}
+		policyName := ""
+		if mask&KADM5Policy != 0 && mask&KADM5PolicyClear == 0 {
+			policyName = entry.Policy
+		}
+		if policyName != "" {
+			policy, policyErr := s.Database.GetPolicy(policyName)
+			if policyErr != nil {
+				return status(kdbCode(policyErr))
+			}
+			if qualityErr := checkPolicy(password, &policy); qualityErr != nil {
+				return status(kdbCode(qualityErr))
+			}
+		}
+		if qualityErr := s.checkPasswordQuality(password, policyName, entry.Principal); qualityErr != nil {
+			return status(kdbCode(qualityErr))
+		}
+		event := HookEvent{Operation: "create", Principal: entry.Principal, Entry: entry, Mask: mask, Password: password}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
 		if err := s.Database.CreatePrincipal(formatPrincipal(entry.Principal), password); err != nil {
 			return status(kdbCode(err))
 		}
+		if mask&KADM5Policy != 0 {
+			policy := policyName
+			if mask&KADM5PolicyClear != 0 {
+				policy = ""
+			}
+			if err := s.Database.SetPrincipalPolicy(entry.Principal, policy); err != nil {
+				return status(kdbCode(err))
+			}
+		}
+		_ = s.runHooks(HookPostCommit, event)
 		_ = mask
 		return status(0)
 	case deletePrincipal:
@@ -447,7 +484,15 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "delete", p) {
 			return status(authDelete)
 		}
-		return status(kdbCode(s.Database.DeletePrincipal(p)))
+		event := HookEvent{Operation: "remove", Principal: p}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.DeletePrincipal(p)
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case modifyPrincipal:
 		entry, err := decodeEntry(&r, api)
 		if err != nil {
@@ -465,7 +510,15 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 			return status(43787534)
 		}
 		applyEntry(&record, entry, mask)
-		return status(kdbCode(s.Database.UpdatePrincipal(record)))
+		event := HookEvent{Operation: "modify", Principal: entry.Principal, Entry: entry, Mask: mask}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.UpdatePrincipal(record)
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case renamePrincipal:
 		src, err := readPrincipal()
 		if err != nil {
@@ -478,7 +531,15 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorizeRename(client, src, dest) {
 			return status(authModify)
 		}
-		return status(kdbCode(s.Database.RenamePrincipal(src, dest)))
+		event := HookEvent{Operation: "rename", Principal: src, NewPrincipal: dest}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.RenamePrincipal(src, dest)
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case getPrincipal:
 		p, err := readPrincipal()
 		if err != nil {
@@ -503,8 +564,10 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil {
 			return status(43787548)
 		}
+		var keepOld bool
 		if proc == chpassPrincipal3 {
-			if _, err := r.boolean(); err != nil {
+			keepOld, err = r.boolean()
+			if err != nil {
 				return status(43787548)
 			}
 			count, err := r.u32()
@@ -541,8 +604,18 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		}
 		bypassMinLife := !principalEqual(client, p) &&
 			s.authorize(client, "modify", p)
-		return status(kdbCode(s.Database.ChangePasswordWithPolicy(
-			p, password, s.now(), policy, bypassMinLife)))
+		if qualityErr := s.checkPasswordQuality(password, record.Policy, p); qualityErr != nil {
+			return status(kdbCode(qualityErr))
+		}
+		event := HookEvent{Operation: "chpass", Principal: p, Password: password, KeepOld: keepOld}
+		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
+			return status(kdbCode(hookErr))
+		}
+		err = s.Database.ChangePasswordWithPolicy(p, password, s.now(), policy, bypassMinLife)
+		if err == nil {
+			_ = s.runHooks(HookPostCommit, event)
+		}
+		return status(kdbCode(err))
 	case chrandPrincipal:
 		p, err := readPrincipal()
 		if err != nil || r.done() != nil {
@@ -786,6 +859,8 @@ func kdbCode(err error) uint32 {
 		return passReuse
 	case errors.Is(err, kdb.ErrPasswordTooSoon):
 		return passTooSoon
+	case qualityCode(err) != 0:
+		return qualityCode(err)
 	default:
 		return 43787548
 	}
