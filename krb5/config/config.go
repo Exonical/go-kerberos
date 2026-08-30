@@ -15,7 +15,12 @@ type Config struct {
 	DNSLookupRealm          bool
 	DNSURILookup            bool
 	RDNS                    bool
+	RDNSSet                 bool
 	Canonicalize            bool
+	QualifyShortname        string
+	QualifyShortnameSet     bool
+	DNSCanonicalizeHostname string
+	RealmTryDomains         int
 	ClockSkew               time.Duration
 	TicketLifetime          time.Duration
 	RenewLifetime           time.Duration
@@ -112,15 +117,17 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("parse krb5.conf: input exceeds %d bytes", maxConfigSize)
 	}
 	cfg := &Config{
-		Realms:                make(map[string][]string),
-		DomainRealm:           make(map[string]string),
-		Capaths:               make(map[string][]string),
-		RealmOptions:          make(map[string]map[string][]string),
-		CapathOptions:         make(map[string]map[string][]string),
-		RealmAuthToLocal:      make(map[string][]string),
-		RealmAuthToLocalNames: make(map[string]map[string][]string),
-		Options:               make(map[string]map[string][]string),
-		DNSURILookup:          true,
+		Realms:                  make(map[string][]string),
+		DomainRealm:             make(map[string]string),
+		Capaths:                 make(map[string][]string),
+		RealmOptions:            make(map[string]map[string][]string),
+		CapathOptions:           make(map[string]map[string][]string),
+		RealmAuthToLocal:        make(map[string][]string),
+		RealmAuthToLocalNames:   make(map[string]map[string][]string),
+		Options:                 make(map[string]map[string][]string),
+		DNSURILookup:            true,
+		RDNS:                    true,
+		DNSCanonicalizeHostname: "fallback",
 	}
 	section := ""
 	subsection := ""
@@ -347,6 +354,22 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DNSURILookup = parseBool(value)
 		case "rdns":
 			cfg.RDNS = parseBool(value)
+			cfg.RDNSSet = true
+		case "qualify_shortname":
+			cfg.QualifyShortname = value
+			cfg.QualifyShortnameSet = true
+		case "dns_canonicalize_hostname":
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value != "true" && value != "false" && value != "fallback" {
+				return fmt.Errorf("invalid dns_canonicalize_hostname")
+			}
+			cfg.DNSCanonicalizeHostname = value
+		case "realm_try_domains":
+			limit, err := strconv.Atoi(value)
+			if err != nil || limit < -1 {
+				return fmt.Errorf("invalid realm_try_domains")
+			}
+			cfg.RealmTryDomains = limit
 		case "canonicalize":
 			cfg.Canonicalize = parseBool(value)
 		case "clockskew":

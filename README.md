@@ -343,6 +343,14 @@ before SRV when URI lookup is enabled (the MIT default). The separate
 `RealmForHostWithFallback` helper exposes MIT's upper-cased parent-domain
 heuristic after profile lookup.
 
+The `krb5/hostrealm` package mirrors MIT hostname expansion for host-based
+service principals. `qualify_shortname` qualifies single-component names,
+`dns_canonicalize_hostname` supports `true`, `false`, and `fallback`, and
+`rdns` controls the optional reverse lookup after forward canonicalization.
+Forward, reverse, TXT, and search-domain inputs are injectable for hermetic
+tests; the default hostrealm module order is profile, DNS TXT, then the
+upper-cased parent-domain/default-realm fallback.
+
 `config.ParseKDCConf` parses profile-format `[kdcdefaults]` and `[realms]`
 settings while retaining unsupported values for inspection, including the
 authentication-indicator relations `encrypted_challenge_indicator`,
