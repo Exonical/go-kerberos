@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
@@ -59,6 +60,8 @@ type VerifiedAPReq struct {
 	SeqNumber         *uint32
 	APOptions         types.APOptions
 	Checksum          *protocol.Checksum
+	// AuthorizationData contains CAMMAC elements after service verification.
+	AuthorizationData protocol.AuthorizationData
 }
 
 // APRepDetails contains optional keying material asserted by an AP-REP.
@@ -224,6 +227,13 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrIntegrity)
 	}
+	var protectedAuthData protocol.AuthorizationData
+	if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
+		protectedAuthData, err = cammac.VerifyService(ticketPart.AuthorizationData, ticketKey)
+		if err != nil {
+			return nil, fmt.Errorf("verify AP-REQ CAMMAC: %w", err)
+		}
+	}
 	if ticketPart.Flags&types.TicketInvalid != 0 {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketInvalid)
 	}
@@ -293,6 +303,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		SeqNumber:         uint32PointerValue(authenticator.SeqNumber),
 		APOptions:         request.APOptions,
 		Checksum:          authChecksum,
+		AuthorizationData: protectedAuthData,
 	}, nil
 }
 

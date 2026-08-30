@@ -22,6 +22,22 @@ type AuthorizationDataEntry struct {
 
 type AuthorizationData []AuthorizationDataEntry
 
+// VerifierMAC is the RFC 7751 CAMMAC verifier-mac structure.
+type VerifierMAC struct {
+	Princ    *PrincipalName `krb5:"tag:0,optional"`
+	KVNO     *uint32        `krb5:"tag:1,optional"`
+	Enctype  *int32         `krb5:"tag:2,optional"`
+	Checksum Checksum       `krb5:"tag:3"`
+}
+
+// CAMMAC is the RFC 7751 container for KDC-protected authorization data.
+type CAMMAC struct {
+	Elements       AuthorizationData `krb5:"tag:0"`
+	KDCVerifier    *VerifierMAC      `krb5:"tag:1,optional"`
+	SVCVerifier    *VerifierMAC      `krb5:"tag:2,optional"`
+	OtherVerifiers []VerifierMAC     `krb5:"tag:3,optional"`
+}
+
 type PAData struct {
 	PADataType  int32  `krb5:"tag:1"`
 	PADataValue []byte `krb5:"tag:2"`
@@ -538,6 +554,13 @@ const (
 	TagKRBCred        = 22
 	TagEncKrbCredPart = 29
 	TagKRBError       = 30
+)
+
+// Authorization-data type numbers used by RFC 7751 and RFC 4120.
+const (
+	ADIfRelevant    int32 = 1
+	ADCAMMAC        int32 = 96
+	ADAuthIndicator int32 = 97
 )
 
 // PKINIT padata types defined by RFC 4556.

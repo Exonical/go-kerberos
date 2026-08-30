@@ -264,6 +264,13 @@ exposure; the MIT integration suite covers a live `python3-gssapi`
 delegation exchange against the Go acceptor and verifies the delegated TGT can
 obtain another service ticket.
 
+RFC 7751 CAMMAC authorization data is available through the `krb5/cammac`
+package. It encodes KDC and service verifiers with checksum key usage 64,
+wraps protected elements in AD-IF-RELEVANT, and verifies service-protected
+elements for AP acceptance. `kdc.Server.AuthIndicators` enables MIT-style
+authentication-indicator CAMMAC issuance; malformed or tampered CAMMACs are
+rejected rather than exposed as trusted authorization data.
+
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
 include the encrypted `K/M@REALM` record, and encrypt principal key data with
