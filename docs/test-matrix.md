@@ -54,6 +54,18 @@ registry gate.
 | MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
 | Initial-credential keytab verification | Go in-memory KDC: valid and wrong service keys, missing-keytab nofail behavior; Go client -> MIT KDC with MIT-generated keytab | `Client.VerifyInitCreds` obtains a service ticket and decrypts it with an explicit or keytab-selected service key, matching MIT `krb5_verify_init_creds` | Live `TestGoClientVerifyInitCreds` gate passes with `/usr/bin/kinit`-compatible MIT realm fixtures |
 
+## MIT 1.22.2 behavioral adaptations
+
+The Go unit suite ports implemented portions of MIT's `t_valid_times.c`,
+`t_princ.c`, `t_deltat.c`, `t_walk_rtree.c`, `t_an_to_ln.c`, `t_kuserok.c`,
+and `t_std_conf.c`, plus the malformed-request regressions from
+`t_cve-2012-1014.py`, `t_cve-2012-1015.py`, `t_cve-2013-1416.py`,
+`t_cve-2013-1417.py`, `t_cve-2021-36222.py`, and `t_bogus_kdc_req.py`.
+The exact MIT enctype-expression parser from `t_etypes.c`, the standalone
+`k5_parse_host_string()` API from `t_parse_host_string.c`, the obsolete
+4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c`, and
+`t_expand_path.c` are not implemented as equivalent Go APIs and are skipped.
+
 PA-ENCRYPTED-CHALLENGE support is FAST-only. Authentication indicators are
 selected per successful preauthentication mechanism through the KDC's
 `EncryptedChallengeIndicator`, `SPAKEPreauthIndicators`, `PKINITIndicators`,
