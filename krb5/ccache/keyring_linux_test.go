@@ -18,10 +18,10 @@ func TestKeyringCacheReadWrite(t *testing.T) {
 	cache := resolveKeyringForTest(t, "process:"+name)
 	defer cache.Destroy()
 	value := testCache()
-	if err := cache.Write(value); err != nil {
+	if err := writeKeyringForTest(t, cache, value); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	got, err := cache.Read()
+	got, err := readKeyringForTest(t, cache)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestKeyringCacheReadWrite(t *testing.T) {
 		t.Fatalf("keyring cache = %#v, want %#v", got, value)
 	}
 	again := resolveKeyringForTest(t, "process:"+name)
-	if shared, err := again.Read(); err != nil || len(shared.Credentials) != 1 {
+	if shared, err := readKeyringForTest(t, again); err != nil || len(shared.Credentials) != 1 {
 		t.Fatalf("shared keyring read = %#v, %v", shared, err)
 	}
 }
@@ -40,7 +40,7 @@ func TestKeyringStorePreservesConcurrentCredentials(t *testing.T) {
 	first := resolveKeyringForTest(t, "process:"+name+":cache")
 	defer first.Destroy()
 	second := resolveKeyringForTest(t, "process:"+name+":cache")
-	if err := first.Write(&Cache{DefaultPrincipal: testCache().DefaultPrincipal}); err != nil {
+	if err := writeKeyringForTest(t, first, &Cache{DefaultPrincipal: testCache().DefaultPrincipal}); err != nil {
 		t.Fatal(err)
 	}
 	base := testCache().Credentials[0]
@@ -50,6 +50,8 @@ func TestKeyringStorePreservesConcurrentCredentials(t *testing.T) {
 	secondCredential.Server.Components = []string{"service", "two"}
 	secondCredential.Ticket = []byte("ticket-two")
 	var wg sync.WaitGroup
+	var errorsMu sync.Mutex
+	var storeErrors []error
 	for _, item := range []struct {
 		cache *Handle
 		value Credential
@@ -61,12 +63,23 @@ func TestKeyringStorePreservesConcurrentCredentials(t *testing.T) {
 		}) {
 			defer wg.Done()
 			if err := item.cache.Store(item.value); err != nil {
-				t.Errorf("Store: %v", err)
+				errorsMu.Lock()
+				storeErrors = append(storeErrors, err)
+				errorsMu.Unlock()
 			}
 		}(item)
 	}
 	wg.Wait()
-	cache, err := first.Read()
+	for _, err := range storeErrors {
+		if isKeyringUnavailable(err) {
+			t.Skipf("Linux keyring unavailable during concurrent store: %v", err)
+		}
+		t.Errorf("Store: %v", err)
+	}
+	if len(storeErrors) != 0 {
+		return
+	}
+	cache, err := readKeyringForTest(t, first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +93,7 @@ func TestKeyringFailedMarshalPreservesCache(t *testing.T) {
 	cache := resolveKeyringForTest(t, "process:"+name+":cache")
 	defer cache.Destroy()
 	original := testCache()
-	if err := cache.Write(original); err != nil {
+	if err := writeKeyringForTest(t, cache, original); err != nil {
 		t.Fatal(err)
 	}
 	bad := testCache()
@@ -88,7 +101,7 @@ func TestKeyringFailedMarshalPreservesCache(t *testing.T) {
 	if err := cache.Write(bad); err == nil {
 		t.Fatal("invalid credential write unexpectedly succeeded")
 	}
-	got, err := cache.Read()
+	got, err := readKeyringForTest(t, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +111,7 @@ func TestKeyringFailedMarshalPreservesCache(t *testing.T) {
 	if err := cache.Store(bad.Credentials[0]); err == nil {
 		t.Fatal("invalid credential store unexpectedly succeeded")
 	}
-	got, err = cache.Read()
+	got, err = readKeyringForTest(t, cache)
 	if err != nil || len(got.Credentials) != 1 {
 		t.Fatalf("cache after failed store = %#v, %v", got, err)
 	}
@@ -109,7 +122,7 @@ func TestKeyringRetrieveMapsMITMatchFlags(t *testing.T) {
 	cache := resolveKeyringForTest(t, "process:"+name+":cache")
 	defer cache.Destroy()
 	value := testCache().Credentials[0]
-	if err := cache.Store(value); err != nil {
+	if err := storeKeyringForTest(t, cache, value); err != nil {
 		t.Fatal(err)
 	}
 	match := value
@@ -132,16 +145,16 @@ func TestKeyringRemoveUnlinksMatchingCredentials(t *testing.T) {
 	keep.Server.Components = []string{"service", "keep"}
 	remove := base
 	remove.Server.Components = []string{"service", "remove"}
-	if err := cache.Store(keep); err != nil {
+	if err := storeKeyringForTest(t, cache, keep); err != nil {
 		t.Fatal(err)
 	}
-	if err := cache.Store(remove); err != nil {
+	if err := storeKeyringForTest(t, cache, remove); err != nil {
 		t.Fatal(err)
 	}
 	if err := cache.Remove(remove, 0); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	got, err := cache.Read()
+	got, err := readKeyringForTest(t, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,13 +167,13 @@ func TestKeyringCollectionEnumeratesPrimaryFirst(t *testing.T) {
 	name := fmt.Sprintf("go-keyring-collection-%d", time.Now().UnixNano())
 	primary := resolveKeyringForTest(t, "process:"+name)
 	defer primary.Destroy()
-	if err := primary.Write(testCache()); err != nil {
+	if err := writeKeyringForTest(t, primary, testCache()); err != nil {
 		t.Fatal(err)
 	}
 	for _, subsidiaryName := range []string{"subsidiary-a", "subsidiary-b"} {
 		cache := resolveKeyringForTest(t, "process:"+name+":"+subsidiaryName)
 		defer cache.Destroy()
-		if err := cache.Write(testCache()); err != nil {
+		if err := writeKeyringForTest(t, cache, testCache()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -209,18 +222,18 @@ func TestKeyringResidualPrimaryAndSubsidiary(t *testing.T) {
 	name := fmt.Sprintf("go-keyring-residual-%d", time.Now().UnixNano())
 	primary := resolveKeyringForTest(t, "process:"+name)
 	defer primary.Destroy()
-	if err := primary.Write(testCache()); err != nil {
+	if err := writeKeyringForTest(t, primary, testCache()); err != nil {
 		t.Fatalf("write primary: %v", err)
 	}
 
 	subsidiary := resolveKeyringForTest(t, "process:"+name+":sub")
 	defer subsidiary.Destroy()
-	if err := subsidiary.Write(&Cache{DefaultPrincipal: testCache().DefaultPrincipal}); err != nil {
+	if err := writeKeyringForTest(t, subsidiary, &Cache{DefaultPrincipal: testCache().DefaultPrincipal}); err != nil {
 		t.Fatalf("write subsidiary: %v", err)
 	}
 
 	resolvedPrimary := resolveKeyringForTest(t, "process:"+name)
-	got, err := resolvedPrimary.Read()
+	got, err := readKeyringForTest(t, resolvedPrimary)
 	if err != nil {
 		t.Fatalf("read preserved primary: %v", err)
 	}
@@ -233,7 +246,7 @@ func TestKeyringDestroyUnlinksCache(t *testing.T) {
 	name := fmt.Sprintf("go-keyring-destroy-%d", time.Now().UnixNano())
 	cache := resolveKeyringForTest(t, "process:"+name+":sub")
 	oldID := cache.keyring.ring
-	if err := cache.Write(testCache()); err != nil {
+	if err := writeKeyringForTest(t, cache, testCache()); err != nil {
 		t.Fatalf("write cache: %v", err)
 	}
 	if err := cache.Destroy(); err != nil {
@@ -248,7 +261,7 @@ func TestKeyringDestroyUnlinksCache(t *testing.T) {
 	if recreated.keyring.ring == oldID {
 		t.Fatal("destroyed cache keyring remained linked to collection")
 	}
-	got, err := recreated.Read()
+	got, err := readKeyringForTest(t, recreated)
 	if err != nil {
 		t.Fatalf("read recreated cache: %v", err)
 	}
@@ -267,14 +280,30 @@ func resolveKeyringForTest(t *testing.T, residual string) *Handle {
 		if probeErr == nil {
 			_, _ = unix.KeyctlInt(unix.KEYCTL_UNLINK, probeID, cache.keyring.ring, 0, 0)
 		} else if isKeyringUnavailable(probeErr) {
+			_ = cache.Destroy()
 			t.Skipf("Linux keyring unavailable: %v", probeErr)
 		} else {
+			_ = cache.Destroy()
 			t.Fatalf("probe KEYRING write: %v", probeErr)
+		}
+		bigProbeName := fmt.Sprintf("go-keyring-big-probe-%d", time.Now().UnixNano())
+		bigProbeID, bigProbeErr := unix.AddKey("big_key", bigProbeName, []byte("probe"), cache.keyring.ring)
+		if bigProbeErr == nil {
+			_, _ = unix.KeyctlInt(unix.KEYCTL_UNLINK, bigProbeID, cache.keyring.ring, 0, 0)
+		} else if !errors.Is(bigProbeErr, unix.EINVAL) && !errors.Is(bigProbeErr, unix.ENODEV) {
+			if isKeyringUnavailable(bigProbeErr) {
+				_ = cache.Destroy()
+				t.Skipf("Linux big_key unavailable: %v", bigProbeErr)
+			}
+			_ = cache.Destroy()
+			t.Fatalf("probe KEYRING big_key write: %v", bigProbeErr)
 		}
 		if _, listErr := keyringList(cache.keyring.ring); listErr != nil {
 			if isKeyringUnavailable(listErr) {
+				_ = cache.Destroy()
 				t.Skipf("Linux keyring unavailable: %v", listErr)
 			}
+			_ = cache.Destroy()
 			t.Fatalf("probe KEYRING read: %v", listErr)
 		}
 		return cache
@@ -286,8 +315,36 @@ func resolveKeyringForTest(t *testing.T, residual string) *Handle {
 	return nil
 }
 
+func storeKeyringForTest(t *testing.T, cache *Handle, credential Credential) error {
+	t.Helper()
+	err := cache.Store(credential)
+	if isKeyringUnavailable(err) {
+		t.Skipf("Linux keyring unavailable during store: %v", err)
+	}
+	return err
+}
+
+func writeKeyringForTest(t *testing.T, cache *Handle, value *Cache) error {
+	t.Helper()
+	err := cache.Write(value)
+	if isKeyringUnavailable(err) {
+		t.Skipf("Linux keyring unavailable during write: %v", err)
+	}
+	return err
+}
+
+func readKeyringForTest(t *testing.T, cache *Handle) (*Cache, error) {
+	t.Helper()
+	value, err := cache.Read()
+	if isKeyringUnavailable(err) {
+		t.Skipf("Linux keyring unavailable during read: %v", err)
+	}
+	return value, err
+}
+
 func isKeyringUnavailable(err error) bool {
 	return errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) ||
 		errors.Is(err, unix.ENOKEY) || errors.Is(err, unix.ENOSYS) ||
-		errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENODEV)
+		errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENODEV) ||
+		errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT)
 }

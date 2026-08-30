@@ -31,6 +31,14 @@ func (h *keyringHandle) store(Credential) error {
 	return errors.New("ccache: KEYRING is unsupported on this platform")
 }
 
+func (h *keyringHandle) remove(Credential, uint32) error {
+	return errors.New("ccache: KEYRING is unsupported on this platform")
+}
+
+func (h *keyringHandle) collectionHandles() ([]*Handle, error) {
+	return nil, errors.New("ccache: KEYRING is unsupported on this platform")
+}
+
 func (h *keyringHandle) destroy() error {
 	return errors.New("ccache: KEYRING is unsupported on this platform")
 }
