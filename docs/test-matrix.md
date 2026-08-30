@@ -28,7 +28,7 @@ registry gate.
 | PA-SPAKE (Edwards25519, P-256, P-384, P-521) | Go client + Go KDC unit coverage; MIT vector goldens for all four groups | `TestMITClientSPAKEAgainstGoKDC`, `TestMITClientP256SPAKEAgainstGoKDC` (real MIT `kinit`, trace asserts SPAKE response) | `TestGoClientSPAKEAgainstMITKDC`, `TestGoClientP256SPAKEAgainstMITKDC` with MIT `spake_preauth_groups` configured |
 | TGS exchange | RED | RED | RED |
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
-| PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | MIT `kinit -T` gate with trace coverage; the factor is built into MIT libkrb5 rather than a separate plugin | Usage-54/55 CF2 crypto and response verification |
+| PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | MIT `kinit -T` gate with KRB5_TRACE showing the type-138 challenge exchange (the factor is built into MIT libkrb5 rather than a separate plugin); existing Go FAST-to-MIT coverage exercises fallback when MIT does not advertise type 138 | Usage-54/55 CF2 crypto and response verification |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
@@ -48,13 +48,13 @@ registry gate.
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
 | MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
 
-PA-ENCRYPTED-CHALLENGE support is FAST-only. The optional MIT
-`encrypted_challenge_indicator` realm setting is not implemented; the Go KDC
-continues to expose explicit `Server.AuthIndicators` for deployments that
-need CAMMAC authentication indicators. The installed Ubuntu MIT runtime does
-not ship the `encrypted_challenge.so` client/KDC preauthentication plugin, so
-the live MIT encrypted-challenge test is conditional and skips there rather
-than claiming an unsupported interoperability direction.
+PA-ENCRYPTED-CHALLENGE support is FAST-only. Authentication indicators are
+selected per successful preauthentication mechanism through the KDC's
+`EncryptedChallengeIndicator`, `SPAKEPreauthIndicators`, `PKINITIndicators`,
+and `OTPIndicators` fields; ordinary encrypted timestamp does not assert one.
+The MIT encrypted-challenge implementation is built into libkrb5 rather than
+provided as a separate preauthentication plugin. The live gate therefore runs
+unconditionally and checks the type-138 challenge exchange in KRB5_TRACE.
 
 The Go-to-MIT and MIT-to-Go KKDCP gates pass using a disposable TLS proxy and
 a real MIT KDC. The reverse gate skips when the installed MIT runtime lacks
@@ -351,9 +351,10 @@ callers can disable it to model `dns_uri_lookup = false`.
 
 `config.ParseKDCConf` is covered against generated MIT profile syntax,
 including `[kdcdefaults]` inheritance into `[realms]`, port lists, ticket
-lifetime values, master-key enctype, supported enctypes, and preservation of
-unknown realm settings. `kdc.Server.ApplyKDCConf` is covered for listener
-ports and lifetime settings that have direct Go server equivalents. The
+lifetime values, master-key enctype, supported enctypes, authentication
+indicator relations, and preservation of unknown realm settings.
+`kdc.Server.ApplyKDCConf` is covered for listener ports, lifetime settings,
+and authentication indicators that have direct Go server equivalents. The
 integration harness uses the same profile-format KDC configuration with a
 disposable MIT KDC; DNS itself is intentionally not a live integration
 dependency.
@@ -392,8 +393,13 @@ the suite.
 CAMMAC protocol golden tests cover the RFC 7751 elements and verifier-mac
 structure. Go unit tests cover KDC/service checksum generation, protected
 element extraction, KDC and service verification, and tamper rejection.
-`kdc.Server.AuthIndicators` emits authentication indicators inside
-AD-IF-RELEVANT/AD-CAMMAC with key usage 64, and AP acceptance verifies the
-service verifier before exposing the protected authorization data. No live MIT
-CAMMAC gate is enabled yet: the integration fixture does not configure MIT
-authentication indicators, so a live test would not exercise CAMMAC semantics.
+Successful preauthentication emits authentication indicators inside
+AD-IF-RELEVANT/AD-CAMMAC with key usage 64. TGS issuance verifies and
+propagates protected indicators from the header ticket, and AP acceptance
+verifies the service verifier before exposing them. The per-principal
+`require_auth` string attribute uses space-separated any-match semantics;
+failure returns `KDC_ERR_POLICY` with
+`Required auth indicators not present in ticket: <str>`. Anonymous PKINIT
+does not assert PKINIT indicators. No live MIT indicator gate is enabled yet:
+the fixture does not configure SPAKE indicators and `require_auth` together,
+so a live test would not exercise this parity slice.

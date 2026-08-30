@@ -33,6 +33,7 @@ func TestServerPKINITASExchange(t *testing.T) {
 	server.PKINITCertificate = kdcCert
 	server.PKINITSigner = kdcKey
 	server.PKINITClientCAs = roots
+	server.PKINITIndicators = []string{"pkinit", "hardware"}
 
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
 	credentials, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots)
@@ -42,6 +43,7 @@ func TestServerPKINITASExchange(t *testing.T) {
 	if !samePrincipal(credentials.Client, user) {
 		t.Fatalf("PKINIT client = %v, want %v", credentials.Client, user)
 	}
+	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "pkinit", "hardware")
 }
 
 func TestServerPKINITFreshnessRequired(t *testing.T) {
@@ -236,6 +238,7 @@ func TestServerAnonymousPKINITASExchange(t *testing.T) {
 		credentials.Flags&types.TicketAnonymous == 0 {
 		t.Fatalf("anonymous credentials = %+v", credentials)
 	}
+	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM")
 	service := principal.Principal{
 		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
 		Components: []string{"host", "service.test"},

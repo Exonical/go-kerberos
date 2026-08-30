@@ -132,9 +132,17 @@ type Server struct {
 	// the data with that key using the MS-PAC usage 16.
 	GeneratePACCredentials func(client, service principal.Principal,
 		replacedReplyKey kdb.Key) ([]byte, int32, error)
-	// AuthIndicators causes the KDC to issue RFC 7751 CAMMAC authorization
-	// data containing these authentication-indicator strings.
-	AuthIndicators []string
+	// EncryptedChallengeIndicator is asserted after successful
+	// PA-ENCRYPTED-CHALLENGE preauthentication.
+	EncryptedChallengeIndicator string
+	// SPAKEPreauthIndicators are asserted after successful PA-SPAKE
+	// preauthentication.
+	SPAKEPreauthIndicators []string
+	// PKINITIndicators are asserted after successful signed, non-anonymous
+	// PKINIT preauthentication.
+	PKINITIndicators []string
+	// OTPIndicators are asserted after successful PA-OTP preauthentication.
+	OTPIndicators []string
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -549,7 +557,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil)
+			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, append([]string(nil), s.OTPIndicators...))
 	}
 	if otpEnabled && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -618,7 +626,8 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				nil, request.ReqBody.Nonce, armor)
 		}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA})
+			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA},
+			configuredIndicator(s.EncryptedChallengeIndicator))
 	}
 	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && !s.DisablePreauth {
@@ -747,7 +756,8 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return response
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil)
+				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
+				append([]string(nil), s.SPAKEPreauthIndicators...))
 		}
 	}
 	if pkinitPA != nil {
@@ -811,7 +821,13 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
 		replyPAs := protocol.MethodData{paRep}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs)
+			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs,
+			func() []string {
+				if anonymousRequest {
+					return nil
+				}
+				return append([]string(nil), s.PKINITIndicators...)
+			}())
 	}
 	if timestampPA == nil {
 		if s.DisablePreauth {
@@ -822,7 +838,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 				return response
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-				etypeID, clientKey, serviceKey, armor, false, nil, nil)
+				etypeID, clientKey, serviceKey, armor, false, nil, nil, nil)
 		}
 		var methodData protocol.MethodData
 		// MIT does not advertise encrypted-timestamp inside FAST.  Offering
@@ -900,7 +916,7 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		return response
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-		etypeID, clientKey, serviceKey, armor, true, nil, nil)
+		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)
 }
 
 func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.ASReq, *fastContext, int32) {
@@ -1238,12 +1254,12 @@ func stripCAMMAC(data protocol.AuthorizationData) (protocol.AuthorizationData, e
 }
 
 func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.Key,
-	verifiedElements protocol.AuthorizationData) error {
+	verifiedElements protocol.AuthorizationData, assertedIndicators []string) error {
 	var elements protocol.AuthorizationData
 	var err error
-	if len(s.AuthIndicators) > 0 {
-		indicators := make([]types.UTF8String, len(s.AuthIndicators))
-		for i, indicator := range s.AuthIndicators {
+	if len(assertedIndicators) > 0 {
+		indicators := make([]types.UTF8String, len(assertedIndicators))
+		for i, indicator := range assertedIndicators {
 			indicators[i] = types.UTF8String(indicator)
 		}
 		encodedIndicators, marshalErr := asn1.Marshal(indicators)
@@ -1264,7 +1280,7 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 			return nil
 		}
 	}
-	kdcKey, ok := s.freshnessKey([]int32{serviceKey.Enctype})
+	kdcKey, ok := s.freshnessKey(nil)
 	if !ok {
 		return fmt.Errorf("CAMMAC: no usable local krbtgt key")
 	}
@@ -1284,7 +1300,10 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 	return nil
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData) []byte {
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string) []byte {
+	if response := s.requireAuthError(serviceRecord, assertedIndicators, armor, request.ReqBody.SName); response != nil {
+		return response
+	}
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.errorResponse(14, request.ReqBody.SName)
@@ -1348,7 +1367,7 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
-	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil); err != nil {
+	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil, assertedIndicators); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	if err := s.issuePACWithOptions(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false,
@@ -1666,9 +1685,22 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		}
 	}
 	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
-	if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
-		protocol.EncryptionKey{KeyType: ticketKey.Enctype, KeyValue: ticketKey.Key}); err != nil &&
-		!stderrors.Is(err, cammac.ErrNotFound) {
+	var verifiedHeaderCAMMACElements protocol.AuthorizationData
+	if elements, elementsErr := cammac.ProtectedElements(ticketPart.AuthorizationData); elementsErr != nil {
+		if !stderrors.Is(elementsErr, cammac.ErrNotFound) {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+	} else if localKDCKey, ok := s.freshnessKey(nil); ok {
+		verifyErr := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
+			protocol.EncryptionKey{KeyType: localKDCKey.Enctype, KeyValue: localKDCKey.Key})
+		if verifyErr == nil {
+			verifiedHeaderCAMMACElements = elements
+		} else if !stderrors.Is(verifyErr, krberrors.ErrIntegrity) {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		} else if ticketPart.AuthorizationData, err = stripCAMMAC(ticketPart.AuthorizationData); err != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+	} else if ticketPart.AuthorizationData, err = stripCAMMAC(ticketPart.AuthorizationData); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	options := request.ReqBody.KDCOptions
@@ -1822,7 +1854,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	var delegationEvidence *principal.Principal
 	var pacVerifyKey *kdb.Key
 	var u2uTicketKey *kdb.Key
-	var verifiedCAMMACElements protocol.AuthorizationData
+	verifiedCAMMACElements := verifiedHeaderCAMMACElements
 	if s4uUser != nil {
 		if serviceName.String() != requester.String() || options&types.KDCCNameInAddlTkt != 0 {
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
@@ -1884,7 +1916,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
 		}
 		evidenceKDCKey := protocol.EncryptionKey{}
-		if key, ok := s.freshnessKey([]int32{evidence.EncPart.EType}); ok {
+		if key, ok := s.freshnessKey(nil); ok {
 			evidenceKDCKey = protocol.EncryptionKey{KeyType: key.Enctype, KeyValue: key.Key}
 		}
 		if verifyErr := cammac.VerifyKDC(evidencePart.AuthorizationData,
@@ -2247,7 +2279,18 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		// MIT's optional-zero KVNO encoder omits a zero value on U2U tickets.
 		ticketKVNOPtr = nil
 	}
-	if err := s.issueCAMMAC(&ticketPart, ticketEncryptionKey, verifiedCAMMACElements); err != nil {
+	if findPA(request.PAData, protocol.PADataForUser) == nil &&
+		findPA(request.PAData, protocol.PADataS4UX509User) == nil {
+		authIndicators, err := authIndicatorsFromElements(verifiedCAMMACElements)
+		if err != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		}
+		if response := s.requireAuthError(serviceRecord, authIndicators,
+			armor, request.ReqBody.SName); response != nil {
+			return response
+		}
+	}
+	if err := s.issueCAMMAC(&ticketPart, ticketEncryptionKey, verifiedCAMMACElements, nil); err != nil {
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	if err := s.issuePACWithOptions(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
@@ -2334,6 +2377,16 @@ func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
 	if err != nil || !ok {
 		return kdb.Key{}, false
 	}
+	if len(enctypes) == 0 {
+		enctypes = []int32{
+			crypto.EnctypeAES256SHA1,
+			crypto.EnctypeAES128SHA1,
+			crypto.EnctypeAES256SHA384,
+			crypto.EnctypeAES128SHA256,
+			crypto.EnctypeCamellia128,
+			crypto.EnctypeCamellia256,
+		}
+	}
 	for _, enctype := range enctypes {
 		if key, ok := record.Keys[enctype]; ok {
 			if _, err := crypto.NewRegistry().Get(enctype); err != nil {
@@ -2343,7 +2396,15 @@ func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
 			return key, true
 		}
 	}
-	for enctype, key := range record.Keys {
+	// Keep a usable key fallback for principals containing an enctype outside
+	// the preferred list, but do not let map iteration choose unpredictably.
+	available := make([]int32, 0, len(record.Keys))
+	for enctype := range record.Keys {
+		available = append(available, enctype)
+	}
+	sort.Slice(available, func(i, j int) bool { return available[i] < available[j] })
+	for _, enctype := range available {
+		key := record.Keys[enctype]
 		if _, err := crypto.NewRegistry().Get(enctype); err == nil {
 			key.Enctype = enctype
 			return key, true
@@ -2448,6 +2509,53 @@ func selectKVNO(record kdb.PrincipalRecord, enctype int32, kvno *uint32) (kdb.Ke
 
 func (s *Server) errorResponse(code int32, service *protocol.PrincipalName) []byte {
 	return s.errorResponseWithText(code, service, "")
+}
+
+func authIndicatorsFromElements(elements protocol.AuthorizationData) ([]string, error) {
+	var indicators []string
+	for _, element := range elements {
+		if element.ADType != protocol.ADAuthIndicator {
+			continue
+		}
+		var values []types.UTF8String
+		if err := asn1.Unmarshal(element.ADData, &values); err != nil {
+			return nil, fmt.Errorf("auth indicators: %w", err)
+		}
+		for _, value := range values {
+			indicators = append(indicators, string(value))
+		}
+	}
+	return indicators, nil
+}
+
+func configuredIndicator(indicator string) []string {
+	if indicator == "" {
+		return nil
+	}
+	return []string{indicator}
+}
+
+func (s *Server) requireAuthError(record kdb.PrincipalRecord, indicators []string,
+	armor *fastContext, service *protocol.PrincipalName) []byte {
+	required := strings.TrimSpace(record.Strings["require_auth"])
+	if required == "" {
+		return nil
+	}
+	present := make(map[string]struct{}, len(indicators))
+	for _, indicator := range indicators {
+		present[indicator] = struct{}{}
+	}
+	for _, indicator := range strings.Fields(required) {
+		if _, ok := present[indicator]; ok {
+			return nil
+		}
+	}
+	text := "Required auth indicators not present in ticket: " + required
+	if armor != nil {
+		return s.fastErrorResponseWithText(kdcErrPolicy, service, nil,
+			armor.nonce, armor, text)
+	}
+	return s.errorResponseWithText(kdcErrPolicy, service, text)
 }
 
 func (s *Server) errorResponseWithData(code int32, service *protocol.PrincipalName, data []byte) []byte {
