@@ -5,11 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 )
 
@@ -263,5 +266,52 @@ func TestResolveReplayCacheNames(t *testing.T) {
 	file2, ok := cache.(*File2)
 	if !ok || filepath.Dir(file2.Path) != os.Getenv("KRB5RCACHEDIR") {
 		t.Fatalf("default cache = %#v", cache)
+	}
+}
+
+func TestDefaultReplayCacheUsesTMPDIR(t *testing.T) {
+	t.Setenv("KRB5RCACHEDIR", "")
+	t.Setenv("TMPDIR", t.TempDir())
+	cache, err := Resolve("dfl:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file2, ok := cache.(*File2)
+	if !ok || filepath.Dir(file2.Path) != os.Getenv("TMPDIR") {
+		t.Fatalf("default cache = %#v", cache)
+	}
+}
+
+func TestDefaultReplayCacheExpandsMITPathTokens(t *testing.T) {
+	previous, present := os.LookupEnv("KRB5RCACHENAME")
+	_ = os.Unsetenv("KRB5RCACHENAME")
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv("KRB5RCACHENAME", previous)
+		} else {
+			_ = os.Unsetenv("KRB5RCACHENAME")
+		}
+	})
+	cfg := &config.Config{DefaultRCacheName: "file2:%{TEMP}/krb5_%{euid}_%{uid}_%{USERID}_%{username}%{null}"}
+	cache, err := Default(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file2, ok := cache.(*File2)
+	if !ok {
+		t.Fatalf("default cache = %#v", cache)
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(os.TempDir(), "krb5_"+strconv.Itoa(os.Geteuid())+"_"+strconv.Itoa(os.Geteuid())+
+		"_"+strconv.Itoa(os.Geteuid())+"_"+current.Username)
+	if file2.Path != want {
+		t.Fatalf("expanded cache path = %q, want %q", file2.Path, want)
+	}
+	cfg.DefaultRCacheName = "file2:%{unknown}"
+	if _, err := Default(cfg); err == nil {
+		t.Fatal("unknown path token accepted")
 	}
 }
