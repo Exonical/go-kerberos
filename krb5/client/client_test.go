@@ -458,6 +458,68 @@ func TestASExchangeCanonicalizeOption(t *testing.T) {
 	}
 }
 
+func TestRequestEnctypeSelectionMatchesMIT(t *testing.T) {
+	camellia := []int32{crypto.EnctypeCamellia128}
+	aes := []int32{crypto.EnctypeAES128SHA1}
+	client := &Client{Config: &config.Config{
+		DefaultTKTEnctypes: aes,
+		DefaultTGSEnctypes: camellia,
+	}}
+	asRequest, err := client.newASReq(
+		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		time.Unix(0, 0).UTC(),
+	)
+	if err != nil {
+		t.Fatalf("AS request: %v", err)
+	}
+	if !reflect.DeepEqual(asRequest.ReqBody.EType, aes) {
+		t.Fatalf("AS request enctypes = %v, want %v", asRequest.ReqBody.EType, aes)
+	}
+	tgt := &Credentials{
+		Client: principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES128SHA1, KeyValue: bytes.Repeat([]byte{0x42}, 16)},
+		Ticket: mustMarshal(t, protocol.Ticket{
+			TktVNO: 5, Realm: testRealm,
+			SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES128SHA1, Cipher: []byte{1}},
+		}),
+	}
+	tgsRequest, _, err := client.newTGSReq(tgt,
+		principal.Principal{Realm: testRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service"}},
+		testRealm, time.Unix(0, 0).UTC(), false)
+	if err != nil {
+		t.Fatalf("TGS request: %v", err)
+	}
+	if !reflect.DeepEqual(tgsRequest.ReqBody.EType, camellia) {
+		t.Fatalf("TGS request enctypes = %v, want %v", tgsRequest.ReqBody.EType, camellia)
+	}
+
+	permitted := []int32{crypto.EnctypeCamellia256, crypto.EnctypeAES256SHA1}
+	client = &Client{Config: &config.Config{PermittedEnctypes: permitted}}
+	if got := client.asRequestEnctypes(); !reflect.DeepEqual(got, permitted) {
+		t.Fatalf("permitted-only AS enctypes = %v, want %v", got, permitted)
+	}
+	if got := client.tgsRequestEnctypes(); !reflect.DeepEqual(got, permitted) {
+		t.Fatalf("permitted-only TGS enctypes = %v, want %v", got, permitted)
+	}
+
+	wantDefault := []int32{
+		crypto.EnctypeAES256SHA1,
+		crypto.EnctypeAES128SHA1,
+		crypto.EnctypeAES256SHA384,
+		crypto.EnctypeAES128SHA256,
+		crypto.EnctypeCamellia128,
+		crypto.EnctypeCamellia256,
+	}
+	client = &Client{}
+	if got := client.asRequestEnctypes(); !reflect.DeepEqual(got, wantDefault) {
+		t.Fatalf("default AS enctypes = %v, want %v", got, wantDefault)
+	}
+	if got := client.tgsRequestEnctypes(); !reflect.DeepEqual(got, wantDefault) {
+		t.Fatalf("default TGS enctypes = %v, want %v", got, wantDefault)
+	}
+}
+
 func TestASExchangeCanonicalizeAcceptsReturnedName(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	requested := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}

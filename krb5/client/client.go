@@ -965,7 +965,7 @@ func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Pr
 		},
 		Till:  types.KerberosTime{Time: now.Add(c.ticketLifetime()), Present: true},
 		Nonce: randomNonce(nonceBytes),
-		EType: c.requestEnctypes(),
+		EType: c.tgsRequestEnctypes(),
 	}
 	if adjust != nil {
 		adjust(&body)
@@ -1192,13 +1192,40 @@ func (c *Client) canonicalizeEnabled() bool {
 	return c.Canonicalize || (c.Config != nil && c.Config.Canonicalize)
 }
 
-func (c *Client) requestEnctypes() []int32 {
+var defaultRequestEnctypes = []int32{
+	crypto.EnctypeAES256SHA1,
+	crypto.EnctypeAES128SHA1,
+	crypto.EnctypeAES256SHA384,
+	crypto.EnctypeAES128SHA256,
+	crypto.EnctypeCamellia128,
+	crypto.EnctypeCamellia256,
+}
+
+func (c *Client) asRequestEnctypes() []int32 {
 	var candidates []int32
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
 		candidates = c.Config.DefaultTKTEnctypes
+	} else if c.Config != nil && len(c.Config.PermittedEnctypes) > 0 {
+		candidates = c.Config.PermittedEnctypes
 	} else {
-		candidates = []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256, crypto.EnctypeCamellia256, crypto.EnctypeCamellia128}
+		candidates = defaultRequestEnctypes
 	}
+	return c.supportedRequestEnctypes(candidates)
+}
+
+func (c *Client) tgsRequestEnctypes() []int32 {
+	var candidates []int32
+	if c.Config != nil && len(c.Config.DefaultTGSEnctypes) > 0 {
+		candidates = c.Config.DefaultTGSEnctypes
+	} else if c.Config != nil && len(c.Config.PermittedEnctypes) > 0 {
+		candidates = c.Config.PermittedEnctypes
+	} else {
+		candidates = defaultRequestEnctypes
+	}
+	return c.supportedRequestEnctypes(candidates)
+}
+
+func (c *Client) supportedRequestEnctypes(candidates []int32) []int32 {
 	registry := crypto.NewRegistry()
 	result := make([]int32, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -1308,7 +1335,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 			},
 			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
 			Nonce: randomNonce(nonceBytes),
-			EType: c.requestEnctypes(),
+			EType: c.asRequestEnctypes(),
 		},
 	}, nil
 }
