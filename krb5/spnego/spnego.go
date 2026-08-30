@@ -26,6 +26,14 @@ const (
 // NegState is the RFC 4178 negotiation result.
 type NegState uint8
 
+// InitiatorOptions controls the underlying Kerberos GSS initiator.
+type InitiatorOptions struct {
+	ChannelBindings *gssapi.ChannelBindings
+}
+
+// AcceptorOptions controls the underlying Kerberos GSS acceptor.
+type AcceptorOptions = gssapi.AcceptorOptions
+
 // NegTokenInit is the SPNEGO initiator token.
 type NegTokenInit struct {
 	MechTypes   []asn1.ObjectIdentifier
@@ -391,13 +399,28 @@ func NewInitiator(creds *client.Credentials, flags uint32) (*Initiator, error) {
 
 // NewInitiatorWithMechs creates an initiator with an explicit mechanism order.
 func NewInitiatorWithMechs(creds *client.Credentials, flags uint32, mechs []asn1.ObjectIdentifier) (*Initiator, error) {
+	return NewInitiatorWithMechsAndOptions(creds, flags, mechs, InitiatorOptions{})
+}
+
+// NewInitiatorWithOptions creates an initiator with optional channel
+// bindings passed to the underlying Kerberos mechanism.
+func NewInitiatorWithOptions(creds *client.Credentials, flags uint32, options InitiatorOptions) (*Initiator, error) {
+	return NewInitiatorWithMechsAndOptions(creds, flags, []asn1.ObjectIdentifier{kerberosOID}, options)
+}
+
+// NewInitiatorWithMechsAndOptions creates an initiator with an explicit
+// mechanism order and underlying Kerberos options.
+func NewInitiatorWithMechsAndOptions(creds *client.Credentials, flags uint32,
+	mechs []asn1.ObjectIdentifier, options InitiatorOptions) (*Initiator, error) {
 	if len(mechs) == 0 {
 		return nil, fmt.Errorf("SPNEGO initiator: empty mechanism list")
 	}
 	if _, index := selectKerberos(mechs); index < 0 {
 		return nil, fmt.Errorf("SPNEGO initiator: Kerberos mechanism is not offered")
 	}
-	gi, err := gssapi.NewInitiator(creds, flags)
+	gi, err := gssapi.NewInitiatorWithOptions(creds, flags, gssapi.InitiatorOptions{
+		ChannelBindings: options.ChannelBindings,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -496,6 +519,12 @@ type Acceptor struct {
 // NewAcceptor creates an acceptor backed by a Kerberos service keytab.
 func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 	return &Acceptor{mech: gssapi.NewAcceptor(kt)}
+}
+
+// NewAcceptorWithOptions creates an acceptor with underlying Kerberos
+// channel-binding and replay-cache options.
+func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Acceptor {
+	return &Acceptor{mech: gssapi.NewAcceptorWithOptions(kt, options)}
 }
 
 // Accept processes an initiator token and returns an optional response token.

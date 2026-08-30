@@ -162,9 +162,13 @@ func checksumTypeForKey(keyType int32) int32 {
 	}
 }
 
-func buildIAKERBAuthenticatorChecksum(flags uint32, finished []byte) *protocol.Checksum {
+func buildIAKERBAuthenticatorChecksum(flags uint32, finished []byte, bindings *ChannelBindings) *protocol.Checksum {
 	value := make([]byte, 24)
 	binary.LittleEndian.PutUint32(value, 16)
+	if bindings != nil {
+		sum := ChecksumChannelBindings(bindings)
+		copy(value[4:20], sum[:])
+	}
 	binary.LittleEndian.PutUint32(value[20:], flags)
 	if len(finished) != 0 {
 		extension := make([]byte, 8+len(finished))
@@ -209,6 +213,7 @@ type IAKERBInitiator struct {
 	apState             *ap.APReq
 	conversation        []byte
 	discovery           bool
+	channelBindings     *ChannelBindings
 }
 
 const (
@@ -221,6 +226,13 @@ const (
 // NewIAKERBInitiator creates a password-backed IAKERB initiator.
 func NewIAKERBInitiator(kdc *client.Client, clientPrincipal, target principal.Principal,
 	password string, flags uint32) (*IAKERBInitiator, error) {
+	return NewIAKERBInitiatorWithOptions(kdc, clientPrincipal, target, password, flags, InitiatorOptions{})
+}
+
+// NewIAKERBInitiatorWithOptions creates a password-backed IAKERB initiator
+// with optional channel bindings for the final Kerberos context.
+func NewIAKERBInitiatorWithOptions(kdc *client.Client, clientPrincipal, target principal.Principal,
+	password string, flags uint32, options InitiatorOptions) (*IAKERBInitiator, error) {
 	if kdc == nil || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("IAKERB initiator: incomplete credentials")
 	}
@@ -230,7 +242,8 @@ func NewIAKERBInitiator(kdc *client.Client, clientPrincipal, target principal.Pr
 	return &IAKERBInitiator{
 		KDC: kdc, Password: password, Client: clientPrincipal, Target: target,
 		Flags: flags, state: iakerbStateAS, realm: clientPrincipal.Realm,
-		discovery: clientPrincipal.Realm == "",
+		discovery:       clientPrincipal.Realm == "",
+		channelBindings: cloneChannelBindings(options.ChannelBindings),
 	}, nil
 }
 
@@ -238,6 +251,13 @@ func NewIAKERBInitiator(kdc *client.Client, clientPrincipal, target principal.Pr
 // credentials. A non-nil service credential skips the proxy exchange.
 func NewIAKERBInitiatorWithCredentials(tgt, service *client.Credentials,
 	target principal.Principal, flags uint32) (*IAKERBInitiator, error) {
+	return NewIAKERBInitiatorWithCredentialsOptions(tgt, service, target, flags, InitiatorOptions{})
+}
+
+// NewIAKERBInitiatorWithCredentialsOptions starts IAKERB with existing
+// credentials and optional channel bindings.
+func NewIAKERBInitiatorWithCredentialsOptions(tgt, service *client.Credentials,
+	target principal.Principal, flags uint32, options InitiatorOptions) (*IAKERBInitiator, error) {
 	if service == nil && (tgt == nil || len(tgt.Ticket) == 0) {
 		return nil, fmt.Errorf("IAKERB initiator: missing credentials")
 	}
@@ -253,6 +273,7 @@ func NewIAKERBInitiatorWithCredentials(tgt, service *client.Credentials,
 	return &IAKERBInitiator{
 		TGT: tgt, Service: service, Client: clientPrincipal, Target: target,
 		Flags: flags, state: iakerbStateTGS, realm: clientPrincipal.Realm,
+		channelBindings: cloneChannelBindings(options.ChannelBindings),
 	}, nil
 }
 
@@ -261,6 +282,13 @@ func NewIAKERBInitiatorWithCredentials(tgt, service *client.Credentials,
 func (i *IAKERBInitiator) SetKDC(kdc *client.Client) {
 	if i != nil {
 		i.KDC = kdc
+	}
+}
+
+// SetChannelBindings supplies bindings for the final AP exchange.
+func (i *IAKERBInitiator) SetChannelBindings(bindings *ChannelBindings) {
+	if i != nil {
+		i.channelBindings = cloneChannelBindings(bindings)
 	}
 }
 
@@ -498,7 +526,7 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			checksum := buildIAKERBAuthenticatorChecksum(i.Flags, finished)
+			checksum := buildIAKERBAuthenticatorChecksum(i.Flags, finished, i.channelBindings)
 			opts := types.APOptions(0)
 			if i.Flags&GSSMutualFlag != 0 {
 				opts |= types.APMutualRequired
@@ -509,7 +537,8 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 				return nil, err
 			}
 			i.context = &Context{key: contextKey(i.apState.SessionKey, i.apState.SubKey),
-				initiator: true, flags: i.Flags, sendSeq: sequenceValue(i.apState.SeqNumber)}
+				initiator: true, flags: i.Flags | channelBoundFlag(i.channelBindings),
+				sendSeq: sequenceValue(i.apState.SeqNumber)}
 			if i.Flags&GSSMutualFlag == 0 {
 				i.state = iakerbStateDone
 			}

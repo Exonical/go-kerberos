@@ -127,6 +127,98 @@ func TestMITSPNEGOInitiatorAgainstGo(t *testing.T) {
 	}
 }
 
+func TestGoGSSChannelBindingsAgainstMIT(t *testing.T) {
+	python := requirePythonGSSAPI(t)
+	realm := testenv.Start(t)
+	cfgData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(cfgData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kclient := &client.Client{Config: cfg}
+	tgt, err := kclient.ASExchange(t.Context(), principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := kclient.TGSExchange(t.Context(), tgt, principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := &gssapi.ChannelBindings{
+		InitiatorAddrType: 2, InitiatorAddress: []byte("192.0.2.1"),
+		AcceptorAddrType: 2, AcceptorAddress: []byte("192.0.2.2"),
+		ApplicationData: []byte("python-channel-bound"),
+	}
+	initiator, err := gssapi.NewInitiatorWithOptions(service,
+		gssapi.GSSMutualFlag|gssapi.GSSIntegrityFlag|gssapi.GSSConfidentialityFlag|
+			gssapi.GSSChannelBoundFlag,
+		gssapi.InitiatorOptions{ChannelBindings: bindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := startPythonSPNEGOPeer(t, python, realm, "cb-accept")
+	defer peer.close()
+	first, err := initiator.InitialToken(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := peer.step(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initiator.VerifyToken(reply); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMITGSSChannelBindingsAgainstGo(t *testing.T) {
+	python := requirePythonGSSAPI(t)
+	realm := testenv.Start(t)
+	realm.Run(t, "alice-password\n", "/usr/bin/kinit", "-c", realm.Cache, "alice")
+	file, err := os.Open(realm.Keytab)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kt, err := keytab.Read(file)
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := &gssapi.ChannelBindings{
+		InitiatorAddrType: 2, InitiatorAddress: []byte("192.0.2.1"),
+		AcceptorAddrType: 2, AcceptorAddress: []byte("192.0.2.2"),
+		ApplicationData: []byte("python-channel-bound"),
+	}
+	peer := startPythonSPNEGOPeer(t, python, realm, "cb-init")
+	defer peer.close()
+	first, err := peer.initial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, reply, err := gssapi.NewAcceptorWithOptions(kt,
+		gssapi.AcceptorOptions{ChannelBindings: bindings}).Accept(first, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reply) == 0 {
+		t.Fatal("missing AP-REP for mutual channel-binding exchange")
+	}
+	if _, err := peer.step(reply); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Flags()&gssapi.GSSChannelBoundFlag == 0 {
+		t.Fatalf("Go acceptor did not set channel-bound flag: %#x", ctx.Flags())
+	}
+}
+
 func TestMITGSSDelegationAgainstGo(t *testing.T) {
 	python := requirePythonGSSAPI(t)
 	realm := testenv.Start(t)
@@ -351,15 +443,38 @@ from gssapi.raw.oids import OID
 spnego = OID.from_int_seq((1, 3, 6, 1, 5, 5, 2))
 kerberos = OID.from_int_seq((1, 2, 840, 113554, 1, 2, 2))
 mode, config, cache, keytab, realm = sys.argv[1:]
-if mode in ("accept", "kerberos-accept"):
+if mode in ("accept", "kerberos-accept", "cb-accept"):
     acceptor_name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
-    acceptor_mechs = [kerberos] if mode == "kerberos-accept" else [spnego]
+    acceptor_mechs = [kerberos] if mode in ("kerberos-accept", "cb-accept") else [spnego]
     acceptor_creds = gssapi.Credentials(name=acceptor_name, usage="accept", mechs=acceptor_mechs)
-    ctx = gssapi.SecurityContext(creds=acceptor_creds, usage="accept")
+    if mode == "cb-accept":
+        cb = gssapi.raw.ChannelBindings(
+            initiator_address_type=gssapi.raw.AddressType.ip,
+            initiator_address=b"192.0.2.1",
+            acceptor_address_type=gssapi.raw.AddressType.ip,
+            acceptor_address=b"192.0.2.2",
+            application_data=b"python-channel-bound")
+        ctx = gssapi.SecurityContext(creds=acceptor_creds, usage="accept",
+                                     channel_bindings=cb)
+    else:
+        ctx = gssapi.SecurityContext(creds=acceptor_creds, usage="accept")
 elif mode == "delegate":
     name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
     flags = [gssapi.RequirementFlag.delegate_to_peer]
     ctx = gssapi.SecurityContext(name=name, usage="initiate", mech=kerberos, flags=flags)
+elif mode == "cb-init":
+    name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
+    cb = gssapi.raw.ChannelBindings(
+        initiator_address_type=gssapi.raw.AddressType.ip,
+        initiator_address=b"192.0.2.1",
+        acceptor_address_type=gssapi.raw.AddressType.ip,
+        acceptor_address=b"192.0.2.2",
+        application_data=b"python-channel-bound")
+    flags = [gssapi.RequirementFlag.mutual_authentication,
+             gssapi.RequirementFlag.integrity,
+             gssapi.RequirementFlag.confidentiality]
+    ctx = gssapi.SecurityContext(name=name, usage="initiate", mech=kerberos,
+                                 flags=flags, channel_bindings=cb)
 else:
     name = gssapi.Name("host/service.test@" + realm, name_type=gssapi.NameType.kerberos_principal)
     flags = [gssapi.RequirementFlag.mutual_authentication,
@@ -370,7 +485,7 @@ else:
 def emit(kind, value):
     print(kind + " " + base64.b64encode(value or b"").decode("ascii"), flush=True)
 
-if mode in ("initiate", "delegate"):
+if mode in ("initiate", "delegate", "cb-init"):
     emit("step", ctx.step(None))
 
 for line in sys.stdin:

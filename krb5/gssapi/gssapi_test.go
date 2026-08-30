@@ -64,6 +64,198 @@ func TestInitialTokenFraming(t *testing.T) {
 	}
 }
 
+func TestChannelBindingsChecksumEncoding(t *testing.T) {
+	bindings := &ChannelBindings{
+		InitiatorAddrType: 2,
+		InitiatorAddress:  []byte{1, 2, 3, 4},
+		AcceptorAddrType:  24,
+		AcceptorAddress:   []byte{5, 6, 7, 8},
+		ApplicationData:   []byte("abc"),
+	}
+	sum := ChecksumChannelBindings(bindings)
+	if got, want := hex.EncodeToString(sum[:]), "1872fd3eef083806614c9ac3fb90c04a"; got != want {
+		t.Fatalf("channel-binding MD5 = %s, want %s", got, want)
+	}
+	if got := ChecksumChannelBindings(nil); got != ([16]byte{}) {
+		t.Fatalf("nil channel bindings = %x, want zero", got)
+	}
+}
+
+func TestChannelBindingsInitiatorAndAcceptorSemantics(t *testing.T) {
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700000000, 0).UTC()
+	bindings := &ChannelBindings{
+		InitiatorAddrType: 2,
+		InitiatorAddress:  []byte{192, 0, 2, 1},
+		AcceptorAddrType:  2,
+		AcceptorAddress:   []byte{192, 0, 2, 2},
+		ApplicationData:   []byte("channel-bound"),
+	}
+	makeToken := func(value *ChannelBindings) []byte {
+		initiator, err := NewInitiatorWithOptions(creds, GSSMutualFlag|GSSChannelBoundFlag,
+			InitiatorOptions{ChannelBindings: value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		token, err := initiator.InitialToken(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	token := makeToken(bindings)
+	inner, err := unframeToken(token, []byte{0x01, 0x00})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := ap.VerifyAPReq(kt, inner, now, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.Checksum == nil || len(verified.Checksum.Checksum) < 20 {
+		t.Fatalf("missing authenticator checksum: %#v", verified.Checksum)
+	}
+	sum := ChecksumChannelBindings(bindings)
+	if !bytes.Equal(verified.Checksum.Checksum[4:20], sum[:]) {
+		t.Fatalf("authenticator Bnd = %x, want %x", verified.Checksum.Checksum[4:20], sum)
+	}
+	asserted, err := channelBindingAsserted(verified.AuthenticatorAuthorizationData)
+	if err != nil || !asserted {
+		t.Fatalf("missing MS-KILE CBT assertion: asserted=%v err=%v", asserted, err)
+	}
+	initiator, err := NewInitiatorWithOptions(creds, GSSMutualFlag|GSSChannelBoundFlag,
+		InitiatorOptions{ChannelBindings: bindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.InitialToken(now); err != nil {
+		t.Fatal(err)
+	}
+	if initiator.ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("initiator context incorrectly set channel-bound flag: %#x", initiator.ctx.Flags())
+	}
+
+	token = makeToken(bindings)
+	acceptor := NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings})
+	ctx, _, err := acceptor.Accept(token, now)
+	if err != nil {
+		t.Fatalf("matching bindings: %v", err)
+	}
+	if ctx.Flags()&GSSChannelBoundFlag == 0 {
+		t.Fatalf("matching bindings did not set channel-bound flag: %#x", ctx.Flags())
+	}
+
+	mismatch := *bindings
+	mismatch.ApplicationData = []byte("different")
+	_, _, err = NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: &mismatch}).Accept(makeToken(bindings), now)
+	if !errors.Is(err, ErrBadBindings) {
+		t.Fatalf("mismatched bindings error = %v, want ErrBadBindings", err)
+	}
+
+	zeroInitiator, err := NewInitiator(creds, GSSMutualFlag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroToken, err := zeroInitiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, _, err = NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings}).Accept(zeroToken, now)
+	if err != nil {
+		t.Fatalf("zero Bnd with expected bindings: %v", err)
+	}
+	if ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("zero Bnd incorrectly set channel-bound flag: %#x", ctx.Flags())
+	}
+
+	ctx, _, err = NewAcceptor(kt).Accept(makeToken(bindings), now)
+	if err != nil {
+		t.Fatalf("unexpected Bnd without expected bindings: %v", err)
+	}
+	if ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("unexpected Bnd set flag without expected bindings: %#x", ctx.Flags())
+	}
+}
+
+func TestChannelBindingsAcceptorTolerance(t *testing.T) {
+	bindings := &ChannelBindings{ApplicationData: []byte("expected")}
+	if err := verifyChannelBindings(nil, bindings); err != nil {
+		t.Fatalf("missing checksum: %v", err)
+	}
+	if err := verifyChannelBindings(&protocol.Checksum{ChecksumType: 1, Checksum: []byte{1, 2, 3}}, bindings); err != nil {
+		t.Fatalf("regular checksum: %v", err)
+	}
+	if err := verifyChannelBindings(&protocol.Checksum{ChecksumType: 0x8003, Checksum: make([]byte, 23)}, bindings); !errors.Is(err, ErrBadBindings) {
+		t.Fatalf("short RFC 4121 checksum error = %v, want ErrBadBindings", err)
+	}
+	invalidLength := make([]byte, 24)
+	binary.LittleEndian.PutUint32(invalidLength[:4], 15)
+	if err := verifyChannelBindings(&protocol.Checksum{ChecksumType: 0x8003, Checksum: invalidLength}, bindings); errors.Is(err, ErrBadBindings) || err == nil {
+		t.Fatalf("invalid RFC 4121 channel-binding length error = %v, want generic failure", err)
+	}
+	zero := make([]byte, 24)
+	binary.LittleEndian.PutUint32(zero[:4], 16)
+	zeroChecksum := &protocol.Checksum{ChecksumType: 0x8003, Checksum: zero}
+	if err := verifyChannelBindings(zeroChecksum, bindings); err != nil {
+		t.Fatalf("zero Bnd with expected bindings: %v", err)
+	}
+	if got := channelBoundFlagForChecksum(zeroChecksum, bindings); got != 0 {
+		t.Fatalf("zero Bnd flag = %#x, want zero", got)
+	}
+	sum := ChecksumChannelBindings(bindings)
+	matching := append([]byte(nil), zero...)
+	copy(matching[4:20], sum[:])
+	matchingChecksum := &protocol.Checksum{ChecksumType: 0x8003, Checksum: matching}
+	if err := verifyChannelBindings(matchingChecksum, bindings); err != nil {
+		t.Fatalf("matching Bnd: %v", err)
+	}
+	if got := channelBoundFlagForChecksum(matchingChecksum, bindings); got != GSSChannelBoundFlag {
+		t.Fatalf("matching Bnd flag = %#x, want %#x", got, GSSChannelBoundFlag)
+	}
+
+	creds, kt := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now := time.Unix(1700000300, 0).UTC()
+	etype, err := crypto.NewRegistry().Get(creds.Key.KeyType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := etype.Checksum(creds.Key.KeyValue, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, der, err := ap.BuildAPReqWithOptions(creds, types.APMutualRequired, now,
+		ap.APReqOptions{Checksum: &protocol.Checksum{
+			ChecksumType: crypto.ChecksumHMACSHA196AES256,
+			Checksum:     regular,
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := frameToken([]byte{0x01, 0x00}, der)
+	ctx, _, err := NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings}).Accept(token, now)
+	if err != nil {
+		t.Fatalf("regular checksum with expected bindings: %v", err)
+	}
+	if got, want := ctx.Flags()&(GSSReplayFlag|GSSSequenceFlag|GSSMutualFlag),
+		GSSReplayFlag|GSSSequenceFlag|GSSMutualFlag; got != want {
+		t.Fatalf("regular checksum flags = %#x, want %#x", got, want)
+	}
+	if ctx.Flags()&GSSChannelBoundFlag != 0 {
+		t.Fatalf("regular checksum unexpectedly set channel-bound flag")
+	}
+
+	creds, kt = syntheticCredentials(t, crypto.EnctypeAES256SHA1)
+	now = time.Unix(1700000400, 0).UTC()
+	_, der, err = ap.BuildAPReqWithOptions(creds, 0, now, ap.APReqOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token = frameToken([]byte{0x01, 0x00}, der)
+	if _, _, err := NewAcceptorWithOptions(kt, AcceptorOptions{ChannelBindings: bindings}).Accept(token, now); err != nil {
+		t.Fatalf("missing checksum with expected bindings: %v", err)
+	}
+}
+
 func TestKRBCredRoundTrip(t *testing.T) {
 	creds, _ := syntheticCredentials(t, crypto.EnctypeAES256SHA1)
 	start := types.KerberosTime{Time: creds.AuthTime.Time.Add(time.Minute), Present: true}
