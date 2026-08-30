@@ -211,6 +211,7 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 	for _, enctype := range []int32{
 		crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
 		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
+		crypto.EnctypeCamellia128, crypto.EnctypeCamellia256,
 	} {
 		etype, err := crypto.NewRegistry().Get(enctype)
 		if err != nil {
@@ -261,6 +262,7 @@ func deriveRecord(name principal.Principal, password string, kvno uint32) (Princ
 	for _, enctype := range []int32{
 		crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
 		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
+		crypto.EnctypeCamellia128, crypto.EnctypeCamellia256,
 	} {
 		etype, err := crypto.NewRegistry().Get(enctype)
 		if err != nil {

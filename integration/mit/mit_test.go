@@ -4,6 +4,7 @@ package mit_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
+	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -167,6 +170,36 @@ func TestGoClientASExchange(t *testing.T) {
 	listing := realm.Run(t, "", "/usr/bin/klist", "-e", "-c", outputPath)
 	if !strings.Contains(listing, "krbtgt/"+testenv.RealmName+"@"+testenv.RealmName) {
 		t.Fatalf("MIT klist does not contain TGT:\n%s", listing)
+	}
+}
+
+func TestGoClientCamelliaAgainstMITKDC(t *testing.T) {
+	realm := testenv.StartWithCamellia(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse Camellia config: %v", err)
+	}
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	credentials, err := (&client.Client{
+		Config: cfg,
+		Now:    func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+	}).ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		var kerberosError *krberrors.KRBError
+		if errors.As(err, &kerberosError) && kerberosError.Code == krberrors.KDCErrEtypeNosp {
+			t.Skipf("installed MIT KDC rejects Camellia AS requests with KDC_ERR_ETYPE_NOSUPP: %v", err)
+		}
+		t.Fatalf("Go Camellia AS exchange: %v", err)
+	}
+	if credentials.Key.KeyType != crypto.EnctypeCamellia256 {
+		t.Fatalf("AS reply enctype = %d, want %d", credentials.Key.KeyType, crypto.EnctypeCamellia256)
 	}
 }
 

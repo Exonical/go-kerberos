@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
@@ -34,6 +37,86 @@ func TestPRFRFC8009Vectors(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("PRF(%d) = %x, want %x", vector.etype, got, want)
 		}
+	}
+}
+
+func TestCamelliaRegistry(t *testing.T) {
+	registry := NewRegistry()
+	for _, test := range []struct {
+		id   int32
+		size int
+	}{
+		{EnctypeCamellia128, 16},
+		{EnctypeCamellia256, 32},
+	} {
+		etype, err := registry.Get(test.id)
+		if err != nil {
+			t.Fatalf("registry.Get(%d): %v", test.id, err)
+		}
+		if etype.ID() != test.id || etype.KeySize() != test.size {
+			t.Fatalf("registry.Get(%d) = id %d, size %d", test.id, etype.ID(), etype.KeySize())
+		}
+	}
+}
+
+func TestCamelliaRegistryFIPSGate(t *testing.T) {
+	previous := fipsEnabled
+	fipsEnabled = func() bool { return true }
+	defer func() { fipsEnabled = previous }()
+
+	for _, id := range []int32{EnctypeCamellia128, EnctypeCamellia256} {
+		_, err := NewRegistry().Get(id)
+		if !errors.Is(err, krberrors.ErrUnsupportedEType) {
+			t.Fatalf("registry.Get(%d) error = %v, want ErrUnsupportedEType", id, err)
+		}
+		if !strings.Contains(err.Error(), "FIPS") {
+			t.Fatalf("registry.Get(%d) error = %v, want FIPS diagnostic", id, err)
+		}
+	}
+}
+
+func TestCamelliaFIPSGateSubprocess(t *testing.T) {
+	const helperEnv = "GO_KERBEROS_FIPS_HELPER=1"
+	if os.Getenv("GO_KERBEROS_FIPS_HELPER") == "1" {
+		if !fipsEnabled() {
+			t.Fatal("FIPS mode was not enabled in subprocess")
+		}
+		for _, id := range []int32{EnctypeCamellia128, EnctypeCamellia256} {
+			if _, err := NewRegistry().Get(id); !errors.Is(err, krberrors.ErrUnsupportedEType) {
+				t.Fatalf("registry.Get(%d) error = %v, want ErrUnsupportedEType", id, err)
+			}
+		}
+		etype, err := NewRegistry().Get(EnctypeAES256SHA384)
+		if err != nil {
+			t.Fatalf("AES registry lookup in FIPS mode: %v", err)
+		}
+		key := bytes.Repeat([]byte{0x42}, etype.KeySize())
+		ciphertext, err := etype.Encrypt(key, 42, []byte("FIPS AES exchange"))
+		if err != nil {
+			t.Fatalf("AES encryption in FIPS mode: %v", err)
+		}
+		plaintext, err := etype.Decrypt(key, 42, ciphertext)
+		if err != nil {
+			t.Fatalf("AES decryption in FIPS mode: %v", err)
+		}
+		if string(plaintext) != "FIPS AES exchange" {
+			t.Fatalf("AES plaintext = %q, want exchange payload", plaintext)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCamelliaFIPSGateSubprocess$")
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GODEBUG=") && !strings.HasPrefix(value, helperEnv[:strings.IndexByte(helperEnv, '=')+1]) {
+			env = append(env, value)
+		}
+	}
+	env = append(env, "GODEBUG=fips140=on", helperEnv)
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("FIPS subprocess: %v\n%s", err, output)
 	}
 }
 

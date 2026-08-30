@@ -622,8 +622,8 @@ func Parse(data []byte) (*FileStore, error) {
 }
 
 // ParseWithMasterPassword parses an MIT dump and decrypts its key data using
-// the database master password. It supports the AES Kerberos master-key
-// enctypes 17, 18, 19, and 20. It also accepts plaintext key data, which is
+// the database master password. It supports the AES and Camellia Kerberos
+// master-key enctypes. It also accepts plaintext key data, which is
 // useful for synthetic test dumps.
 func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 	store, err := Parse(data)
@@ -643,6 +643,8 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 		crypto.EnctypeAES256SHA1,
 		crypto.EnctypeAES128SHA256,
 		crypto.EnctypeAES256SHA384,
+		crypto.EnctypeCamellia128,
+		crypto.EnctypeCamellia256,
 	}
 	if identified {
 		candidates = []int32{masterEnctype}

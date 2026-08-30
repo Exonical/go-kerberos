@@ -1,6 +1,8 @@
 package crypto
 
 import (
+	"crypto/cipher"
+	"crypto/fips140"
 	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha1"
@@ -12,6 +14,7 @@ import (
 	"io"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto/aescts"
+	"github.com/Exonical/go-kerberos/krb5/crypto/camellia"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -21,11 +24,15 @@ const (
 	EnctypeAES256SHA1   int32 = 18
 	EnctypeAES128SHA256 int32 = 19
 	EnctypeAES256SHA384 int32 = 20
+	EnctypeCamellia128  int32 = 25
+	EnctypeCamellia256  int32 = 26
 
 	ChecksumHMACSHA196AES128    int32 = 15
 	ChecksumHMACSHA196AES256    int32 = 16
 	ChecksumHMACSHA256128AES128 int32 = 19
 	ChecksumHMACSHA384192AES256 int32 = 20
+	ChecksumCMACCamellia128     int32 = 17
+	ChecksumCMACCamellia256     int32 = 18
 )
 
 // EType is the common Kerberos encryption-type and checksum contract.
@@ -52,6 +59,10 @@ type StatefulEType interface {
 // a deterministic reader; production code leaves it as rand.Reader.
 var RandomSource types.RandomSource = cryptorand.Reader
 
+// fipsEnabled is a variable so the Camellia policy can be unit tested without
+// changing the process-wide Go FIPS setting.
+var fipsEnabled = fips140.Enabled
+
 // SetRandomSource replaces the confounder source and returns a restore hook.
 func SetRandomSource(source types.RandomSource) func() {
 	previous := RandomSource
@@ -69,6 +80,362 @@ type aesEType struct {
 	hash          func() hash.Hash
 	etypeName     string
 	defaultRounds uint32
+}
+
+type camelliaEType struct {
+	id      int32
+	keySize int
+}
+
+func (e camelliaEType) ID() int32    { return e.id }
+func (e camelliaEType) KeySize() int { return e.keySize }
+
+func (e camelliaEType) StringToKey(password, salt, params []byte) ([]byte, error) {
+	iterations, err := parseIterations(params, 32768)
+	if err != nil {
+		return nil, fmt.Errorf("etype %d string-to-key: %w", e.id, err)
+	}
+	saltInput := make([]byte, 0, len(e.name())+1+len(salt))
+	saltInput = append(saltInput, e.name()...)
+	saltInput = append(saltInput, 0)
+	saltInput = append(saltInput, salt...)
+	tkey, err := pbkdf2Key(sha1.New, password, saltInput, iterations, e.keySize)
+	if err != nil {
+		return nil, fmt.Errorf("etype %d string-to-key: %w", e.id, err)
+	}
+	return camelliaDerive(tkey, []byte("kerberos"), e.keySize)
+}
+
+func (e camelliaEType) name() string {
+	if e.id == EnctypeCamellia128 {
+		return "camellia128-cts-cmac"
+	}
+	return "camellia256-cts-cmac"
+}
+
+func (e camelliaEType) Encrypt(key []byte, usage uint32, plaintext []byte) ([]byte, error) {
+	out, _, err := e.EncryptWithIV(key, usage, plaintext, make([]byte, camellia.BlockSize))
+	return out, err
+}
+
+func (e camelliaEType) EncryptWithIV(key []byte, usage uint32, plaintext, iv []byte) ([]byte, []byte, error) {
+	if err := validateKey(key, e.keySize); err != nil {
+		return nil, nil, fmt.Errorf("etype %d encrypt: %w", e.id, err)
+	}
+	if len(iv) != camellia.BlockSize {
+		return nil, nil, fmt.Errorf("etype %d encrypt: invalid IV length %d", e.id, len(iv))
+	}
+	confounder := make([]byte, camellia.BlockSize)
+	if _, err := io.ReadFull(RandomSource, confounder); err != nil {
+		return nil, nil, fmt.Errorf("etype %d encrypt confounder: %w", e.id, err)
+	}
+	plain := append(append([]byte(nil), confounder...), plaintext...)
+	ke, err := camelliaDerivedUsage(key, usage, 0xaa)
+	if err != nil {
+		return nil, nil, err
+	}
+	ki, err := camelliaDerivedUsage(key, usage, 0x55)
+	if err != nil {
+		return nil, nil, err
+	}
+	encrypted, nextIV, err := camelliaCTS(ke, iv, plain, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	mac, err := camelliaCMACKey(ki, plain)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(encrypted, mac...), nextIV, nil
+}
+
+func (e camelliaEType) Decrypt(key []byte, usage uint32, ciphertext []byte) ([]byte, error) {
+	out, _, err := e.DecryptWithIV(key, usage, ciphertext, make([]byte, camellia.BlockSize))
+	return out, err
+}
+
+func (e camelliaEType) DecryptWithIV(key []byte, usage uint32, ciphertext, iv []byte) ([]byte, []byte, error) {
+	if err := validateKey(key, e.keySize); err != nil {
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
+	}
+	if len(iv) != camellia.BlockSize || len(ciphertext) < camellia.BlockSize+camellia.BlockSize {
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+	}
+	encrypted := ciphertext[:len(ciphertext)-camellia.BlockSize]
+	supplied := ciphertext[len(ciphertext)-camellia.BlockSize:]
+	ke, err := camelliaDerivedUsage(key, usage, 0xaa)
+	if err != nil {
+		return nil, nil, err
+	}
+	ki, err := camelliaDerivedUsage(key, usage, 0x55)
+	if err != nil {
+		return nil, nil, err
+	}
+	plain, nextIV, err := camelliaCTS(ke, iv, encrypted, true)
+	if err != nil || len(plain) < camellia.BlockSize {
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+	}
+	expected, err := camelliaCMACKey(ki, plain)
+	if err != nil || !hmac.Equal(expected, supplied) {
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+	}
+	return plain[camellia.BlockSize:], nextIV, nil
+}
+
+func (e camelliaEType) Checksum(key []byte, usage uint32, data []byte) ([]byte, error) {
+	if err := validateKey(key, e.keySize); err != nil {
+		return nil, fmt.Errorf("etype %d checksum: %w", e.id, err)
+	}
+	kc, err := camelliaDerivedUsage(key, usage, 0x99)
+	if err != nil {
+		return nil, err
+	}
+	return camelliaCMACKey(kc, data)
+}
+
+func (e camelliaEType) ChecksumSize() int { return camellia.BlockSize }
+
+func (e camelliaEType) VerifyChecksum(key []byte, usage uint32, data, checksum []byte) error {
+	expected, err := e.Checksum(key, usage, data)
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal(expected, checksum) {
+		return fmt.Errorf("etype %d verify checksum: %w", e.id, krberrors.ErrIntegrity)
+	}
+	return nil
+}
+
+func camelliaCMACKey(key, data []byte) ([]byte, error) {
+	block, err := camellia.New(key)
+	if err != nil {
+		return nil, err
+	}
+	zero := make([]byte, camellia.BlockSize)
+	l := make([]byte, camellia.BlockSize)
+	block.Encrypt(l, zero)
+	k1 := cmacDouble(l)
+	k2 := cmacDouble(k1)
+	n := (len(data) + camellia.BlockSize - 1) / camellia.BlockSize
+	complete := len(data) > 0 && len(data)%camellia.BlockSize == 0
+	if n == 0 {
+		n = 1
+	}
+	last := make([]byte, camellia.BlockSize)
+	if complete {
+		copy(last, data[(n-1)*camellia.BlockSize:])
+		xorBytes(last, last, k1)
+	} else {
+		if len(data) > 0 {
+			copy(last, data[(n-1)*camellia.BlockSize:])
+		}
+		last[len(data)%camellia.BlockSize] = 0x80
+		xorBytes(last, last, k2)
+	}
+	state := make([]byte, camellia.BlockSize)
+	for i := 0; i < n-1; i++ {
+		input := make([]byte, camellia.BlockSize)
+		copy(input, data[i*camellia.BlockSize:])
+		xorBytes(input, input, state)
+		block.Encrypt(state, input)
+	}
+	xorBytes(last, last, state)
+	block.Encrypt(state, last)
+	return state, nil
+}
+
+func cmacDouble(in []byte) []byte {
+	out := make([]byte, len(in))
+	carry := byte(0)
+	for i := len(in) - 1; i >= 0; i-- {
+		next := in[i] >> 7
+		out[i] = in[i]<<1 | carry
+		carry = next
+	}
+	if carry != 0 {
+		out[len(out)-1] ^= 0x87
+	}
+	return out
+}
+
+func camelliaDerivedUsage(key []byte, usage uint32, suffix byte) ([]byte, error) {
+	label := make([]byte, 5)
+	binary.BigEndian.PutUint32(label, usage)
+	label[4] = suffix
+	return camelliaDerive(key, label, len(key))
+}
+
+func camelliaDerive(key, label []byte, size int) ([]byte, error) {
+	block, err := camellia.New(key)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, size)
+	previous := make([]byte, camellia.BlockSize)
+	for counter := uint32(1); len(out) < size; counter++ {
+		input := make([]byte, 0, camellia.BlockSize+4+len(label)+1+4)
+		input = append(input, previous...)
+		var counterBytes [4]byte
+		binary.BigEndian.PutUint32(counterBytes[:], counter)
+		input = append(input, counterBytes[:]...)
+		input = append(input, label...)
+		input = append(input, 0)
+		var lengthBytes [4]byte
+		binary.BigEndian.PutUint32(lengthBytes[:], uint32(size*8))
+		input = append(input, lengthBytes[:]...)
+		previous, err = camelliaCMACBlock(block, input)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, previous...)
+	}
+	return out[:size], nil
+}
+
+func camelliaCMACBlock(block cipher.Block, data []byte) ([]byte, error) {
+	zero := make([]byte, block.BlockSize())
+	l := make([]byte, block.BlockSize())
+	block.Encrypt(l, zero)
+	k1 := cmacDouble(l)
+	k2 := cmacDouble(k1)
+	n := (len(data) + block.BlockSize() - 1) / block.BlockSize()
+	complete := len(data) > 0 && len(data)%block.BlockSize() == 0
+	if n == 0 {
+		n = 1
+	}
+	last := make([]byte, block.BlockSize())
+	if complete {
+		copy(last, data[(n-1)*block.BlockSize():])
+		xorBytes(last, last, k1)
+	} else {
+		copy(last, data[(n-1)*block.BlockSize():])
+		last[len(data)%block.BlockSize()] = 0x80
+		xorBytes(last, last, k2)
+	}
+	state := make([]byte, block.BlockSize())
+	for i := 0; i < n-1; i++ {
+		input := make([]byte, block.BlockSize())
+		copy(input, data[i*block.BlockSize():])
+		xorBytes(input, input, state)
+		block.Encrypt(state, input)
+	}
+	xorBytes(last, last, state)
+	block.Encrypt(state, last)
+	return state, nil
+}
+
+func camelliaCTS(key, iv, input []byte, decrypt bool) ([]byte, []byte, error) {
+	block, err := camellia.New(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	bs := block.BlockSize()
+	if len(iv) != bs || len(input) < bs {
+		return nil, nil, fmt.Errorf("Camellia CTS: invalid input")
+	}
+	if !decrypt {
+		if len(input) == bs {
+			out := make([]byte, bs)
+			cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, input)
+			return out, append([]byte(nil), out...), nil
+		}
+		if len(input)%bs == 0 {
+			out := make([]byte, len(input))
+			cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, input)
+			last := len(out) - bs
+			previous := last - bs
+			swapped := append([]byte(nil), out[previous:last]...)
+			copy(out[previous:last], out[last:])
+			copy(out[last:], swapped)
+			return out, append([]byte(nil), out[len(out)-2*bs:len(out)-bs]...), nil
+		}
+		full := len(input) / bs
+		rem := len(input) % bs
+		out := make([]byte, 0, len(input))
+		previous := iv
+		for i := 0; i < full-1; i++ {
+			encrypted := make([]byte, bs)
+			xorBytes(encrypted, input[i*bs:(i+1)*bs], previous)
+			block.Encrypt(encrypted, encrypted)
+			out = append(out, encrypted...)
+			previous = encrypted
+		}
+		penultimate := input[(full-1)*bs : full*bs]
+		last := input[full*bs:]
+		x := make([]byte, bs)
+		xorBytes(x, penultimate, previous)
+		block.Encrypt(x, x)
+		padded := make([]byte, bs)
+		copy(padded, last)
+		xorBytes(padded, padded, x)
+		y := make([]byte, bs)
+		block.Encrypt(y, padded)
+		out = append(out, y...)
+		out = append(out, x[:rem]...)
+		nextOffset := len(out) - rem - bs
+		return out, append([]byte(nil), out[nextOffset:nextOffset+bs]...), nil
+	}
+	if len(input) == bs {
+		out := make([]byte, bs)
+		cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, input)
+		return out, append([]byte(nil), input...), nil
+	}
+	full := len(input) / bs
+	rem := len(input) % bs
+	out := make([]byte, 0, len(input))
+	previous := iv
+	previousBlocks := full - 2
+	if rem != 0 {
+		previousBlocks = full - 1
+	}
+	for i := 0; i < previousBlocks; i++ {
+		plain := make([]byte, bs)
+		cipher.NewCBCDecrypter(block, previous).CryptBlocks(plain, input[i*bs:(i+1)*bs])
+		out = append(out, plain...)
+		previous = input[i*bs : (i+1)*bs]
+	}
+	yBlock := full - 2
+	if rem != 0 {
+		yBlock = full - 1
+	}
+	y := input[yBlock*bs : yBlock*bs+bs]
+	xPart := input[yBlock*bs+bs:]
+	if rem == 0 {
+		dy := make([]byte, bs)
+		block.Decrypt(dy, y)
+		plainLast := make([]byte, bs)
+		xorBytes(plainLast, dy, xPart)
+		dx := make([]byte, bs)
+		block.Decrypt(dx, xPart)
+		plainPenultimate := make([]byte, bs)
+		xorBytes(plainPenultimate, dx, previous)
+		out = append(out, plainPenultimate...)
+		out = append(out, plainLast...)
+		return out, append([]byte(nil), input[len(input)-2*bs:len(input)-bs]...), nil
+	}
+	dy := make([]byte, bs)
+	block.Decrypt(dy, y)
+	x := make([]byte, bs)
+	copy(x, xPart)
+	copy(x[rem:], dy[rem:])
+	plainLast := make([]byte, rem)
+	for i := range plainLast {
+		plainLast[i] = dy[i] ^ x[i]
+	}
+	dx := make([]byte, bs)
+	block.Decrypt(dx, x)
+	plainPenultimate := make([]byte, bs)
+	xorBytes(plainPenultimate, dx, previous)
+	out = append(out, plainPenultimate...)
+	out = append(out, plainLast...)
+	nextOffset := len(input) - rem - bs
+	return out, append([]byte(nil), input[nextOffset:nextOffset+bs]...), nil
+}
+
+func xorBytes(dst, left, right []byte) {
+	for i := range dst {
+		dst[i] = left[i] ^ right[i]
+	}
 }
 
 func (e aesEType) ID() int32    { return e.id }
@@ -230,6 +597,16 @@ func PRF(etype EType, key, input []byte) ([]byte, error) {
 	}
 	aes, ok := etype.(aesEType)
 	if !ok {
+		if cam, ok := etype.(camelliaEType); ok {
+			if err := validateKey(key, cam.keySize); err != nil {
+				return nil, err
+			}
+			dkey, err := camelliaDerive(key, []byte("prf"), cam.keySize)
+			if err != nil {
+				return nil, err
+			}
+			return camelliaCMACKey(dkey, input)
+		}
 		return nil, krberrors.ErrUnsupportedEType
 	}
 	if err := validateKey(key, aes.keySize); err != nil {
@@ -341,7 +718,7 @@ func (e aesEType) deriveKeys(key []byte, usage uint32) ([]byte, []byte, []byte, 
 	return kc, ke, ki, err
 }
 
-// Registry selects one of the supported AES enctypes.
+// Registry selects one of the supported enctypes.
 type Registry struct{}
 
 func NewRegistry() *Registry { return &Registry{} }
@@ -357,6 +734,16 @@ func (r *Registry) Get(id int32) (EType, error) {
 		return aesEType{id: id, keySize: 16, checksumSize: 16, sha2: true, hash: sha256.New, etypeName: "aes128-cts-hmac-sha256-128", defaultRounds: 32768}, nil
 	case EnctypeAES256SHA384:
 		return aesEType{id: id, keySize: 32, checksumSize: 24, sha2: true, hash: sha512.New384, etypeName: "aes256-cts-hmac-sha384-192", defaultRounds: 32768}, nil
+	case EnctypeCamellia128:
+		if fipsEnabled() {
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+		}
+		return camelliaEType{id: id, keySize: 16}, nil
+	case EnctypeCamellia256:
+		if fipsEnabled() {
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+		}
+		return camelliaEType{id: id, keySize: 32}, nil
 	default:
 		return nil, krberrors.ErrUnsupportedEType
 	}
@@ -364,7 +751,7 @@ func (r *Registry) Get(id int32) (EType, error) {
 
 func validateKey(key []byte, size int) error {
 	if len(key) != size {
-		return fmt.Errorf("invalid AES key length %d, want %d", len(key), size)
+		return fmt.Errorf("invalid key length %d, want %d", len(key), size)
 	}
 	return nil
 }
