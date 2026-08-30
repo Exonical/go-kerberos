@@ -34,6 +34,9 @@ func TestServerPKINITASExchange(t *testing.T) {
 	server.PKINITSigner = kdcKey
 	server.PKINITClientCAs = roots
 	server.PKINITIndicators = []string{"pkinit", "hardware"}
+	server.CertAuthModules = []CertAuthModule{
+		certAuthTestModule{decision: CertAuthPass, indicators: []string{"certauth"}},
+	}
 
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
 	credentials, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots)
@@ -43,7 +46,49 @@ func TestServerPKINITASExchange(t *testing.T) {
 	if !samePrincipal(credentials.Client, user) {
 		t.Fatalf("PKINIT client = %v, want %v", credentials.Client, user)
 	}
-	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "pkinit", "hardware")
+	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM",
+		"pkinit", "hardware", "certauth")
+}
+
+func TestServerPKINITDBMatchCertAuth(t *testing.T) {
+	now := time.Unix(2000001000, 0).UTC()
+	server, kclient := testServer(t, now)
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(
+		t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(
+		t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+
+	user := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	record, ok, err := server.DB.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup: %v", err)
+	}
+	record.Strings["pkinit_cert_match"] = "<SUBJECT>CN=alice"
+	if err := server.DB.(*kdb.Database).UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kclient.ASExchangePKINIT(
+		context.Background(), user, clientCert, clientKey, roots); err != nil {
+		t.Fatalf("dbmatch PKINIT success: %v", err)
+	}
+
+	record.Strings["pkinit_cert_match"] = "<SUBJECT>CN=wrong"
+	if err := server.DB.(*kdb.Database).UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kclient.ASExchangePKINIT(
+		context.Background(), user, clientCert, clientKey, roots); err == nil ||
+		!hasKRBCode(err, 66) {
+		t.Fatalf("dbmatch mismatch error = %v, want KDC error 66", err)
+	}
 }
 
 func TestServerPKINITFreshnessRequired(t *testing.T) {
