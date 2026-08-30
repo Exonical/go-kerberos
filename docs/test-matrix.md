@@ -384,6 +384,25 @@ initial OTP challenge, as required by MIT's retry processing.
 
 ## Realm discovery and KDC configuration
 
+The configuration parser supports MIT profile `include FILENAME` and
+`includedir DIRNAME` directives, including nested directives. Missing include
+files and directories are errors. `includedir` entries are processed in
+lexicographic order; dotfiles, editor backups, and unrelated names are
+silently skipped, while names containing only letters, digits, `-`, and `_`,
+and names ending in `.conf`, are accepted. Included files have independent
+section state, matching MIT's parser behavior.
+
+The shared path-token expander supports the POSIX MIT tokens `%{TEMP}`,
+`%{uid}`, `%{euid}`, `%{USERID}`, `%{username}`, `%{LIBDIR}`, `%{BINDIR}`,
+`%{SBINDIR}`, and `%{null}`. `%{TEMP}` honors `TMPDIR` and otherwise uses
+`/tmp`; UID and username values come from the POSIX process/user APIs.
+Installation-directory tokens use the conventional Go/Linux paths
+`/usr/lib`, `/usr/bin`, and `/usr/sbin`, since this project does not have
+MIT's compile-time installation macros. Unknown and malformed tokens are
+errors. Windows registry tokens and MIT profile `module` loading are not
+implemented; those features require platform-specific/plugin loader
+infrastructure not present in this Go profile package.
+
 Unit coverage exercises MIT profile `[domain_realm]` matching (exact host,
 case-insensitive parent walking, leading-dot suffixes, and numeric-address
 exclusion), the opt-in upper-cased parent-domain fallback,

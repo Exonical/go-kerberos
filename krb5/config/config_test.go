@@ -2,6 +2,11 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +126,99 @@ func TestParseMITDurations(t *testing.T) {
 func TestConfigMalformedSection(t *testing.T) {
 	if _, err := Parse([]byte("[libdefaults\nfoo = bar")); err == nil {
 		t.Fatal("malformed section unexpectedly accepted")
+	}
+}
+
+func TestParseFileIncludesInPlaceAndNested(t *testing.T) {
+	dir := t.TempDir()
+	child := filepath.Join(dir, "child.conf")
+	if err := os.WriteFile(child, []byte(`[libdefaults]
+default_realm = INCLUDED
+include `+filepath.Join(dir, "grandchild.conf")+`
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "grandchild.conf"), []byte(`[libdefaults]
+default_realm = GRANDCHILD
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "krb5.conf")
+	if err := os.WriteFile(root, []byte(`[libdefaults]
+include `+child+`
+default_realm = ROOT
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultRealm != "ROOT" {
+		t.Fatalf("default realm = %q, want ROOT after included files", cfg.DefaultRealm)
+	}
+}
+
+func TestParseFileIncludedirFilteringAndOrdering(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"z.conf":  "[libdefaults]\ndefault_realm = Z\n",
+		"a":       "[libdefaults]\ndefault_realm = A\n",
+		"ignored": "[libdefaults]\ndefault_realm = IGNORED\n",
+		".hidden": "[libdefaults]\ndefault_realm = HIDDEN\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := filepath.Join(t.TempDir(), "krb5.conf")
+	if err := os.WriteFile(root, []byte(`[libdefaults]
+includedir `+dir+`
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultRealm != "Z" {
+		t.Fatalf("includedir ordering/filtering realm = %q, want Z", cfg.DefaultRealm)
+	}
+}
+
+func TestParseFileIncludeErrors(t *testing.T) {
+	for _, directive := range []string{"include /does/not/exist", "includedir /does/not/exist"} {
+		root := filepath.Join(t.TempDir(), "krb5.conf")
+		if err := os.WriteFile(root, []byte("[libdefaults]\n"+directive+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseFile(root); err == nil {
+			t.Fatalf("%s unexpectedly succeeded", directive)
+		}
+	}
+}
+
+func TestExpandPathTokensPOSIX(t *testing.T) {
+	t.Setenv("TMPDIR", "/tmp/kerberos-token-test")
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := ExpandPathTokens("%{TEMP}/%{uid}/%{euid}/%{USERID}/%{username}/%{LIBDIR}/%{BINDIR}/%{SBINDIR}/%{null}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{"/tmp/kerberos-token-test",
+		strconv.Itoa(os.Getuid()), strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getuid()),
+		current.Username, "/usr/lib", "/usr/bin", "/usr/sbin", ""}, "/")
+	if path != want {
+		t.Fatalf("expanded path = %q, want %q", path, want)
+	}
+	for _, input := range []string{"%{unknown}", "%{uid"} {
+		if _, err := ExpandPathTokens(input); err == nil {
+			t.Fatalf("ExpandPathTokens(%q) unexpectedly succeeded", input)
+		}
 	}
 }
 

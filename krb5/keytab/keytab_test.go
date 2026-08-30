@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -19,6 +21,23 @@ func counted16(w io.Writer, value []byte) error {
 	}
 	_, err := w.Write(value)
 	return err
+}
+
+func TestResolveWithConfigExpandsDefaultKeytab(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keytab")
+	if err := os.WriteFile(path, []byte{0x05, 0x02}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	kt, err := ResolveWithConfig("", &config.Config{DefaultKeytabName: "FILE:" + path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kt == nil {
+		t.Fatal("ResolveWithConfig returned nil keytab")
+	}
+	if _, err := ResolveClientWithConfig("", &config.Config{DefaultClientKeytabName: "FILE:" + path}); err != nil {
+		t.Fatalf("ResolveClientWithConfig: %v", err)
+	}
 }
 
 func keytabRecord(p principal.Principal, timestamp uint32, kvno uint32, enctype uint16, key []byte) ([]byte, error) {

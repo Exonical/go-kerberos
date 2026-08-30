@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -63,6 +64,41 @@ func Resolve(name string) (*Keytab, error) {
 	}
 	defer file.Close()
 	return Read(file)
+}
+
+// ResolveWithConfig resolves a configured keytab name. An explicit name takes
+// precedence; otherwise KRB5_KTNAME, default_keytab_name, and the conventional
+// system keytab path are considered in that order.
+func ResolveWithConfig(name string, cfg *config.Config) (*Keytab, error) {
+	return resolveWithConfig(name, cfg, false)
+}
+
+// ResolveClientWithConfig resolves the configured client keytab name,
+// preferring default_client_keytab_name over default_keytab_name.
+func ResolveClientWithConfig(name string, cfg *config.Config) (*Keytab, error) {
+	return resolveWithConfig(name, cfg, true)
+}
+
+func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, error) {
+	if name == "" {
+		name = os.Getenv("KRB5_KTNAME")
+	}
+	if name == "" && cfg != nil {
+		if client {
+			name = cfg.DefaultClientKeytabName
+		}
+		if name == "" {
+			name = cfg.DefaultKeytabName
+		}
+	}
+	if name == "" {
+		name = "/etc/krb5.keytab"
+	}
+	expanded, err := config.ExpandPathTokens(name)
+	if err != nil {
+		return nil, err
+	}
+	return Resolve(expanded)
 }
 
 // AddEntry adds an entry to a keytab. MEMORY keytabs use this method to

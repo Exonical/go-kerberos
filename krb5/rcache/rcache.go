@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -264,43 +263,7 @@ func defaultPath() string {
 }
 
 func expandPathTokens(path string) (string, error) {
-	var expanded strings.Builder
-	for len(path) > 0 {
-		start := strings.Index(path, "%{")
-		if start < 0 {
-			expanded.WriteString(path)
-			break
-		}
-		expanded.WriteString(path[:start])
-		end := strings.IndexByte(path[start+2:], '}')
-		if end < 0 {
-			return "", fmt.Errorf("replay cache: invalid path token")
-		}
-		end += start + 2
-		token := path[start+2 : end]
-		var value string
-		switch token {
-		case "TEMP":
-			value = os.TempDir()
-		case "uid", "USERID", "euid":
-			value = strconv.Itoa(os.Geteuid())
-		case "username":
-			current, err := user.Current()
-			if err != nil {
-				return "", fmt.Errorf("replay cache: resolve username token: %w", err)
-			}
-			value = current.Username
-		case "null":
-			value = ""
-		case "LIBDIR", "BINDIR", "SBINDIR":
-			return "", fmt.Errorf("replay cache: unsupported path token %%{%s}", token)
-		default:
-			return "", fmt.Errorf("replay cache: invalid path token %%{%s}", token)
-		}
-		expanded.WriteString(value)
-		path = path[end+1:]
-	}
-	return expanded.String(), nil
+	return config.ExpandPathTokens(path)
 }
 
 func sipHash24(data, seed []byte) uint64 {

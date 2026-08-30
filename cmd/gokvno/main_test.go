@@ -32,6 +32,17 @@ func TestParseVNOArgsErrors(t *testing.T) {
 	}
 }
 
+func TestConfiguredVNOCacheNameExpandsProfileDefault(t *testing.T) {
+	cfg := &config.Config{DefaultCCacheName: "FILE:/tmp/krb5cc_%{uid}"}
+	name, err := configuredVNOCacheName(func(string) string { return "" }, 42, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(name) < len("FILE:/tmp/krb5cc_") || name[:len("FILE:/tmp/krb5cc_")] != "FILE:/tmp/krb5cc_" {
+		t.Fatalf("configured cache name = %q", name)
+	}
+}
+
 func TestFindTGT(t *testing.T) {
 	client, err := principal.Parse("alice@EXAMPLE.COM")
 	if err != nil {
