@@ -544,6 +544,31 @@ func TestRecordMarkingRejectsOversizedContinuation(t *testing.T) {
 }
 
 func TestCVE202336054RejectsNegativeKeyDataCount(t *testing.T) {
+	data, countOffset := emptyEntryCountOffset(t)
+	binary.BigEndian.PutUint32(data[countOffset:], ^uint32(0))
+	if _, err := decodeEntry(&xdrReader{b: data}, APIv4); err == nil {
+		t.Fatal("negative n_key_data was accepted")
+	}
+}
+
+func TestCVE202336054RejectsMismatchedKeyDataCount(t *testing.T) {
+	data, countOffset := emptyEntryCountOffset(t)
+	binary.BigEndian.PutUint32(data[countOffset:], 1)
+	if _, err := decodeEntry(&xdrReader{b: data}, APIv4); err == nil {
+		t.Fatal("mismatched n_key_data and key_data array count was accepted")
+	}
+}
+
+func TestKadm5RejectsMismatchedTLDataCount(t *testing.T) {
+	data, countOffset := emptyEntryCountOffset(t)
+	binary.BigEndian.PutUint32(data[countOffset+4:], 1)
+	if _, err := decodeEntry(&xdrReader{b: data}, APIv4); err == nil {
+		t.Fatal("mismatched n_tl_data and TL data list count was accepted")
+	}
+}
+
+func emptyEntryCountOffset(t *testing.T) ([]byte, int) {
+	t.Helper()
 	p, err := principal.Parse("alice@EXAMPLE.COM")
 	if err != nil {
 		t.Fatal(err)
@@ -590,10 +615,7 @@ func TestCVE202336054RejectsNegativeKeyDataCount(t *testing.T) {
 	if _, err = r.u32(); err != nil {
 		t.Fatal(err)
 	}
-	binary.BigEndian.PutUint32(data[r.off:], ^uint32(0))
-	if _, err := decodeEntry(&xdrReader{b: data}, APIv4); err == nil {
-		t.Fatal("negative n_key_data was accepted")
-	}
+	return data, r.off
 }
 
 func TestCVE202339975MalformedDispatchDoesNotPanic(t *testing.T) {

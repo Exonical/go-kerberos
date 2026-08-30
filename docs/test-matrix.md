@@ -519,11 +519,11 @@ MIT 1.22.2 source-grounded regression tests cover the equivalent Go surfaces:
   fix itself is KDC authorization-data pointer ownership, which has no
   equivalent Go pointer-free ticket issuance path.
 
-CVE-2023-36054 is partially covered by the negative-count guard from MIT's
-`src/lib/kadm5/kadm_rpc_xdr.c` commit `ef08b09c9`. A direct probe also found
-that the Go `decodeEntry` path currently accepts a mismatched `n_key_data`
-value when the following XDR array count differs. This is a production
-hardening gap and is intentionally not patched in this test-only slice.
+CVE-2023-36054 is covered by the negative-count and declared-count consistency
+guards from MIT's `src/lib/kadm5/kadm_rpc_xdr.c` commit `ef08b09c9`. The Go
+`decodeEntry` path now rejects mismatched `n_key_data` versus the following
+XDR array count. It also rejects mismatched `n_tl_data` versus the decoded
+linked-list count.
 
 LDAP KDB regressions are skipped because this repository has no LDAP KDB
 backend:
