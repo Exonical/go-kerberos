@@ -730,7 +730,7 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
 		}),
 	}
-	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service"}}
+	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
 	var realms []string
 	exchange := func(_ context.Context, realm string, payload []byte) ([]byte, error) {
 		realms = append(realms, realm)
@@ -758,6 +758,65 @@ func TestTGSExchangeFollowsReferral(t *testing.T) {
 	}
 	if result.Server.Realm != "OTHER" || result.Server.Components[0] != "host" {
 		t.Fatalf("result server = %s", result.Server)
+	}
+}
+
+func TestTGSExchangeFallsBackAfterReferralError(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	clientPrincipal := principal.Principal{Realm: "HOME", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	tgt := &Credentials{
+		Client: clientPrincipal,
+		Server: principal.Principal{Realm: "HOME", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "HOME"}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		Ticket: mustMarshal(t, protocol.Ticket{
+			TktVNO: 5, Realm: "HOME",
+			SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", "HOME"}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+		}),
+	}
+	service := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}}
+	var requests []protocol.KDCReqBody
+	exchange := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		var request protocol.TGSReq
+		if err := asn1.Unmarshal(payload, &request); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, request.ReqBody)
+		if len(requests) == 1 {
+			if request.ReqBody.KDCOptions&types.KDCCanonicalize == 0 {
+				t.Fatal("initial request is not a referral request")
+			}
+			return mustMarshal(t, protocol.KRBError{
+				PVNO: 5, MsgType: 30, ErrorCode: int32(krberrors.KDCErrSPrincipalUnknown),
+				STime: kerberosTime(now), Susec: 0,
+				Realm: "HOME", SName: protocol.PrincipalName{
+					NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", "HOME"},
+				},
+			}), nil
+		}
+		if request.ReqBody.KDCOptions&types.KDCCanonicalize != 0 {
+			t.Fatal("fallback request is still a referral request")
+		}
+		replyService := service
+		replyService.Realm = "HOME"
+		return makeTGSReply(t, profile, key, request.ReqBody.Nonce, now, key,
+			"HOME", replyService), nil
+	}
+	result, err := (&Client{Config: &config.Config{
+		DefaultRealm: "DEFAULT", DNSCanonicalizeHostname: "false",
+		DomainRealm: map[string]string{".test": "HOME"},
+	}, Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(
+		context.Background(), tgt, service)
+	if err != nil {
+		t.Fatalf("TGS fallback: %v", err)
+	}
+	if len(requests) != 2 || result.Server.Realm != "HOME" {
+		t.Fatalf("fallback requests=%d, server=%s", len(requests), result.Server)
 	}
 }
 
