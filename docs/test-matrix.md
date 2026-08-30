@@ -461,3 +461,25 @@ current protocol return `KRB5_BAD_MSIZE` and are skipped by the gate; the
 CI image installs the MIT GSS Python binding. Reverse MIT acceptor/proxy
 interoperability is not enabled.
 SPNEGO remains unchanged: callers select IAKERB directly by mechanism OID.
+
+## MIT fuzz seed corpora
+
+MIT 1.22.2 seed files from `src/tests/fuzzing` are copied verbatim under
+`testdata/mit/fuzz/<target>/` and loaded into the corresponding existing Go
+fuzz targets at test runtime. The ASN.1 corpus is loaded by `FuzzASN1Decode`;
+the AP-REQ, AS-REP, TGS-REP, KRB-ERROR, and PKINIT AuthPack seeds are also
+loaded by their more specific targets. Profile seeds feed `FuzzConfig`,
+AES/crypto seeds feed each AES decrypt target, PAC seeds feed
+`FuzzParsePAC`, NDR delegation seeds feed `FuzzParseDelegationInfo`, and
+the two textual principal seeds feed `FuzzPrincipalParse`.
+
+The following MIT corpora are intentionally not copied because no matching
+existing Go fuzz target is available: `fuzz_attrset_seed_corpus` (no attrset
+parser), `fuzz_chpw_seed_corpus` (no password-change wire fuzzer),
+`fuzz_des_seed_corpus` (DES is unsupported), `fuzz_gss_seed_corpus` (no GSS
+token fuzzer), `fuzz_json_seed_corpus` (no JSON parser), `fuzz_kdc_seed_corpus`
+(no KDC-request fuzzer), `fuzz_krad_seed_corpus` (no krad parser),
+`fuzz_krb5_ticket_seed_corpus` (no ticket-specific fuzzer),
+`fuzz_marshal_cred_seed_corpus` and `fuzz_marshal_princ_seed_corpus` (no
+matching binary marshal fuzzers), `fuzz_oid_seed_corpus` (no OID-content
+fuzzer), and `fuzz_util_seed_corpus` (no matching utility parser fuzzer).
