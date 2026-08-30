@@ -28,5 +28,9 @@ func (s *Server) ApplyKDCConf(profile *config.KDCConfig, realm string) error {
 	}
 	s.UDPPorts = append([]int(nil), settings.KDCPorts...)
 	s.TCPPorts = append([]int(nil), settings.KDCTCPPorts...)
+	s.EncryptedChallengeIndicator = settings.EncryptedChallengeIndicator
+	s.SPAKEPreauthIndicators = append([]string(nil), settings.SPAKEPreauthIndicators...)
+	s.PKINITIndicators = append([]string(nil), settings.PKINITIndicators...)
+	s.OTPIndicators = append([]string(nil), settings.OTPIndicators...)
 	return nil
 }

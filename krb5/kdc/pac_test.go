@@ -12,6 +12,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/spake"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -19,7 +20,10 @@ func TestOptInPACIssuanceAndExtraction(t *testing.T) {
 	now := time.Unix(2000001900, 0).UTC()
 	server, kclient := testServer(t, now)
 	server.EnablePAC = true
-	server.AuthIndicators = []string{"password"}
+	server.EnableSPAKE = true
+	server.SPAKEPreauthIndicators = []string{"password"}
+	server.SPAKEGroups = []int32{spake.GroupEdwards25519}
+	kclient.SPAKEGroups = []int32{spake.GroupEdwards25519}
 	server.GeneratePAC = func(client, service principal.Principal) ([]byte, error) {
 		return []byte{0xaa, 0xbb, 0xcc}, nil
 	}

@@ -228,10 +228,11 @@ PA-ENC-TIMESTAMP when the KDC advertises it, derives the challenge key with
 the FAST armor key, and verifies the KDC's usage-55 response challenge. The
 KDC tries the client's available long-term keys with the
 `clientchallengearmor` CF2 derivation, validates the timestamp, and returns
-the advisory `kdcchallengearmor` response. MIT's optional
-`encrypted_challenge_indicator` realm setting is not exposed yet; callers
-which need that auth indicator should continue using the existing
-`Server.AuthIndicators` configuration.
+the advisory `kdcchallengearmor` response. KDC authentication indicators are
+selected per request with `Server.EncryptedChallengeIndicator`,
+`Server.SPAKEPreauthIndicators`, `Server.PKINITIndicators`, and
+`Server.OTPIndicators`; ordinary encrypted-timestamp preauthentication does
+not assert an indicator.
 
 RFC 6560 OTP preauthentication is available through
 `Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
@@ -279,9 +280,12 @@ obtain another service ticket.
 RFC 7751 CAMMAC authorization data is available through the `krb5/cammac`
 package. It encodes KDC and service verifiers with checksum key usage 64,
 wraps protected elements in AD-IF-RELEVANT, and verifies service-protected
-elements for AP acceptance. `kdc.Server.AuthIndicators` enables MIT-style
-authentication-indicator CAMMAC issuance; malformed or tampered CAMMACs are
-rejected rather than exposed as trusted authorization data.
+elements for AP acceptance. Successful preauthentication indicators are
+carried in CAMMACs and propagated into derived TGS tickets. A principal's
+`require_auth` string attribute is a space-separated any-match policy;
+requests without a matching indicator fail with `KDC_ERR_POLICY` and the text
+`Required auth indicators not present in ticket: <str>`. Malformed or tampered
+CAMMACs are rejected rather than exposed as trusted authorization data.
 
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
@@ -315,9 +319,12 @@ before SRV when URI lookup is enabled (the MIT default). The separate
 heuristic after profile lookup.
 
 `config.ParseKDCConf` parses profile-format `[kdcdefaults]` and `[realms]`
-settings while retaining unsupported values for inspection.
+settings while retaining unsupported values for inspection, including the
+authentication-indicator relations `encrypted_challenge_indicator`,
+`spake_preauth_indicator`, `pkinit_indicator`, and `otp_indicator`.
 `kdc.Server.ApplyKDCConf` applies supported lifetime and listener-port
-settings without guessing at other KDC policy.
+settings plus these authentication-indicator settings without guessing at
+other KDC policy.
 
 Password history is retained as derived key sets in the in-memory
 `PrincipalRecord` and is never stored as cleartext. When `kadmin/history` is

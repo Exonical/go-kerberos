@@ -56,7 +56,6 @@ func TestServerASAndTGSExchange(t *testing.T) {
 func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
 	now := time.Unix(2000000005, 0).UTC()
 	server, _ := testServer(t, now)
-	server.AuthIndicators = []string{"password"}
 	db := server.DB.(*kdb.Database)
 	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
 		Components: []string{"host", "service.test"}}
@@ -75,7 +74,7 @@ func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
 		AuthTime: types.KerberosTime{Time: now, Present: true},
 		EndTime:  types.KerberosTime{Time: now.Add(time.Hour), Present: true},
 	}
-	if err := server.issueCAMMAC(&part, serviceKey, nil); err != nil {
+	if err := server.issueCAMMAC(&part, serviceKey, nil, []string{"password"}); err != nil {
 		t.Fatalf("issueCAMMAC: %v", err)
 	}
 	protected, err := cammac.VerifyService(part.AuthorizationData,
@@ -154,7 +153,10 @@ func TestServerRejectsMalformedCAMMACTGS(t *testing.T) {
 func TestServerUserToUserExchangeAndAPVerification(t *testing.T) {
 	now := time.Unix(2000000010, 0).UTC()
 	server, kclient := testServer(t, now)
-	server.AuthIndicators = []string{"password"}
+	server.EnableSPAKE = true
+	server.SPAKEPreauthIndicators = []string{"password"}
+	server.SPAKEGroups = []int32{spake.GroupEdwards25519}
+	kclient.SPAKEGroups = []int32{spake.GroupEdwards25519}
 	db := server.DB.(*kdb.Database)
 	if err := db.AddPrincipal("bob", "bob-password", 1); err != nil {
 		t.Fatal(err)
@@ -834,6 +836,10 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	now := time.Unix(2000001800, 0).UTC()
 	server, kclient := testServer(t, now)
 	server.EnablePAC = true
+	server.EnableSPAKE = true
+	server.SPAKEPreauthIndicators = []string{"password"}
+	server.SPAKEGroups = []int32{spake.GroupEdwards25519}
+	kclient.SPAKEGroups = []int32{spake.GroupEdwards25519}
 	current := now
 	server.Now = func() time.Time { return current }
 	kclient.Now = func() time.Time { return current }
@@ -848,7 +854,6 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("service AS exchange: %v", err)
 	}
-	server.AuthIndicators = []string{"password"}
 	self, err := kclient.S4U2Self(context.Background(), tgt, user)
 	if err != nil {
 		t.Fatalf("S4U2Self without policy: %v", err)
@@ -1431,6 +1436,7 @@ func TestServerOTPFASTASExchange(t *testing.T) {
 		}
 		return nil
 	}
+	server.OTPIndicators = []string{"otp"}
 	server.OTPTokenInfo = func(principal.Principal) []otp.TokenInfo {
 		length, format := int32(6), otp.FormatHexadecimal
 		vendor := types.UTF8String("test")
@@ -1450,6 +1456,7 @@ func TestServerOTPFASTASExchange(t *testing.T) {
 	if !samePrincipal(credentials.Client, user) || credentials.Server.Components[0] != "krbtgt" {
 		t.Fatalf("OTP credentials = %#v", credentials)
 	}
+	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "otp")
 }
 
 func TestServerOTPRequiresFAST(t *testing.T) {

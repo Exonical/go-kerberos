@@ -17,13 +17,17 @@ type KDCConfig struct {
 
 // KDCRealmConfig contains one [realms] subsection from kdc.conf.
 type KDCRealmConfig struct {
-	Values            map[string][]string
-	KDCPorts          []int
-	KDCTCPPorts       []int
-	MaxLife           time.Duration
-	MaxRenewableLife  time.Duration
-	MasterKeyType     string
-	SupportedEnctypes []string
+	Values                      map[string][]string
+	KDCPorts                    []int
+	KDCTCPPorts                 []int
+	MaxLife                     time.Duration
+	MaxRenewableLife            time.Duration
+	MasterKeyType               string
+	SupportedEnctypes           []string
+	EncryptedChallengeIndicator string
+	SPAKEPreauthIndicators      []string
+	PKINITIndicators            []string
+	OTPIndicators               []string
 }
 
 // ParseKDCConf parses MIT's profile-format kdc.conf.  Unknown relations are
@@ -106,6 +110,10 @@ func parseKDCRealm(values map[string][]string) (KDCRealmConfig, error) {
 	}
 	settings.MasterKeyType = firstValues(values, "master_key_type")
 	settings.SupportedEnctypes = splitList(firstValues(values, "supported_enctypes"))
+	settings.EncryptedChallengeIndicator = firstValues(values, "encrypted_challenge_indicator")
+	settings.SPAKEPreauthIndicators = splitList(firstValues(values, "spake_preauth_indicator"))
+	settings.PKINITIndicators = splitList(firstValues(values, "pkinit_indicator"))
+	settings.OTPIndicators = splitList(firstValues(values, "otp_indicator"))
 	return settings, nil
 }
 
