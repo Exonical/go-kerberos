@@ -86,6 +86,38 @@ func TestAuthPackSupportedKDFWireEncoding(t *testing.T) {
 	}
 }
 
+func TestAuthPackFreshnessTokenWireEncoding(t *testing.T) {
+	token := []byte{0xde, 0xad, 0xbe, 0xef}
+	auth := PKAuthenticator{
+		Cusec: 7, CTime: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Nonce: 42, PAChecksum: []byte{0xaa, 0xbb}, FreshnessToken: token,
+	}
+	data := authPackDER(auth, []byte{1})
+	fields, err := sequenceFields(data)
+	if err != nil || len(fields) != 2 {
+		t.Fatalf("AuthPack fields = %d, err=%v; want 2", len(fields), err)
+	}
+	authFields, err := sequenceFields(mustContent(fields[0]))
+	if err != nil || len(authFields) != 5 || authFields[4][0] != 0xa4 {
+		t.Fatalf("PKAuthenticator fields = %d, err=%v; want freshness [4]", len(authFields), err)
+	}
+	encodedToken, err := tlvContent(authFields[4])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedToken, err = tlvContent(encodedToken)
+	if err != nil || !bytes.Equal(encodedToken, token) {
+		t.Fatalf("freshness token = %x, err=%v; want %x", encodedToken, err, token)
+	}
+	authDecoded, _, _, err := parseAuthPack(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(authDecoded.FreshnessToken, token) {
+		t.Fatalf("decoded freshness token = %x, want %x", authDecoded.FreshnessToken, token)
+	}
+}
+
 func TestPKINITKDFMITVectors(t *testing.T) {
 	secret := make([]byte, 256)
 	u := principal.Principal{Realm: "SU.SE", NameType: principal.NTPrincipal, Components: []string{"lha"}}

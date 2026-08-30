@@ -193,6 +193,7 @@ func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
 		Realm: realm, DB: db, MaxTicketLife: 10 * time.Hour,
 		MaxRenewableLife: 24 * time.Hour, PKINITCertificate: kdcCert,
 		PKINITSigner: kdcKey, PKINITClientCAs: roots,
+		PKINITRequireFreshness: true,
 	}
 	port := freeTestPort(t)
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})

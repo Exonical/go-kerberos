@@ -44,6 +44,84 @@ func TestServerPKINITASExchange(t *testing.T) {
 	}
 }
 
+func TestServerPKINITFreshnessRequired(t *testing.T) {
+	now := time.Unix(2000001001, 0).UTC()
+	server, kclient := testServer(t, now)
+	server.PKINITRequireFreshness = true
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	if _, err := kclient.ASExchangePKINIT(context.Background(), user, clientCert, clientKey, roots); err != nil {
+		t.Fatalf("freshness-required PKINIT exchange: %v", err)
+	}
+}
+
+func TestServerPKINITFreshnessMissingAndExpired(t *testing.T) {
+	now := time.Unix(2000001100, 0).UTC()
+	server, _ := testServer(t, now)
+	server.PKINITRequireFreshness = true
+	ca, caKey, clientCert, clientKey := makePKINITTestCertificate(t, "alice", "TEST.REALM", false)
+	kdcCert, kdcKey := makePKINITTestCertificateWithCA(t, ca, caKey, "krbtgt", "TEST.REALM", true)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	server.PKINITCertificate = kdcCert
+	server.PKINITSigner = kdcKey
+	server.PKINITClientCAs = roots
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 88)
+	bodyDER := mustMarshal(t, request.ReqBody)
+	pa, pkClient, err := pkinit.BuildPAASReq(bodyDER, now, request.ReqBody.Nonce, clientCert, clientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{pa}
+	var missing protocol.KRBError
+	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &missing); err != nil {
+		t.Fatalf("missing freshness response: %v", err)
+	}
+	if missing.ErrorCode != kdcErrPreauthFailed {
+		t.Fatalf("missing freshness code = %d, want %d", missing.ErrorCode, kdcErrPreauthFailed)
+	}
+	methodData := errorMethodDataForTest(t, missing.EData)
+	freshness := findPA(methodData, protocol.PADataASFreshness)
+	if freshness == nil || len(freshness.PADataValue) == 0 {
+		t.Fatal("missing freshness response omitted replacement token")
+	}
+	server.Now = func() time.Time { return now.Add(-11 * time.Minute) }
+	oldToken, ok := server.makeFreshnessToken(request.ReqBody.EType)
+	if !ok {
+		t.Fatal("could not create freshness token")
+	}
+	server.Now = func() time.Time { return now }
+	pa, err = pkClient.BuildPAASReqWithFreshness(bodyDER, now, request.ReqBody.Nonce, oldToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PAData = protocol.MethodData{pa}
+	var expired protocol.KRBError
+	if err := krb5asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &expired); err != nil {
+		t.Fatalf("expired freshness response: %v", err)
+	}
+	if expired.ErrorCode != kdcErrPreauthExpired {
+		t.Fatalf("expired freshness code = %d, want %d", expired.ErrorCode, kdcErrPreauthExpired)
+	}
+}
+
+func errorMethodDataForTest(t *testing.T, data []byte) protocol.MethodData {
+	t.Helper()
+	var methodData protocol.MethodData
+	if err := krb5asn1.Unmarshal(data, &methodData); err != nil {
+		t.Fatal(err)
+	}
+	return methodData
+}
+
 func TestServerLegacyPKINITASExchangeWithAgilityKDC(t *testing.T) {
 	now := time.Unix(2000001002, 0).UTC()
 	server, _ := testServer(t, now)

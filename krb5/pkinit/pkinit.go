@@ -27,8 +27,10 @@ import (
 const (
 	PADataASReq = 16
 	PADataASRep = 17
-	DHGroup14   = 14
-	DHGroup2    = 2
+	// PADataASFreshness is the RFC 8070 freshness-token padata type.
+	PADataASFreshness = 150
+	DHGroup14         = 14
+	DHGroup2          = 2
 )
 
 // RFC 8636 PKINIT KDF algorithm identifiers, represented as the contents of
@@ -77,6 +79,8 @@ type PKAuthenticator struct {
 	CTime      time.Time
 	Nonce      uint32
 	PAChecksum []byte
+	// FreshnessToken is the opaque RFC 8070 token returned by the KDC.
+	FreshnessToken []byte
 }
 
 // VerifiedPAASReq contains the authenticated PKINIT request data needed by a
@@ -138,6 +142,12 @@ func (c *Client) BuildPAASReq(bodyDER []byte, now time.Time, nonce uint32) (prot
 	return c.buildPAASReq(bodyDER, now, nonce, nil)
 }
 
+// BuildPAASReqWithFreshness constructs PA-PK-AS-REQ echoing a KDC token.
+func (c *Client) BuildPAASReqWithFreshness(bodyDER []byte, now time.Time,
+	nonce uint32, freshnessToken []byte) (protocol.PAData, error) {
+	return c.buildPAASReq(bodyDER, now, nonce, nil, freshnessToken)
+}
+
 // BuildPAASReqForPrincipals constructs PA-PK-AS-REQ with algorithm-agility
 // context for the supplied client and KDC principals.
 func (c *Client) BuildPAASReqForPrincipals(bodyDER []byte, now time.Time,
@@ -145,8 +155,17 @@ func (c *Client) BuildPAASReqForPrincipals(bodyDER []byte, now time.Time,
 	return c.buildPAASReq(bodyDER, now, nonce, SupportedKDFAlgorithmIDs())
 }
 
+// BuildPAASReqForPrincipalsWithFreshness constructs an algorithm-agile
+// PA-PK-AS-REQ echoing a KDC freshness token.
+func (c *Client) BuildPAASReqForPrincipalsWithFreshness(bodyDER []byte,
+	now time.Time, nonce uint32, client, server principal.Principal,
+	freshnessToken []byte) (protocol.PAData, error) {
+	return c.buildPAASReq(bodyDER, now, nonce, SupportedKDFAlgorithmIDs(),
+		freshnessToken)
+}
+
 func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
-	supportedKDFs [][]byte) (protocol.PAData, error) {
+	supportedKDFs [][]byte, freshnessToken ...[]byte) (protocol.PAData, error) {
 	if c == nil || c.Private == nil || (!c.Anonymous && (c.Certificate == nil || c.Signer == nil)) {
 		return protocol.PAData{}, errors.New("pkinit: incomplete client state")
 	}
@@ -154,7 +173,14 @@ func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
 		return protocol.PAData{}, errors.New("pkinit: empty AS-REQ body")
 	}
 	sum := sha1.Sum(bodyDER)
-	pack := authPackDER(PKAuthenticator{Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce, PAChecksum: sum[:]}, marshalSPKI(c.Public), supportedKDFs)
+	var token []byte
+	if len(freshnessToken) > 0 {
+		token = append([]byte(nil), freshnessToken[0]...)
+	}
+	pack := authPackDER(PKAuthenticator{
+		Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce,
+		PAChecksum: sum[:], FreshnessToken: token,
+	}, marshalSPKI(c.Public), supportedKDFs)
 	var cms []byte
 	var err error
 	if c.Anonymous {
@@ -188,6 +214,18 @@ func BuildAnonymousPAASReq(bodyDER []byte, now time.Time, nonce uint32) (protoco
 		return protocol.PAData{}, nil, err
 	}
 	pa, err := c.BuildPAASReq(bodyDER, now, nonce)
+	return pa, c, err
+}
+
+// BuildAnonymousPAASReqWithFreshness constructs an anonymous PKINIT request
+// echoing a KDC freshness token.
+func BuildAnonymousPAASReqWithFreshness(bodyDER []byte, now time.Time,
+	nonce uint32, freshnessToken []byte) (protocol.PAData, *Client, error) {
+	c, err := NewAnonymousClient()
+	if err != nil {
+		return protocol.PAData{}, nil, err
+	}
+	pa, err := c.BuildPAASReqWithFreshness(bodyDER, now, nonce, freshnessToken)
 	return pa, c, err
 }
 
@@ -576,6 +614,20 @@ func parseAuthPack(data []byte) (PKAuthenticator, []byte, [][]byte, error) {
 		return PKAuthenticator{}, nil, nil, err
 	}
 	var pub []byte
+	var freshnessToken []byte
+	if len(afields) > 4 {
+		if len(afields[4]) == 0 || afields[4][0] != 0xa4 {
+			return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed freshness token")
+		}
+		tokenDER, err := tlvContent(afields[4])
+		if err != nil {
+			return PKAuthenticator{}, nil, nil, err
+		}
+		freshnessToken, err = tlvContent(tokenDER)
+		if err != nil {
+			return PKAuthenticator{}, nil, nil, err
+		}
+	}
 	var supportedKDFs [][]byte
 	for _, field := range fields[1:] {
 		switch field[0] {
@@ -613,7 +665,11 @@ func parseAuthPack(data []byte) (PKAuthenticator, []byte, [][]byte, error) {
 			}
 		}
 	}
-	return PKAuthenticator{Cusec: int32(cusec.Int64()), CTime: ctime, Nonce: uint32(nonce.Uint64()), PAChecksum: append([]byte(nil), sum...)}, pub, supportedKDFs, nil
+	return PKAuthenticator{
+		Cusec: int32(cusec.Int64()), CTime: ctime, Nonce: uint32(nonce.Uint64()),
+		PAChecksum:     append([]byte(nil), sum...),
+		FreshnessToken: append([]byte(nil), freshnessToken...),
+	}, pub, supportedKDFs, nil
 }
 
 func mustContent(v []byte) []byte {
@@ -629,6 +685,13 @@ func authPackDER(a PKAuthenticator, public []byte, supported ...[][]byte) []byte
 		derExplicit(0, derInt(int64(a.Cusec))), derExplicit(1, derTime(a.CTime)),
 		derExplicit(2, derInt(int64(a.Nonce))), derExplicit(3, derOctet(a.PAChecksum)),
 	)
+	if len(a.FreshnessToken) > 0 {
+		pa = derSeq(
+			derExplicit(0, derInt(int64(a.Cusec))), derExplicit(1, derTime(a.CTime)),
+			derExplicit(2, derInt(int64(a.Nonce))), derExplicit(3, derOctet(a.PAChecksum)),
+			derExplicit(4, derOctet(a.FreshnessToken)),
+		)
+	}
 	fields := []byte{}
 	fields = append(fields, derExplicit(0, pa)...)
 	if len(public) != 0 {
