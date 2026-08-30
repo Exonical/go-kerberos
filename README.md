@@ -221,14 +221,6 @@ PKINIT behavior. Set `Server.PKINITRequireFreshness` to require a valid token;
 the KDC uses a ten-minute, `krbtgt`-keyed token lifetime and returns
 `KDC_ERR_PREAUTH_EXPIRED` for stale or invalid tokens.
 
-RFC 8070 PKINIT freshness tokens are supported by the Go client and KDC.
-PKINIT clients advertise `PA-AS-FRESHNESS` (padata type 150), echo the
-opaque token returned in `PREAUTH_REQUIRED` inside the signed
-`PKAuthenticator.freshnessToken` field, and preserve anonymous DH-only
-PKINIT behavior. Set `Server.PKINITRequireFreshness` to require a valid token;
-the KDC uses a ten-minute, `krbtgt`-keyed token lifetime and returns
-`KDC_ERR_PREAUTH_EXPIRED` for stale or invalid tokens.
-
 RFC 6560 OTP preauthentication is available through
 `Client.ASExchangeFASTOTP`. The client accepts an OTP provider callback,
 requires an RFC 6113 FAST armor TGT, and follows MIT's usage-45 encryption
