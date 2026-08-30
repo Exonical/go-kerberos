@@ -727,7 +727,8 @@ func selectKeytabStash(kt *keytab.Keytab, realm string, requestedKVNO uint32) (S
 	}
 	selected := -1
 	inferredRealm := realm
-	for i, entry := range kt.Entries {
+	entries := kt.EntriesSnapshot()
+	for i, entry := range entries {
 		if len(entry.Principal.Components) != 2 ||
 			entry.Principal.Components[0] != "K" ||
 			entry.Principal.Components[1] != "M" {
@@ -742,14 +743,14 @@ func selectKeytabStash(kt *keytab.Keytab, realm string, requestedKVNO uint32) (S
 		if requestedKVNO != 0 && entry.KVNO != requestedKVNO {
 			continue
 		}
-		if selected < 0 || entry.KVNO > kt.Entries[selected].KVNO {
+		if selected < 0 || entry.KVNO > entries[selected].KVNO {
 			selected = i
 		}
 	}
 	if selected < 0 {
 		return StashKey{}, fmt.Errorf("MIT keytab stash has no K/M entry")
 	}
-	entry := kt.Entries[selected]
+	entry := entries[selected]
 	if err := validateMasterKey(entry.Enctype, entry.Key); err != nil {
 		return StashKey{}, err
 	}

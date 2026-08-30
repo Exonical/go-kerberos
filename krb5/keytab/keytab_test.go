@@ -268,3 +268,43 @@ func TestMemoryKeytabConcurrentResolve(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryKeytabConcurrentReadersAndWriters(t *testing.T) {
+	kt, err := Resolve("MEMORY:go-keytab-reader-writer-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{
+		Principal: principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"host", "service"}},
+		Timestamp: 1, KVNO: 2, Enctype: 17, Key: []byte{1, 2, 3},
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				if i%2 == 0 {
+					_ = kt.AddEntry(entry)
+				} else {
+					_, _ = kt.LookupPrincipal(entry.Principal)
+					_, _ = kt.LookupEnctype(entry.Enctype)
+					_, _ = kt.LookupKVNO(entry.KVNO)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	entries, err := kt.LookupPrincipal(entry.Principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("concurrent readers observed no entries")
+	}
+	entries[0].Key[0] = 99
+	again, err := kt.LookupPrincipal(entry.Principal)
+	if err != nil || len(again) == 0 || again[0].Key[0] != 1 {
+		t.Fatalf("lookup did not return an isolated snapshot: %#v, %v", again, err)
+	}
+}

@@ -114,7 +114,7 @@ func listKeytab(path string, showEtypes bool, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Keytab name: FILE:%s\n", path)
 	fmt.Fprintln(stdout, "KVNO Principal")
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		fmt.Fprintf(stdout, "%4d %s\n", entry.KVNO, entry.Principal.String())
 		if showEtypes {
 			fmt.Fprintf(stdout, "\tEtype: %s\n", enctypeName(entry.Enctype))

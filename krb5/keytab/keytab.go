@@ -111,6 +111,21 @@ func cloneEntry(entry Entry) Entry {
 	return entry
 }
 
+// EntriesSnapshot returns a deep copy of the current keytab entries.
+func (kt *Keytab) EntriesSnapshot() []Entry {
+	if kt == nil {
+		return nil
+	}
+	mu := kt.mutex()
+	mu.RLock()
+	defer mu.RUnlock()
+	entries := make([]Entry, len(kt.Entries))
+	for i, entry := range kt.Entries {
+		entries[i] = cloneEntry(entry)
+	}
+	return entries
+}
+
 func entriesEqual(left, right Entry) bool {
 	if !principalEqual(left.Principal, right.Principal) ||
 		left.Timestamp != right.Timestamp || left.KVNO != right.KVNO ||
@@ -184,7 +199,7 @@ func Write(w io.Writer, kt *Keytab) error {
 	if err := binary.Write(&data, binary.BigEndian, Version); err != nil {
 		return fmt.Errorf("write keytab version: %w", err)
 	}
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		body, err := marshalEntry(entry)
 		if err != nil {
 			return fmt.Errorf("write keytab entry: %w", err)
@@ -211,7 +226,7 @@ func (kt *Keytab) LookupPrincipal(name principal.Principal) ([]Entry, error) {
 		return nil, fmt.Errorf("lookup keytab principal: nil keytab")
 	}
 	entries := make([]Entry, 0)
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		if principalEqual(entry.Principal, name) {
 			entries = append(entries, entry)
 		}
@@ -224,7 +239,7 @@ func (kt *Keytab) LookupEnctype(enctype int32) ([]Entry, error) {
 		return nil, fmt.Errorf("lookup keytab enctype: nil keytab")
 	}
 	entries := make([]Entry, 0)
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		if entry.Enctype == enctype {
 			entries = append(entries, entry)
 		}
@@ -237,7 +252,7 @@ func (kt *Keytab) LookupKVNO(kvno uint32) ([]Entry, error) {
 		return nil, fmt.Errorf("lookup keytab kvno: nil keytab")
 	}
 	entries := make([]Entry, 0)
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		if entry.KVNO == kvno {
 			entries = append(entries, entry)
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"golang.org/x/sys/unix"
@@ -21,11 +22,18 @@ const (
 )
 
 type keyringHandle struct {
-	name       string
-	ring       int
-	anchor     int
-	collection int
+	name           string
+	ring           int
+	anchor         int
+	collection     int
+	anchorName     string
+	collectionName string
+	residual       string
 }
+
+const keyringDescriptionLimit = 4095
+
+var keyringAddMu sync.Mutex
 
 func resolveKeyring(residual string) (*Handle, error) {
 	parts := strings.Split(residual, ":")
@@ -34,14 +42,23 @@ func resolveKeyring(residual string) (*Handle, error) {
 		return nil, fmt.Errorf("ccache: invalid KEYRING residual %q", residual)
 	}
 	anchorName := strings.ToLower(parts[0])
+	if err := validateKeyringName("anchor", anchorName); err != nil {
+		return nil, err
+	}
 	anchor, err := keyringAnchor(anchorName)
 	if err != nil && anchorName != "persistent" {
 		return nil, err
 	}
 	collectionName := parts[1]
+	if err := validateKeyringName("collection", collectionName); err != nil {
+		return nil, err
+	}
 	cacheName := ""
 	if len(parts) == 3 {
 		cacheName = parts[2]
+		if err := validateKeyringName("subsidiary", cacheName); err != nil {
+			return nil, err
+		}
 	}
 	if anchorName == "persistent" {
 		uid, parseErr := strconv.ParseInt(collectionName, 10, 32)
@@ -72,7 +89,10 @@ func resolveKeyring(residual string) (*Handle, error) {
 	}
 	return &Handle{
 		typ: TypeKeyring, name: "KEYRING:" + residual,
-		keyring: &keyringHandle{name: cacheName, ring: cache, anchor: anchor, collection: collection},
+		keyring: &keyringHandle{
+			name: cacheName, ring: cache, anchor: anchor, collection: collection,
+			anchorName: anchorName, collectionName: parts[1], residual: residual,
+		},
 	}, nil
 }
 
@@ -129,6 +149,9 @@ func persistentKeyring(uid int) (int, error) {
 }
 
 func findOrCreateKeyring(parent int, description string) (int, error) {
+	if err := validateKeyringName("keyring", description); err != nil {
+		return 0, err
+	}
 	id, err := unix.KeyctlSearch(parent, "keyring", description, 0)
 	if err == nil {
 		return id, nil
@@ -147,6 +170,9 @@ func findOrCreateKeyring(parent int, description string) (int, error) {
 }
 
 func putKey(ring int, kind, description string, payload []byte) error {
+	if err := validateKeyringName("key", description); err != nil {
+		return err
+	}
 	id, err := unix.KeyctlSearch(ring, kind, description, 0)
 	if err == nil {
 		_, err = unix.KeyctlBuffer(unix.KEYCTL_UPDATE, id, payload, 0)
@@ -157,6 +183,45 @@ func putKey(ring int, kind, description string, payload []byte) error {
 	}
 	_, err = unix.AddKey(kind, description, payload, ring)
 	return err
+}
+
+func addKey(ring int, kind, description string, payload []byte) error {
+	if err := validateKeyringName("key", description); err != nil {
+		return err
+	}
+	_, err := unix.AddKey(kind, description, payload, ring)
+	return err
+}
+
+func addCredentialKey(ring int, description string, payload []byte) error {
+	if err := validateKeyringName("credential", description); err != nil {
+		return err
+	}
+	// MIT prefers big_key because it permits duplicate descriptions; user is
+	// the compatibility fallback on kernels without big_key support.
+	keyringAddMu.Lock()
+	defer keyringAddMu.Unlock()
+	_, err := unix.AddKey("big_key", description, payload, ring)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENODEV) {
+		return fmt.Errorf("add big_key credential: %w", err)
+	}
+	if err := addKey(ring, "user", description, payload); err != nil {
+		return fmt.Errorf("add user credential: %w", err)
+	}
+	return nil
+}
+
+func validateKeyringName(kind, name string) error {
+	if strings.IndexByte(name, 0) >= 0 {
+		return fmt.Errorf("ccache: KEYRING %s name contains NUL", kind)
+	}
+	if len(name) > keyringDescriptionLimit {
+		return fmt.Errorf("ccache: KEYRING %s name exceeds %d bytes", kind, keyringDescriptionLimit)
+	}
+	return nil
 }
 
 func keyringRead(id int) ([]byte, error) {
@@ -198,6 +263,14 @@ func keyringDescription(id int) (string, error) {
 	return unix.KeyctlString(unix.KEYCTL_DESCRIBE, id)
 }
 
+func parseKeyringDescription(description string) (string, string, bool) {
+	fields := strings.SplitN(description, ";", 5)
+	if len(fields) != 5 {
+		return "", "", false
+	}
+	return fields[0], fields[4], true
+}
+
 func (h *keyringHandle) read() (*Cache, error) {
 	if h == nil || h.ring == 0 {
 		return nil, errors.New("ccache: invalid KEYRING handle")
@@ -212,15 +285,15 @@ func (h *keyringHandle) read() (*Cache, error) {
 		if err != nil {
 			return nil, err
 		}
-		fields := strings.SplitN(description, ";", 5)
-		if len(fields) != 5 {
+		kind, name, ok := parseKeyringDescription(description)
+		if !ok || (kind != "user" && kind != "big_key") {
 			continue
 		}
 		payload, err := keyringRead(id)
 		if err != nil {
 			return nil, err
 		}
-		switch fields[4] {
+		switch name {
 		case "__krb5_princ__":
 			result.DefaultPrincipal, _, err = unmarshalPrincipalBytes(payload)
 			if err != nil {
@@ -244,23 +317,34 @@ func (h *keyringHandle) write(cache *Cache) error {
 	if cache == nil {
 		return errors.New("ccache: nil KEYRING cache")
 	}
-	if _, err := unix.KeyctlInt(keyctlClear, h.ring, 0, 0, 0); err != nil {
-		return fmt.Errorf("ccache: clear KEYRING cache: %w", err)
-	}
 	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
 	if err != nil {
 		return err
 	}
-	if err := putKey(h.ring, "user", "__krb5_princ__", principalBytes); err != nil {
-		return fmt.Errorf("ccache: write KEYRING principal: %w", err)
+	type payload struct {
+		description string
+		value       []byte
 	}
+	credentials := make([]payload, 0, len(cache.Credentials))
 	for _, credential := range cache.Credentials {
-		payload, err := marshalCredentialBytes(credential)
+		value, err := marshalCredentialBytes(credential)
 		if err != nil {
 			return err
 		}
 		description := credential.Server.String()
-		if err := putKey(h.ring, "user", description, payload); err != nil {
+		if err := validateKeyringName("credential", description); err != nil {
+			return err
+		}
+		credentials = append(credentials, payload{description: description, value: value})
+	}
+	if _, err := unix.KeyctlInt(keyctlClear, h.ring, 0, 0, 0); err != nil {
+		return fmt.Errorf("ccache: clear KEYRING cache: %w", err)
+	}
+	if err := putKey(h.ring, "user", "__krb5_princ__", principalBytes); err != nil {
+		return fmt.Errorf("ccache: write KEYRING principal: %w", err)
+	}
+	for _, credential := range credentials {
+		if err := addCredentialKey(h.ring, credential.description, credential.value); err != nil {
 			return fmt.Errorf("ccache: write KEYRING credential: %w", err)
 		}
 	}
@@ -272,15 +356,113 @@ func (h *keyringHandle) initialize(p principal.Principal) error {
 }
 
 func (h *keyringHandle) store(credential Credential) error {
-	cache, err := h.read()
-	if err != nil && !errors.Is(err, unix.ENOKEY) {
+	if h == nil || h.ring == 0 {
+		return errors.New("ccache: invalid KEYRING handle")
+	}
+	payload, err := marshalCredentialBytes(credential)
+	if err != nil {
 		return err
 	}
-	if cache == nil {
-		cache = &Cache{}
+	description := credential.Server.String()
+	if err := validateKeyringName("credential", description); err != nil {
+		return err
 	}
-	cache.Credentials = append(cache.Credentials, credential)
-	return h.write(cache)
+	if err := addCredentialKey(h.ring, description, payload); err != nil {
+		return fmt.Errorf("ccache: store KEYRING credential: %w", err)
+	}
+	return nil
+}
+
+func (h *keyringHandle) remove(match Credential, flags uint32) error {
+	if h == nil || h.ring == 0 {
+		return errors.New("ccache: invalid KEYRING handle")
+	}
+	ids, err := keyringList(h.ring)
+	if err != nil {
+		return fmt.Errorf("ccache: list KEYRING cache: %w", err)
+	}
+	wireFlags := MapTCFlags(flags)
+	found := false
+	for _, id := range ids {
+		description, err := keyringDescription(id)
+		if err != nil {
+			return err
+		}
+		kind, name, ok := parseKeyringDescription(description)
+		if !ok || (kind != "user" && kind != "big_key") || name == "__krb5_princ__" {
+			continue
+		}
+		payload, err := keyringRead(id)
+		if err != nil {
+			return err
+		}
+		credential, err := unmarshalCredentialBytes(payload)
+		if err != nil {
+			return fmt.Errorf("ccache: decode KEYRING credential: %w", err)
+		}
+		if !credentialMatches(credential, match, wireFlags) {
+			continue
+		}
+		if _, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, id, h.ring, 0, 0); err != nil {
+			return fmt.Errorf("ccache: remove KEYRING credential: %w", err)
+		}
+		found = true
+	}
+	if !found {
+		return errors.New("ccache: KEYRING credential not found")
+	}
+	return nil
+}
+
+func (h *keyringHandle) collectionHandles() ([]*Handle, error) {
+	if h == nil || h.collection == 0 {
+		return nil, errors.New("ccache: invalid KEYRING handle")
+	}
+	primary, err := primaryName(h.collection, h.collectionName)
+	if err != nil {
+		return nil, fmt.Errorf("ccache: resolve KEYRING primary: %w", err)
+	}
+	ids, err := keyringList(h.collection)
+	if err != nil {
+		return nil, fmt.Errorf("ccache: list KEYRING collection: %w", err)
+	}
+	childIDs := make(map[string]int)
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		description, err := keyringDescription(id)
+		if err != nil {
+			return nil, err
+		}
+		kind, name, ok := parseKeyringDescription(description)
+		if ok && kind == "keyring" {
+			if _, exists := childIDs[name]; !exists {
+				names = append(names, name)
+			}
+			childIDs[name] = id
+		}
+	}
+	result := make([]*Handle, 0, len(childIDs))
+	appendName := func(name string) {
+		id, ok := childIDs[name]
+		if !ok {
+			return
+		}
+		delete(childIDs, name)
+		result = append(result, &Handle{
+			typ:  TypeKeyring,
+			name: "KEYRING:" + h.anchorName + ":" + h.collectionName + ":" + name,
+			keyring: &keyringHandle{
+				name: name, ring: id, anchor: h.anchor, collection: h.collection,
+				anchorName: h.anchorName, collectionName: h.collectionName,
+				residual: h.anchorName + ":" + h.collectionName + ":" + name,
+			},
+		})
+	}
+	appendName(primary)
+	for _, name := range names {
+		appendName(name)
+	}
+	return result, nil
 }
 
 func (h *keyringHandle) destroy() error {
