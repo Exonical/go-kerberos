@@ -147,6 +147,9 @@ func (c *Credential) NewInitiatorForService(ctx context.Context, service princip
 	if err != nil {
 		return nil, fmt.Errorf("GSS credential service acquisition: %w", err)
 	}
+	if flags&GSSDelegFlag != 0 {
+		return NewInitiatorWithDelegationClient(serviceCreds, c.tgt, c.client, flags)
+	}
 	return NewInitiator(serviceCreds, flags)
 }
 

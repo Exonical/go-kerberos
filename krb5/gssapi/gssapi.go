@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/ap"
+	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
@@ -375,6 +376,20 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	if err != nil {
 		return nil, principal.Principal{}, nil, err
 	}
+	if a.name != nil {
+		var request protocol.APReq
+		if err := asn1.Unmarshal(inner, &request); err != nil {
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS AP-REQ: %w", err)
+		}
+		requested := principal.Principal{
+			Realm:      request.Ticket.Realm,
+			NameType:   principal.NameType(request.Ticket.SName.NameType),
+			Components: request.Ticket.SName.NameString,
+		}
+		if !gssPrincipalEqual(*a.name, requested) {
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS acceptor: service principal mismatch")
+		}
+	}
 	verified, err := ap.VerifyAPReqWithOptions(a.keytab, inner, now, 5*time.Minute,
 		ap.VerifyAPReqOptions{
 			ReplayCache:     a.replayCache,
@@ -385,9 +400,6 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 	}
 	if err := verifyChannelBindings(verified.Checksum, a.channelBindings); err != nil {
 		return nil, principal.Principal{}, nil, err
-	}
-	if a.name != nil && !gssPrincipalEqual(*a.name, verified.Server) {
-		return nil, principal.Principal{}, nil, fmt.Errorf("GSS acceptor: service principal mismatch")
 	}
 	clientCBT, err := channelBindingAsserted(verified.AuthenticatorAuthorizationData)
 	if err != nil {
@@ -846,8 +858,7 @@ func cloneEncryptionKey(key *protocol.EncryptionKey) *protocol.EncryptionKey {
 }
 
 func gssPrincipalEqual(left, right principal.Principal) bool {
-	if left.Realm != right.Realm || left.NameType != right.NameType ||
-		len(left.Components) != len(right.Components) {
+	if left.Realm != right.Realm || len(left.Components) != len(right.Components) {
 		return false
 	}
 	for i := range left.Components {

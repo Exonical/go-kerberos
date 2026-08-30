@@ -36,7 +36,10 @@ func (c *Context) ExportLucidContext(version uint32) (LucidContext, error) {
 	result := LucidContext{
 		Version: 1, Initiate: c.initiator, EndTime: c.endtime,
 		SendSeq: c.sendSeq, RecvSeq: c.recvSeq, Protocol: 1,
-		Key: LucidKey{Type: c.key.KeyType, Value: append([]byte(nil), c.key.KeyValue...)},
+		Key: LucidKey{Type: c.prfPartial.KeyType, Value: append([]byte(nil), c.prfPartial.KeyValue...)},
+	}
+	if len(c.prfPartial.KeyValue) == 0 {
+		result.Key = LucidKey{Type: c.key.KeyType, Value: append([]byte(nil), c.key.KeyValue...)}
 	}
 	if c.acceptorSubkeyKey != nil {
 		result.AcceptorSubkey = &LucidKey{

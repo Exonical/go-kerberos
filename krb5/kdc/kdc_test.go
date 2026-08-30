@@ -107,6 +107,32 @@ func TestGSSPasswordCredentialAgainstServer(t *testing.T) {
 	if err != nil || string(plain) != "password credential" {
 		t.Fatalf("unwrap = %q, %v", plain, err)
 	}
+	delegating, err := credential.NewInitiatorForService(
+		context.Background(), service, gssapi.GSSDelegFlag)
+	if err != nil {
+		t.Fatalf("resolve delegated service credential: %v", err)
+	}
+	delegationToken, err := delegating.InitialToken(now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("delegation initial token: %v", err)
+	}
+	delegationAcceptor, err := gssapi.AcquireAcceptorCredential(kt, &service)
+	if err != nil {
+		t.Fatalf("acquire delegation acceptor: %v", err)
+	}
+	delegationMechanism, err := delegationAcceptor.Acceptor()
+	if err != nil {
+		t.Fatalf("create delegation acceptor: %v", err)
+	}
+	delegatedContext, _, err := delegationMechanism.Accept(
+		delegationToken, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("accept delegated token: %v", err)
+	}
+	if len(delegatedContext.DelegatedCredentials) != 1 {
+		t.Fatalf("delegated credentials = %d, want 1",
+			len(delegatedContext.DelegatedCredentials))
+	}
 }
 
 func TestGSSImpersonatedCredentialAgainstServer(t *testing.T) {

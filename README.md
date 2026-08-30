@@ -97,7 +97,9 @@ deployments; upstream MIT krb5 does not apply this gate.
   unencrypted KRB-CRED forms are accepted. Password-backed initiator,
   explicit/default keytab acceptor, and S4U impersonated credentials are
   supported; established contexts can be exported/imported with sequence
-  state preserved, and version-1 lucid CFX state can be inspected.
+  state preserved, and version-1 lucid CFX state can be inspected. Exported
+  context blobs contain raw key material and callers must protect them as
+  sensitive secret data.
 - **IAKERB GSS mechanism** (MIT-compatible): proxy-token realm discovery,
   password/TGT/service-ticket initiation, KDC proxying, and IAKERB-FINISHED
   conversation integrity before the normal Kerberos GSS context. Delegation

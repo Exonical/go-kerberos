@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
@@ -38,7 +39,9 @@ type contextTransfer struct {
 
 // ExportSecContext serializes an established context for transfer between
 // processes. The encoding is stable within version 1 and includes all
-// message-protection keys and sequence state.
+// message-protection keys and sequence state. The returned blob contains raw
+// key material; callers must protect it as sensitive secret data in transit
+// and at rest.
 func ExportSecContext(c *Context) ([]byte, error) {
 	if c == nil || len(c.key.KeyValue) == 0 ||
 		len(c.prfPartial.KeyValue) == 0 || len(c.prfFull.KeyValue) == 0 {
@@ -85,6 +88,10 @@ func ImportSecContext(data []byte) (*Context, error) {
 	decode := func(label, value string, typ int32) (protocol.EncryptionKey, error) {
 		raw, err := base64.StdEncoding.DecodeString(value)
 		if err != nil || len(raw) == 0 || typ == 0 {
+			return protocol.EncryptionKey{}, fmt.Errorf("GSS import context: invalid %s key", label)
+		}
+		etype, err := crypto.NewRegistry().Get(typ)
+		if err != nil || len(raw) != etype.KeySize() {
 			return protocol.EncryptionKey{}, fmt.Errorf("GSS import context: invalid %s key", label)
 		}
 		return protocol.EncryptionKey{KeyType: typ, KeyValue: raw}, nil
