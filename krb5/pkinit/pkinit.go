@@ -362,21 +362,46 @@ func ParseAuthPack(data []byte) (AuthPack, error) {
 		SupportedKDFs: supportedKDFs}, nil
 }
 
+func validateAuthPackFieldOrder(fields [][]byte) error {
+	lastOptionalTag := -1
+	for _, field := range fields[1:] {
+		if len(field) == 0 {
+			return errors.New("pkinit: malformed AuthPack")
+		}
+		var optionalTag int
+		switch field[0] {
+		case 0xa1:
+			optionalTag = 1
+		case 0xa2:
+			optionalTag = 2
+		case 0xa3:
+			optionalTag = 3
+		case 0xa4:
+			optionalTag = 4
+		default:
+			continue
+		}
+		if optionalTag <= lastOptionalTag {
+			return errors.New("pkinit: duplicate or out-of-order AuthPack optional")
+		}
+		lastOptionalTag = optionalTag
+	}
+	return nil
+}
+
 func parseAuthPackOptionals(data []byte) ([][]byte, []byte, error) {
 	fields, err := sequenceFields(data)
 	if err != nil {
 		return nil, nil, errors.New("pkinit: malformed AuthPack")
 	}
+	if err := validateAuthPackFieldOrder(fields); err != nil {
+		return nil, nil, err
+	}
 	var cmsTypes [][]byte
 	var dhNonce []byte
-	lastOptionalTag := -1
 	for _, field := range fields[1:] {
 		switch field[0] {
 		case 0xa2:
-			if lastOptionalTag >= 2 {
-				return nil, nil, errors.New("pkinit: duplicate or out-of-order AuthPack optional")
-			}
-			lastOptionalTag = 2
 			content, err := tlvContent(field)
 			if err != nil {
 				return nil, nil, err
@@ -389,10 +414,6 @@ func parseAuthPackOptionals(data []byte) ([][]byte, []byte, error) {
 				cmsTypes = append(cmsTypes, append([]byte(nil), element...))
 			}
 		case 0xa3:
-			if lastOptionalTag >= 3 {
-				return nil, nil, errors.New("pkinit: duplicate or out-of-order AuthPack optional")
-			}
-			lastOptionalTag = 3
 			content, err := tlvContent(field)
 			if err != nil {
 				return nil, nil, err
@@ -638,6 +659,9 @@ func parseAuthPack(data []byte) (PKAuthenticator, []byte, [][]byte, error) {
 	fields, err := sequenceFields(data)
 	if err != nil || len(fields) < 1 {
 		return PKAuthenticator{}, nil, nil, errors.New("pkinit: malformed AuthPack")
+	}
+	if err := validateAuthPackFieldOrder(fields); err != nil {
+		return PKAuthenticator{}, nil, nil, err
 	}
 	afields, err := sequenceFields(mustContent(fields[0]))
 	if err != nil || len(afields) < 4 {
