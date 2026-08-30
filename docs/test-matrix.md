@@ -154,6 +154,14 @@ issue the canonical anonymous principal and anonymous ticket flag, and omit
 client addresses. The integration suite covers MIT `kinit -n` against the Go
 KDC and the Go anonymous client against a PKINIT-enabled MIT KDC.
 
+RFC 8070 freshness coverage includes AuthPack field encoding and parsing,
+Go client ↔ Go KDC success with `PKINITRequireFreshness`, missing-token
+rejection with replacement method data, and stale/invalid-token rejection.
+The token is the MIT-compatible opaque timestamp/KVNO/checksum format using
+key usage 514 and a ten-minute lifetime. The live `TestMITClientPKINITAgainstGoKDC`
+gate enables `PKINITRequireFreshness` on the Go KDC and exercises a real MIT
+PKINIT client, including its freshness-token retry.
+
 The client and server implement RFC 3244 password changes and set-password requests
 against MIT `kadmind` on the kpasswd service port (464 by default; the isolated
 integration harness uses a high, configured port because it runs without root

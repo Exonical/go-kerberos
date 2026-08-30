@@ -59,6 +59,7 @@ const (
 	kdcErrClientRevoked    = 18
 	kdcErrKeyExpired       = 23
 	kdcErrClientNotTrusted = 62
+	kdcErrPreauthExpired   = 90
 	krbAPErrBadIntegrity   = 31
 	krbAPErrTktExpired     = 32
 	krbAPErrTktNYV         = 33
@@ -101,6 +102,10 @@ type Server struct {
 	PKINITSigner      stdcrypto.Signer
 	// PKINITClientCAs trusts client certificates for PKINIT authentication.
 	PKINITClientCAs *x509.CertPool
+	// PKINITRequireFreshness requires RFC 8070 freshness tokens on signed
+	// PKINIT requests. Clients which advertise freshness receive an opaque
+	// token in PREAUTH_REQUIRED and must echo it in PKAuthenticator.
+	PKINITRequireFreshness bool
 	// Authorize optionally mirrors MIT's kdcpolicy plugin hook for authenticated
 	// AS exchanges and validated TGS requests. A nil hook permits all requests.
 	// Hook KRBError codes in the protocol range are returned unchanged; other
@@ -473,6 +478,14 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			return s.errorResponse(kdcErrBadOption, request.ReqBody.SName)
 		}
 		methodData := protocol.MethodData{{PADataType: protocol.PADataPKASReq}}
+		if findPA(request.PAData, protocol.PADataASFreshness) != nil &&
+			s.PKINITCertificate != nil && s.PKINITSigner != nil {
+			if token, ok := s.makeFreshnessToken(request.ReqBody.EType); ok {
+				methodData = append(methodData, protocol.PAData{
+					PADataType: protocol.PADataASFreshness, PADataValue: token,
+				})
+			}
+		}
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
@@ -680,6 +693,15 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 			verified.Authenticator.CTime.IsZero() || !s.withinSkew(verified.Authenticator.CTime) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
+		if len(verified.Authenticator.FreshnessToken) > 0 {
+			if !s.verifyFreshnessToken(verified.Authenticator.FreshnessToken) {
+				return s.pkinitFreshnessError(request, armor,
+					kdcErrPreauthExpired)
+			}
+		} else if s.PKINITRequireFreshness && !anonymousRequest {
+			return s.pkinitFreshnessError(request, armor,
+				kdcErrPreauthFailed)
+		}
 		if anonymousRequest {
 			if verified.Signed {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -745,6 +767,15 @@ func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 		}
 		if s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
 			methodData = append(methodData, protocol.PAData{PADataType: protocol.PADataPKASReq})
+		}
+		if findPA(request.PAData, protocol.PADataASFreshness) != nil &&
+			s.PKINITCertificate != nil && s.PKINITSigner != nil &&
+			s.PKINITClientCAs != nil {
+			if token, ok := s.makeFreshnessToken(request.ReqBody.EType); ok {
+				methodData = append(methodData, protocol.PAData{
+					PADataType: protocol.PADataASFreshness, PADataValue: token,
+				})
+			}
 		}
 		if armor != nil {
 			if cookie := findPA(request.PAData, fast.PAFXCookie); cookie != nil {
@@ -2090,6 +2121,107 @@ func selectPKINITServiceKey(enctypes []int32, service kdb.PrincipalRecord) (int3
 		}
 	}
 	return 0, kdb.Key{}, false
+}
+
+const freshnessKeyUsage uint32 = 514
+
+func (s *Server) freshnessKey(enctypes []int32) (kdb.Key, bool) {
+	name := principal.Principal{
+		Realm: s.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", s.Realm},
+	}
+	record, ok, err := s.DB.Lookup(name)
+	if err != nil || !ok {
+		return kdb.Key{}, false
+	}
+	for _, enctype := range enctypes {
+		if key, ok := record.Keys[enctype]; ok {
+			key.Enctype = enctype
+			return key, true
+		}
+	}
+	for enctype, key := range record.Keys {
+		if _, err := crypto.NewRegistry().Get(enctype); err == nil {
+			key.Enctype = enctype
+			return key, true
+		}
+	}
+	return kdb.Key{}, false
+}
+
+func (s *Server) makeFreshnessToken(enctypes []int32) ([]byte, bool) {
+	key, ok := s.freshnessKey(enctypes)
+	if !ok {
+		return nil, false
+	}
+	etype, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		return nil, false
+	}
+	now := uint32(s.now().Unix())
+	var timestamp [4]byte
+	binary.BigEndian.PutUint32(timestamp[:], now)
+	checksum, err := etype.Checksum(key.Key, freshnessKeyUsage, timestamp[:])
+	if err != nil {
+		return nil, false
+	}
+	token := make([]byte, 8+len(checksum))
+	binary.BigEndian.PutUint32(token, now)
+	binary.BigEndian.PutUint32(token[4:], key.KVNO)
+	copy(token[8:], checksum)
+	return token, true
+}
+
+func (s *Server) verifyFreshnessToken(token []byte) bool {
+	if len(token) <= 8 {
+		return false
+	}
+	timestamp := binary.BigEndian.Uint32(token)
+	tokenKVNO := binary.BigEndian.Uint32(token[4:])
+	now := uint32(s.now().Unix())
+	if now > timestamp && now-timestamp > 10*60 {
+		return false
+	}
+	name := principal.Principal{
+		Realm: s.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", s.Realm},
+	}
+	record, ok, err := s.DB.Lookup(name)
+	if err != nil || !ok {
+		return false
+	}
+	for enctype, key := range record.Keys {
+		if key.KVNO != tokenKVNO {
+			continue
+		}
+		etype, err := crypto.NewRegistry().Get(enctype)
+		if err == nil && etype.VerifyChecksum(key.Key, freshnessKeyUsage,
+			token[:4], token[8:]) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) pkinitFreshnessError(request protocol.ASReq,
+	armor *fastContext, code int32) []byte {
+	token, ok := s.makeFreshnessToken(request.ReqBody.EType)
+	if !ok {
+		if armor != nil {
+			return s.fastErrorResponse(code, request.ReqBody.SName, nil,
+				request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponse(code, request.ReqBody.SName)
+	}
+	data := marshalDER(protocol.MethodData{
+		{PADataType: protocol.PADataPKASReq},
+		{PADataType: protocol.PADataASFreshness, PADataValue: token},
+	})
+	if armor != nil {
+		return s.fastErrorResponse(code, request.ReqBody.SName, data,
+			request.ReqBody.Nonce, armor)
+	}
+	return s.errorResponseWithData(code, request.ReqBody.SName, data)
 }
 
 func selectServiceKey(enctypes []int32, service kdb.PrincipalRecord) (int32, kdb.Key, bool) {

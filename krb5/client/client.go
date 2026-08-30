@@ -586,6 +586,15 @@ func errorMethodData(value *krberrors.KRBError) protocol.MethodData {
 	return data
 }
 
+func freshnessTokenFromError(value *krberrors.KRBError) []byte {
+	for _, pa := range errorMethodData(value) {
+		if pa.PADataType == pkinit.PADataASFreshness {
+			return append([]byte(nil), pa.PADataValue...)
+		}
+	}
+	return nil
+}
+
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
 	if c == nil {
@@ -1517,6 +1526,9 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if err != nil {
 		return nil, err
 	}
+	// Advertise RFC 8070 freshness support so a KDC can include an opaque
+	// token in PREAUTH_REQUIRED method data.
+	request.PAData = protocol.MethodData{{PADataType: pkinit.PADataASFreshness}}
 	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
 	if err != nil {
 		return nil, err
@@ -1534,8 +1546,10 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 			Realm: clientPrincipal.Realm, NameType: principal.NTSrvInstance,
 			Components: []string{"krbtgt", clientPrincipal.Realm},
 		}
-		pa, err := pk.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
-			clientPrincipal, serverPrincipal)
+		freshnessToken := freshnessTokenFromError(kerberosError)
+		pa, err := pk.BuildPAASReqForPrincipalsWithFreshness(bodyDER, now,
+			request.ReqBody.Nonce, clientPrincipal, serverPrincipal,
+			freshnessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -1606,6 +1620,7 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 		return nil, err
 	}
 	request.ReqBody.KDCOptions |= types.KDCRequestAnonymous
+	request.PAData = protocol.MethodData{{PADataType: pkinit.PADataASFreshness}}
 	response, err := c.roundTrip(ctx, realm, request)
 	if err != nil {
 		return nil, err
@@ -1629,8 +1644,9 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err != nil {
 		return nil, err
 	}
-	pa, err := pkClient.BuildPAASReqForPrincipals(bodyDER, now, request.ReqBody.Nonce,
-		anon, serverPrincipal)
+	pa, err := pkClient.BuildPAASReqForPrincipalsWithFreshness(bodyDER, now,
+		request.ReqBody.Nonce, anon, serverPrincipal,
+		freshnessTokenFromError(kerberosError))
 	if err != nil {
 		return nil, err
 	}

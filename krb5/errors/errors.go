@@ -29,6 +29,8 @@ const (
 	KDCErrTktExpired ErrorCode = 32
 	// KDCErrPreauthFailed is KDC_ERR_PREAUTH_FAILED.
 	KDCErrPreauthFailed ErrorCode = 24
+	// KDCErrPreauthExpired is KDC_ERR_PREAUTH_EXPIRED.
+	KDCErrPreauthExpired ErrorCode = 90
 	// KDCErrEtypeNosp is KDC_ERR_ETYPE_NOSUPP.
 	KDCErrEtypeNosp ErrorCode = 14
 	// KRBAPErrBadIntegrity is KRB_AP_ERR_BAD_INTEGRITY.
