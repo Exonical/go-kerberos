@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -72,6 +73,13 @@ type VerifiedAPReq struct {
 	Checksum          *protocol.Checksum
 	// AuthorizationData contains CAMMAC elements after service verification.
 	AuthorizationData protocol.AuthorizationData
+}
+
+// VerifyAPReqOptions controls replay-cache selection for AP acceptance.
+// Without ReplayCache, AP verification retains its process-local default.
+type VerifyAPReqOptions struct {
+	ReplayCache     rcache.Cache
+	ReplayCacheName string
 }
 
 // APRepDetails contains optional keying material asserted by an AP-REP.
@@ -187,6 +195,12 @@ func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now 
 
 // VerifyAPReq verifies an AP-REQ using service keys from a keytab.
 func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+	return VerifyAPReqWithOptions(kt, der, now, skew, VerifyAPReqOptions{})
+}
+
+// VerifyAPReqWithOptions verifies an AP-REQ and optionally uses a configured
+// persistent replay cache. ReplayCacheName is resolved using rcache.Resolve.
+func VerifyAPReqWithOptions(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duration, options VerifyAPReqOptions) (*VerifiedAPReq, error) {
 	if kt == nil {
 		return nil, fmt.Errorf("verify AP-REQ: nil keytab")
 	}
@@ -201,15 +215,25 @@ func VerifyAPReq(kt *keytab.Keytab, der []byte, now time.Time, skew time.Duratio
 	if err != nil {
 		return nil, err
 	}
+	backend, err := resolveReplayCache(options)
+	if err != nil {
+		return nil, err
+	}
 	return verifyAPReqWithTicketKey(request, protocol.EncryptionKey{
 		KeyType: entry.Enctype, KeyValue: entry.Key,
-	}, now, skew)
+	}, now, skew, backend)
 }
 
 // VerifyAPReqWithSessionKey verifies a user-to-user AP-REQ using the peer's
 // TGT session key. The request must set APUseSessionKey, as required by
 // RFC 4120 section 5.5.1.
 func VerifyAPReqWithSessionKey(key protocol.EncryptionKey, der []byte, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+	return VerifyAPReqWithSessionKeyWithOptions(key, der, now, skew, VerifyAPReqOptions{})
+}
+
+// VerifyAPReqWithSessionKeyWithOptions is the option-bearing form of
+// VerifyAPReqWithSessionKey.
+func VerifyAPReqWithSessionKeyWithOptions(key protocol.EncryptionKey, der []byte, now time.Time, skew time.Duration, options VerifyAPReqOptions) (*VerifiedAPReq, error) {
 	if key.KeyType == 0 || len(key.KeyValue) == 0 {
 		return nil, fmt.Errorf("verify AP-REQ with session key: incomplete key")
 	}
@@ -226,10 +250,31 @@ func VerifyAPReqWithSessionKey(key protocol.EncryptionKey, der []byte, now time.
 	if request.Ticket.EncPart.EType != key.KeyType {
 		return nil, fmt.Errorf("verify AP-REQ with session key: %w", krberrors.ErrIntegrity)
 	}
-	return verifyAPReqWithTicketKey(request, key, now, skew)
+	backend, err := resolveReplayCache(options)
+	if err != nil {
+		return nil, err
+	}
+	return verifyAPReqWithTicketKey(request, key, now, skew, backend)
 }
 
-func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.EncryptionKey, now time.Time, skew time.Duration) (*VerifiedAPReq, error) {
+func resolveReplayCache(options VerifyAPReqOptions) (rcache.Cache, error) {
+	if options.ReplayCache != nil && options.ReplayCacheName != "" {
+		return nil, fmt.Errorf("verify AP-REQ: both replay cache and replay cache name configured")
+	}
+	if options.ReplayCache != nil {
+		return options.ReplayCache, nil
+	}
+	if options.ReplayCacheName == "" {
+		return nil, nil
+	}
+	backend, err := rcache.Resolve(options.ReplayCacheName)
+	if err != nil {
+		return nil, fmt.Errorf("verify AP-REQ replay cache: %w", err)
+	}
+	return backend, nil
+}
+
+func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.EncryptionKey, now time.Time, skew time.Duration, persistentCache rcache.Cache) (*VerifiedAPReq, error) {
 	etype, err := crypto.NewRegistry().Get(ticketKey.KeyType)
 	if err != nil {
 		return nil, err
@@ -286,15 +331,25 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	if !withinSkew(authenticator.Ctime.Time, now, skew) {
 		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
 	}
-	replayKey := fmt.Sprintf("%x", sha256.Sum256(request.Authenticator.Cipher))
-	replayCache.Lock()
-	_, replayed := replayCache.entries[replayKey]
-	if !replayed {
-		replayCache.entries[replayKey] = authenticator.Ctime.Time
-	}
-	replayCache.Unlock()
-	if replayed {
-		return nil, fmt.Errorf("verify AP-REQ: replayed authenticator")
+	if persistentCache != nil {
+		tag := rcache.TagFromCiphertext(request.Authenticator.Cipher)
+		if err := persistentCache.Store(tag, authenticator.Ctime.Time, skew); err != nil {
+			if errors.Is(err, krberrors.ErrReplay) {
+				return nil, fmt.Errorf("verify AP-REQ: %w", krberrors.ErrReplay)
+			}
+			return nil, fmt.Errorf("verify AP-REQ replay cache: %w", err)
+		}
+	} else {
+		replayKey := fmt.Sprintf("%x", sha256.Sum256(request.Authenticator.Cipher))
+		replayCache.Lock()
+		_, replayed := replayCache.entries[replayKey]
+		if !replayed {
+			replayCache.entries[replayKey] = authenticator.Ctime.Time
+		}
+		replayCache.Unlock()
+		if replayed {
+			return nil, fmt.Errorf("verify AP-REQ: %w", krberrors.ErrReplay)
+		}
 	}
 	var authChecksum *protocol.Checksum
 	if authenticator.Checksum != nil {

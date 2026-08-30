@@ -606,10 +606,19 @@ type IAKERBAcceptor struct {
 
 // NewIAKERBAcceptor creates an IAKERB proxy backed by a service keytab.
 func NewIAKERBAcceptor(kt *keytab.Keytab, kdc *client.Client, realm string) (*IAKERBAcceptor, error) {
+	return NewIAKERBAcceptorWithOptions(kt, kdc, realm, AcceptorOptions{})
+}
+
+// NewIAKERBAcceptorWithOptions creates an IAKERB proxy with optional replay
+// cache configuration for its final AP acceptance.
+func NewIAKERBAcceptorWithOptions(kt *keytab.Keytab, kdc *client.Client, realm string, options AcceptorOptions) (*IAKERBAcceptor, error) {
 	if kt == nil || kdc == nil {
 		return nil, fmt.Errorf("IAKERB acceptor: incomplete configuration")
 	}
-	return &IAKERBAcceptor{keytab: kt, KDC: kdc, Realm: realm, acceptor: NewAcceptor(kt)}, nil
+	return &IAKERBAcceptor{
+		keytab: kt, KDC: kdc, Realm: realm,
+		acceptor: NewAcceptorWithOptions(kt, options),
+	}, nil
 }
 
 // Accept advances the proxy or final AP exchange.
