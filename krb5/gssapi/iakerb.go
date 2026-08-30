@@ -33,7 +33,7 @@ const (
 
 var iakerbOID = []byte{0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x02, 0x05}
 
-// IAKERBHeader is the RFC 6111 proxy header.
+// IAKERBHeader is the IAKERB proxy header (draft-ietf-kitten-iakerb).
 type IAKERBHeader struct {
 	TargetRealm types.UTF8String `krb5:"tag:1"`
 	Cookie      []byte           `krb5:"tag:2,optional"`
