@@ -1463,6 +1463,49 @@ func TestServerOTPFASTASExchange(t *testing.T) {
 	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "otp")
 }
 
+func TestServerASPasswordExpirationAndPasswordChangeService(t *testing.T) {
+	now := time.Unix(2000000063, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	ordinary := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"},
+	}
+	record, ok, err := server.DB.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("user lookup: %v", err)
+	}
+	record.PasswordExpiration = now.Add(-time.Second)
+	if err := server.DB.(*kdb.Database).UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryRecord, ok, err := server.DB.Lookup(ordinary)
+	if err != nil || !ok {
+		t.Fatalf("ordinary service lookup: %v", err)
+	}
+	if got := server.validateASAccount(record, ordinaryRecord, 0); got != kdcErrKeyExpired {
+		t.Fatalf("expired password code = %d, want %d", got, kdcErrKeyExpired)
+	}
+	changeService := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"kadmin", "changepw"},
+	}
+	if err := server.DB.(*kdb.Database).AddPrincipal("kadmin/changepw", "change-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	changeRecord, ok, err := server.DB.Lookup(changeService)
+	if err != nil || !ok {
+		t.Fatalf("password-change service lookup: %v", err)
+	}
+	changeRecord.Flags |= kdb.PWChangeService
+	if err := server.DB.(*kdb.Database).UpdatePrincipal(changeRecord); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.validateASAccount(record, changeRecord, 0); got == kdcErrKeyExpired {
+		t.Fatalf("password-change service retained key-expired code %d", got)
+	}
+}
+
 func TestServerOTPRequiresFAST(t *testing.T) {
 	now := time.Unix(2000000061, 0).UTC()
 	server, kclient := testServer(t, now)
@@ -1471,6 +1514,22 @@ func TestServerOTPRequiresFAST(t *testing.T) {
 	_, err := kclient.ASExchange(context.Background(), user, "alice-password")
 	if err == nil || !hasKRBCode(err, 24) {
 		t.Fatalf("non-FAST OTP exchange error = %v, want KDC_ERR_PREAUTH_FAILED", err)
+	}
+}
+
+func TestServerS4UClientAccountState(t *testing.T) {
+	now := time.Unix(2000000064, 0).UTC()
+	server, _ := testServer(t, now)
+	record := kdb.PrincipalRecord{
+		Expiration: now.Add(-time.Second),
+	}
+	if got := server.validateS4UClient(record); got != kdcErrNameExpired {
+		t.Fatalf("expired S4U client code = %d, want %d", got, kdcErrNameExpired)
+	}
+	record.Expiration = time.Time{}
+	record.Flags = kdb.DisallowAllTickets
+	if got := server.validateS4UClient(record); got != kdcErrClientRevoked {
+		t.Fatalf("disabled S4U client code = %d, want %d", got, kdcErrClientRevoked)
 	}
 }
 
@@ -2510,6 +2569,54 @@ type stubStore struct {
 	err error
 }
 
+func TestBuildTGSRepPropagatesClientLookupError(t *testing.T) {
+	now := time.Unix(2000000065, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	service, ok, err := db.Lookup(principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"},
+	})
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v", err)
+	}
+	serviceKey := service.Keys[crypto.EnctypeAES256SHA1]
+	request := protocol.TGSReq{
+		ReqBody: protocol.KDCReqBody{
+			SName: &protocol.PrincipalName{
+				NameType:   int32(principal.NTSrvHst),
+				NameString: []string{"host", "service.test"},
+			},
+		},
+	}
+	issuedClient := principal.Principal{
+		Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"missing"},
+	}
+	server.DB = &stubStore{err: errors.New("lookup backend unavailable")}
+	response := server.buildTGSRep(request, protocol.EncTicketPart{
+		CRealm: "TEST.REALM",
+		CName: protocol.PrincipalName{
+			NameType: int32(principal.NTPrincipal), NameString: []string{"alice"},
+		},
+		Key: protocol.EncryptionKey{
+			KeyType: crypto.EnctypeAES256SHA1, KeyValue: serviceKey.Key,
+		},
+	}, protocol.Ticket{}, serviceKey,
+		principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+			Components: []string{"host", "service.test"}},
+		service, crypto.EnctypeAES256SHA1, serviceKey,
+		protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: serviceKey.Key},
+		8, nil, &issuedClient, nil, nil, nil, nil, nil)
+	var kerberosError protocol.KRBError
+	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
+		t.Fatalf("decode KRB-ERROR: %v", err)
+	}
+	if kerberosError.ErrorCode != kdcErrGeneric {
+		t.Fatalf("lookup error code = %d, want %d", kerberosError.ErrorCode, kdcErrGeneric)
+	}
+}
+
 func (s *stubStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool, error) {
 	if s.err != nil {
 		return kdb.PrincipalRecord{}, false, s.err
@@ -2633,6 +2740,10 @@ func TestCrossRealmTGSExchange(t *testing.T) {
 	serverA := &Server{Realm: realmA, DB: dbA, Now: func() time.Time { return now }}
 	serverB := &Server{Realm: realmB, DB: dbB, Now: func() time.Time { return now }}
 	kclient := &client.Client{
+		Config: &config.Config{
+			DNSCanonicalizeHostname: "false",
+			QualifyShortnameSet:     true,
+		},
 		Now: func() time.Time { return now },
 		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
 			switch realm {
@@ -2743,8 +2854,12 @@ func TestCapathMultiHopTGSExchange(t *testing.T) {
 	}
 	var bTransit string
 	kclient := &client.Client{
-		Config: clientConfig,
-		Now:    func() time.Time { return now },
+		Config: &config.Config{
+			DNSCanonicalizeHostname: "false",
+			QualifyShortnameSet:     true,
+			CapathOptions:           clientConfig.CapathOptions,
+		},
+		Now: func() time.Time { return now },
 		Exchange: func(ctx context.Context, realm string, payload []byte) ([]byte, error) {
 			var response []byte
 			switch realm {
