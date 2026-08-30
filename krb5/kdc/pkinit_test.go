@@ -61,6 +61,35 @@ func TestServerPKINITFreshnessRequired(t *testing.T) {
 	}
 }
 
+func TestFreshnessKeySkipsUnsupportedEnctype(t *testing.T) {
+	now := time.Unix(2000001200, 0).UTC()
+	server, _ := testServer(t, now)
+	tgt := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance, Components: []string{"krbtgt", "TEST.REALM"}}
+	record, ok, err := server.DB.Lookup(tgt)
+	if err != nil || !ok {
+		t.Fatalf("krbtgt lookup: ok=%v err=%v", ok, err)
+	}
+	const unsupportedEnctype int32 = 1
+	record.Keys[unsupportedEnctype] = kdb.Key{Enctype: unsupportedEnctype, KVNO: 1, Key: make([]byte, 8)}
+	if err := server.DB.(*kdb.Database).UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	key, ok := server.freshnessKey([]int32{unsupportedEnctype})
+	if !ok {
+		t.Fatal("freshnessKey failed with an unsupported requested enctype present")
+	}
+	if key.Enctype == unsupportedEnctype {
+		t.Fatalf("freshnessKey selected unsupported enctype %d", key.Enctype)
+	}
+	token, ok := server.makeFreshnessToken([]int32{unsupportedEnctype})
+	if !ok {
+		t.Fatal("makeFreshnessToken failed with an unsupported requested enctype present")
+	}
+	if !server.verifyFreshnessToken(token) {
+		t.Fatal("token from fallback key did not verify")
+	}
+}
+
 func TestServerPKINITFreshnessMissingAndExpired(t *testing.T) {
 	now := time.Unix(2000001100, 0).UTC()
 	server, _ := testServer(t, now)
