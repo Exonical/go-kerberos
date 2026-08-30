@@ -1809,11 +1809,14 @@ func validTimes(auth types.KerberosTime, start *types.KerberosTime, end types.Ke
 	if !auth.Present || !end.Present {
 		return false
 	}
-	if start != nil && start.Present && start.Time.After(end.Time) {
+	startTime := auth.Time
+	if start != nil && start.Present {
+		startTime = start.Time
+	}
+	if startTime.After(now.Add(skew)) {
 		return false
 	}
-	return !auth.Time.Before(now.Add(-skew)) && !auth.Time.After(now.Add(skew)) &&
-		!end.Time.Before(now.Add(-skew))
+	return !end.Time.Before(now.Add(-skew))
 }
 
 func configuredKDC(cfg *config.Config, realm string) (string, bool) {
