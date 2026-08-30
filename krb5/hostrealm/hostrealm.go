@@ -18,10 +18,11 @@ import (
 // Options supplies injectable network and host configuration hooks.
 // SearchDomains overrides the system resolver search list when non-nil.
 type Options struct {
-	Resolver      discovery.TXTResolver
-	SearchDomains []string
-	ForwardLookup func(context.Context, string) (string, error)
-	ReverseLookup func(context.Context, string) (string, error)
+	Resolver       discovery.TXTResolver
+	SearchDomains  []string
+	ForwardLookup  func(context.Context, string) (string, error)
+	ResolveAddress func(context.Context, string) (string, error)
+	ReverseLookup  func(context.Context, string) (string, error)
 }
 
 // NetResolver adapts net.Resolver for hostname canonicalization and TXT
@@ -52,6 +53,17 @@ func (r NetResolver) Reverse(ctx context.Context, host string) (string, error) {
 		return "", err
 	}
 	return names[0], nil
+}
+
+func (r NetResolver) ResolveAddress(ctx context.Context, host string) (string, error) {
+	addresses, err := r.resolver().LookupHost(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(addresses) == 0 {
+		return "", fmt.Errorf("resolve hostname %q: no addresses", host)
+	}
+	return addresses[0], nil
 }
 
 func resolverFor(opts Options) NetResolver {
@@ -110,6 +122,7 @@ func ExpandHostname(ctx context.Context, cfg *config.Config, host string, opts O
 		return "", fmt.Errorf("expand hostname: empty hostname")
 	}
 	canon := host
+	dnsReplaced := false
 	if canonicalMode(cfg) == "true" {
 		lookup := opts.ForwardLookup
 		if lookup == nil {
@@ -119,18 +132,26 @@ func ExpandHostname(ctx context.Context, cfg *config.Config, host string, opts O
 		if value, err := lookup(ctx, host); err == nil && value != "" {
 			canon = value
 			if cfg != nil && cfg.RDNS {
+				resolveAddress := opts.ResolveAddress
+				if resolveAddress == nil {
+					r := resolverFor(opts)
+					resolveAddress = r.ResolveAddress
+				}
 				reverse := opts.ReverseLookup
 				if reverse == nil {
 					r := resolverFor(opts)
 					reverse = r.Reverse
 				}
-				if value, err := reverse(ctx, canon); err == nil && value != "" {
-					canon = value
+				if address, err := resolveAddress(ctx, canon); err == nil {
+					if value, err := reverse(ctx, address); err == nil && value != "" {
+						canon = value
+					}
 				}
 			}
+			dnsReplaced = canon != host
 		}
 	}
-	if canonicalMode(cfg) != "true" && !strings.Contains(canon, ".") {
+	if !dnsReplaced && !strings.Contains(host, ".") {
 		if domain := qualifyDomain(cfg, opts); domain != "" {
 			canon += "." + domain
 		}

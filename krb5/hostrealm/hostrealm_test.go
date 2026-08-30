@@ -36,11 +36,11 @@ dns_canonicalize_hostname = false
 	cfg.DNSCanonicalizeHostname = "true"
 	got, err = ExpandHostname(ctx, cfg, "Alias", Options{
 		ForwardLookup: func(context.Context, string) (string, error) {
-			return "Canonical.Example.Test.", nil
+			return "", context.DeadlineExceeded
 		},
 	})
-	if err != nil || got != "canonical.example.test" {
-		t.Fatalf("forward canonicalization = %q, %v", got, err)
+	if err != nil || got != "alias.example.test" {
+		t.Fatalf("failed forward lookup qualification = %q, %v", got, err)
 	}
 }
 
@@ -51,12 +51,18 @@ func TestExpandHostnameReverseAndFallback(t *testing.T) {
 		ForwardLookup: func(context.Context, string) (string, error) {
 			return "canonical.example.test", nil
 		},
+		ResolveAddress: func(_ context.Context, host string) (string, error) {
+			if host != "canonical.example.test" {
+				t.Fatalf("address lookup host = %q", host)
+			}
+			return "192.0.2.10", nil
+		},
 		ReverseLookup: func(_ context.Context, host string) (string, error) {
 			reverseInput = host
 			return "reverse.example.test.", nil
 		},
 	})
-	if err != nil || got != "reverse.example.test" || reverseInput != "canonical.example.test" {
+	if err != nil || got != "reverse.example.test" || reverseInput != "192.0.2.10" {
 		t.Fatalf("reverse canonicalization = %q, input %q, %v", got, reverseInput, err)
 	}
 
