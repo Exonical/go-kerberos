@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -92,7 +93,11 @@ func Default(cfg *config.Config) (Cache, error) {
 		return Resolve(kind + ":")
 	}
 	if cfg != nil && cfg.DefaultRCacheName != "" {
-		return Resolve(cfg.DefaultRCacheName)
+		name, err := expandPathTokens(cfg.DefaultRCacheName)
+		if err != nil {
+			return nil, err
+		}
+		return Resolve(name)
 	}
 	return Resolve("dfl:")
 }
@@ -242,6 +247,9 @@ func (noneCache) Store([]byte, time.Time, time.Duration) error { return nil }
 func defaultPath() string {
 	dir := os.Getenv("KRB5RCACHEDIR")
 	if dir == "" {
+		dir = os.Getenv("TMPDIR")
+	}
+	if dir == "" {
 		for _, candidate := range []string{"/var/tmp", "/usr/tmp", "/var/usr/tmp", "/tmp"} {
 			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 				dir = candidate
@@ -253,6 +261,46 @@ func defaultPath() string {
 		}
 	}
 	return filepath.Join(dir, "krb5_"+strconv.FormatInt(int64(os.Geteuid()), 10)+".rcache2")
+}
+
+func expandPathTokens(path string) (string, error) {
+	var expanded strings.Builder
+	for len(path) > 0 {
+		start := strings.Index(path, "%{")
+		if start < 0 {
+			expanded.WriteString(path)
+			break
+		}
+		expanded.WriteString(path[:start])
+		end := strings.IndexByte(path[start+2:], '}')
+		if end < 0 {
+			return "", fmt.Errorf("replay cache: invalid path token")
+		}
+		end += start + 2
+		token := path[start+2 : end]
+		var value string
+		switch token {
+		case "TEMP":
+			value = os.TempDir()
+		case "uid", "USERID", "euid":
+			value = strconv.Itoa(os.Geteuid())
+		case "username":
+			current, err := user.Current()
+			if err != nil {
+				return "", fmt.Errorf("replay cache: resolve username token: %w", err)
+			}
+			value = current.Username
+		case "null":
+			value = ""
+		case "LIBDIR", "BINDIR", "SBINDIR":
+			return "", fmt.Errorf("replay cache: unsupported path token %%{%s}", token)
+		default:
+			return "", fmt.Errorf("replay cache: invalid path token %%{%s}", token)
+		}
+		expanded.WriteString(value)
+		path = path[end+1:]
+	}
+	return expanded.String(), nil
 }
 
 func sipHash24(data, seed []byte) uint64 {
