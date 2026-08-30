@@ -6,6 +6,15 @@ interoperability with MIT krb5. It uses no cgo, no `libkrb5`, and no external
 Kerberos libraries — MIT binaries are used only as a differential oracle in
 disposable integration test environments.
 
+The crypto registry includes Camellia-128 and Camellia-256 CTS-CMAC enctypes
+(25 and 26), grounded in RFC 3713 and RFC 6803. Their pure-Go block cipher,
+CMAC, feedback-CMAC derivation, string-to-key, and Kerberos CTS implementations
+are covered by RFC and MIT vectors.
+When Go runs in FIPS 140 mode (`GODEBUG=fips140=on`), Camellia enctypes are
+disabled as non-FIPS-approved algorithms regardless of configuration; AES
+enctypes remain available. This is a RHEL-style policy for Go FIPS
+deployments; upstream MIT krb5 does not apply this gate.
+
 ## Features
 
 ### Client
@@ -290,12 +299,12 @@ CAMMACs are rejected rather than exposed as trusted authorization data.
 MIT dump persistence supports Go-to-MIT export with `mitdump.Dump` or
 `mitdump.Write`. Exports use the MIT `kdb5_util load_dump version 7` format,
 include the encrypted `K/M@REALM` record, and encrypt principal key data with
-AES master enctypes 17, 18, 19, or 20. The dump writer is covered by
+AES or Camellia master enctypes. The dump writer is covered by
 decrypting round-trip tests and a live `kdb5_util load`/`kinit` integration
 gate; the existing MIT-to-Go loader path remains supported as well. MIT dumps
 can be loaded without a password using `mitdump.LoadWithStash`, which reads
 modern FILE keytab-format `.k5.REALM` stashes and the legacy binary stash
-format (with supported AES master enctypes). `mitdump.WriteStash` and
+format (with supported AES and Camellia master enctypes). `mitdump.WriteStash` and
 `mitdump.WriteStashFile` write keytab-format K/M stashes for those enctypes;
 the stash reader and writer are covered by unit tests and a live MIT stash
 loading gate.

@@ -2079,6 +2079,10 @@ func verifyS4UChecksum(key []byte, checksumType int32, usage uint32, data, expec
 		etypeID = crypto.EnctypeAES128SHA256
 	case crypto.ChecksumHMACSHA384192AES256:
 		etypeID = crypto.EnctypeAES256SHA384
+	case crypto.ChecksumCMACCamellia128:
+		etypeID = crypto.EnctypeCamellia128
+	case crypto.ChecksumCMACCamellia256:
+		etypeID = crypto.EnctypeCamellia256
 	default:
 		return false
 	}
@@ -2100,6 +2104,10 @@ func makeS4UChecksum(key []byte, checksumType int32, usage uint32, data []byte) 
 		etypeID = crypto.EnctypeAES128SHA256
 	case crypto.ChecksumHMACSHA384192AES256:
 		etypeID = crypto.EnctypeAES256SHA384
+	case crypto.ChecksumCMACCamellia128:
+		etypeID = crypto.EnctypeCamellia128
+	case crypto.ChecksumCMACCamellia256:
+		etypeID = crypto.EnctypeCamellia256
 	default:
 		return nil, fmt.Errorf("unsupported S4U checksum type %d", checksumType)
 	}
@@ -3078,6 +3086,10 @@ func mandatoryChecksumType(etype int32) int32 {
 		return crypto.ChecksumHMACSHA256128AES128
 	case crypto.EnctypeAES256SHA384:
 		return crypto.ChecksumHMACSHA384192AES256
+	case crypto.EnctypeCamellia128:
+		return crypto.ChecksumCMACCamellia128
+	case crypto.EnctypeCamellia256:
+		return crypto.ChecksumCMACCamellia256
 	default:
 		return 0
 	}

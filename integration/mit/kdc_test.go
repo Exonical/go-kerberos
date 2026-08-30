@@ -307,6 +307,26 @@ func TestMITClientEncryptedChallengeAgainstGoKDC(t *testing.T) {
 	}
 }
 
+func TestMITClientCamelliaAgainstGoKDC(t *testing.T) {
+	k := startGoKDC(t)
+	configData, err := os.ReadFile(k.config)
+	if err != nil {
+		t.Fatalf("read Go KDC config: %v", err)
+	}
+	configData = []byte(strings.Replace(string(configData),
+		"    dns_lookup_realm = false\n",
+		"    dns_lookup_realm = false\n    permitted_enctypes = camellia256-cts-cmac\n",
+		1))
+	if err := os.WriteFile(k.config, configData, 0o600); err != nil {
+		t.Fatalf("write Camellia config: %v", err)
+	}
+	k.run(t, "alice-password\n", "/usr/bin/kinit", "alice")
+	listing := k.run(t, "", "/usr/bin/klist", "-e")
+	if !strings.Contains(strings.ToLower(listing), "camellia256") {
+		t.Fatalf("MIT klist does not show Camellia session enctype:\n%s", listing)
+	}
+}
+
 func TestMITClientSPAKEAgainstGoKDC(t *testing.T) {
 	k := startGoSPAKEKDC(t)
 	output, err := k.runResult("alice-password\n", "/usr/bin/kinit", "alice")

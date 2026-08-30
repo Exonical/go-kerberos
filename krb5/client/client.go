@@ -969,7 +969,7 @@ func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Pr
 		},
 		Till:  types.KerberosTime{Time: now.Add(c.ticketLifetime()), Present: true},
 		Nonce: randomNonce(nonceBytes),
-		EType: c.requestEnctypes(),
+		EType: c.tgsRequestEnctypes(),
 	}
 	if adjust != nil {
 		adjust(&body)
@@ -1196,11 +1196,48 @@ func (c *Client) canonicalizeEnabled() bool {
 	return c.Canonicalize || (c.Config != nil && c.Config.Canonicalize)
 }
 
-func (c *Client) requestEnctypes() []int32 {
+var defaultRequestEnctypes = []int32{
+	crypto.EnctypeAES256SHA1,
+	crypto.EnctypeAES128SHA1,
+	crypto.EnctypeAES256SHA384,
+	crypto.EnctypeAES128SHA256,
+	crypto.EnctypeCamellia128,
+	crypto.EnctypeCamellia256,
+}
+
+func (c *Client) asRequestEnctypes() []int32 {
+	var candidates []int32
 	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
-		return append([]int32(nil), c.Config.DefaultTKTEnctypes...)
+		candidates = c.Config.DefaultTKTEnctypes
+	} else if c.Config != nil && len(c.Config.PermittedEnctypes) > 0 {
+		candidates = c.Config.PermittedEnctypes
+	} else {
+		candidates = defaultRequestEnctypes
 	}
-	return []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
+	return c.supportedRequestEnctypes(candidates)
+}
+
+func (c *Client) tgsRequestEnctypes() []int32 {
+	var candidates []int32
+	if c.Config != nil && len(c.Config.DefaultTGSEnctypes) > 0 {
+		candidates = c.Config.DefaultTGSEnctypes
+	} else if c.Config != nil && len(c.Config.PermittedEnctypes) > 0 {
+		candidates = c.Config.PermittedEnctypes
+	} else {
+		candidates = defaultRequestEnctypes
+	}
+	return c.supportedRequestEnctypes(candidates)
+}
+
+func (c *Client) supportedRequestEnctypes(candidates []int32) []int32 {
+	registry := crypto.NewRegistry()
+	result := make([]int32, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, err := registry.Get(candidate); err == nil {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func checksumType(etype int32) int32 {
@@ -1213,6 +1250,10 @@ func checksumType(etype int32) int32 {
 		return crypto.ChecksumHMACSHA256128AES128
 	case crypto.EnctypeAES256SHA384:
 		return crypto.ChecksumHMACSHA384192AES256
+	case crypto.EnctypeCamellia128:
+		return crypto.ChecksumCMACCamellia128
+	case crypto.EnctypeCamellia256:
+		return crypto.ChecksumCMACCamellia256
 	default:
 		return 0
 	}
@@ -1286,10 +1327,6 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 	if c.canonicalizeEnabled() {
 		options |= types.KDCCanonicalize
 	}
-	enctypes := []int32{crypto.EnctypeAES256SHA1, crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA384, crypto.EnctypeAES128SHA256}
-	if c.Config != nil && len(c.Config.DefaultTKTEnctypes) > 0 {
-		enctypes = append([]int32(nil), c.Config.DefaultTKTEnctypes...)
-	}
 	return protocol.ASReq{
 		PVNO: 5, MsgType: 10,
 		ReqBody: protocol.KDCReqBody{
@@ -1302,7 +1339,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 			},
 			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
 			Nonce: randomNonce(nonceBytes),
-			EType: enctypes,
+			EType: c.asRequestEnctypes(),
 		},
 	}, nil
 }
