@@ -50,6 +50,7 @@ registry gate.
 | MIT kprop full-resync dump transfer | Go `kprop.Send` ↔ Go `kprop.Server` unit/integration coverage; real MIT `kprop` → Go server; Go client → real MIT `kpropd` | MIT `kprop` sendauth/AP/Safe/Priv framing and chained AES transfer | Both live transfer gates pass with MIT 1.19 tooling; iprop full-resync callers use `Server.PushFullResync` and `Replica.KpropServer` |
 | KDC lookaside and transport hardening | unit cache/transport tests; Go client UDP-too-big retry over TCP | MIT KDC interoperability suite | MIT client integration remains covered |
 | MS-KKDCP HTTPS transport | Go client -> Go TLS proxy -> real MIT KDC (full AS + TGS) | DER wrapper and handler unit tests | MIT `kinit` -> Go TLS proxy -> real MIT KDC (skips when `k5tls` is unavailable) |
+| Initial-credential keytab verification | Go in-memory KDC: valid and wrong service keys, missing-keytab nofail behavior; Go client -> MIT KDC with MIT-generated keytab | `Client.VerifyInitCreds` obtains a service ticket and decrypts it with an explicit or keytab-selected service key, matching MIT `krb5_verify_init_creds` | Live `TestGoClientVerifyInitCreds` gate passes with `/usr/bin/kinit`-compatible MIT realm fixtures |
 
 PA-ENCRYPTED-CHALLENGE support is FAST-only. Authentication indicators are
 selected per successful preauthentication mechanism through the KDC's

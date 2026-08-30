@@ -22,7 +22,12 @@ deployments; upstream MIT krb5 does not apply this gate.
   `kinit` equivalent), MIT-compatible PA-SPAKE (Edwards25519, P-256, P-384,
   and P-521), and
   RFC 6113 **FAST** armored exchanges, including the RFC 6113
-  PA-ENCRYPTED-CHALLENGE password factor.
+  PA-ENCRYPTED-CHALLENGE password factor. `Client.VerifyInitCreds` can verify
+  newly acquired credentials against a service keytab by obtaining a service
+  ticket and decrypting it with the keytab key, matching MIT's
+  `krb5_verify_init_creds` behavior. Explicit service principals or the
+  keytab's distinct principals are supported; missing keytabs are
+  non-fatal by default and can be required with `NoFail`.
 - **TGS exchange** for service tickets, with RFC 6806 **referral chasing**
   and canonicalization (loop detection, hop cap).
 - **RFC 3244 password changes** against MIT `kadmind`, using AP-REQ and

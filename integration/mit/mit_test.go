@@ -442,6 +442,39 @@ func TestGoClientAPExchange(t *testing.T) {
 	}
 }
 
+func TestGoClientVerifyInitCreds(t *testing.T) {
+	realm := testenv.Start(t)
+	configData, err := os.ReadFile(realm.Config)
+	if err != nil {
+		t.Fatalf("read realm config: %v", err)
+	}
+	cfg, err := config.Parse(configData)
+	if err != nil {
+		t.Fatalf("parse realm config: %v", err)
+	}
+	clientPrincipal := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal, Components: []string{"alice"},
+	}
+	kclient := &client.Client{Config: cfg}
+	tgt, err := kclient.ASExchange(context.Background(), clientPrincipal, "alice-password")
+	if err != nil {
+		t.Fatalf("Go AS exchange: %v", err)
+	}
+	keytabFile, err := os.Open(realm.Keytab)
+	if err != nil {
+		t.Fatalf("open MIT keytab: %v", err)
+	}
+	defer keytabFile.Close()
+	kt, err := keytab.Read(keytabFile)
+	if err != nil {
+		t.Fatalf("read MIT keytab: %v", err)
+	}
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, kt,
+		client.VerifyInitCredsOptions{NoFailSet: true, NoFail: true}); err != nil {
+		t.Fatalf("VerifyInitCreds: %v", err)
+	}
+}
+
 func TestGoGSSAPIExchange(t *testing.T) {
 	realm := testenv.Start(t)
 	configData, err := os.ReadFile(realm.Config)
