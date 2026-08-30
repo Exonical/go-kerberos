@@ -21,14 +21,16 @@ const (
 )
 
 type keyringHandle struct {
-	name   string
-	ring   int
-	anchor int
+	name       string
+	ring       int
+	anchor     int
+	collection int
 }
 
 func resolveKeyring(residual string) (*Handle, error) {
-	parts := strings.SplitN(residual, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	parts := strings.Split(residual, ":")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" ||
+		parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
 		return nil, fmt.Errorf("ccache: invalid KEYRING residual %q", residual)
 	}
 	anchorName := strings.ToLower(parts[0])
@@ -37,11 +39,14 @@ func resolveKeyring(residual string) (*Handle, error) {
 		return nil, err
 	}
 	collectionName := parts[1]
-	cacheName := parts[1]
+	cacheName := ""
+	if len(parts) == 3 {
+		cacheName = parts[2]
+	}
 	if anchorName == "persistent" {
-		uid, parseErr := strconv.ParseInt(parts[1], 10, 32)
+		uid, parseErr := strconv.ParseInt(collectionName, 10, 32)
 		if parseErr != nil || uid < 0 {
-			return nil, fmt.Errorf("ccache: invalid KEYRING persistent UID %q", parts[1])
+			return nil, fmt.Errorf("ccache: invalid KEYRING persistent UID %q", collectionName)
 		}
 		anchor, err = persistentKeyring(int(uid))
 		if err != nil {
@@ -55,22 +60,49 @@ func resolveKeyring(residual string) (*Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ccache: resolve KEYRING collection: %w", err)
 	}
+	if cacheName == "" {
+		cacheName, err = primaryName(collection, parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("ccache: resolve KEYRING primary: %w", err)
+		}
+	}
 	cache, err := findOrCreateKeyring(collection, cacheName)
 	if err != nil {
 		return nil, fmt.Errorf("ccache: resolve KEYRING cache: %w", err)
 	}
-	// MIT stores the primary subsidiary name in the collection keyring.
-	primary := make([]byte, 8+len(cacheName))
-	binary.BigEndian.PutUint32(primary, 1)
-	binary.BigEndian.PutUint32(primary[4:], uint32(len(cacheName)))
-	copy(primary[8:], cacheName)
-	if err := putKey(collection, "user", "krb_ccache:primary", primary); err != nil {
-		return nil, fmt.Errorf("ccache: initialize KEYRING primary: %w", err)
-	}
 	return &Handle{
 		typ: TypeKeyring, name: "KEYRING:" + residual,
-		keyring: &keyringHandle{name: cacheName, ring: cache, anchor: anchor},
+		keyring: &keyringHandle{name: cacheName, ring: cache, anchor: anchor, collection: collection},
 	}, nil
+}
+
+func primaryName(collection int, fallback string) (string, error) {
+	id, err := unix.KeyctlSearch(collection, "user", "krb_ccache:primary", 0)
+	if errors.Is(err, unix.ENOKEY) {
+		payload := make([]byte, 8+len(fallback))
+		binary.BigEndian.PutUint32(payload, 1)
+		binary.BigEndian.PutUint32(payload[4:], uint32(len(fallback)))
+		copy(payload[8:], fallback)
+		if err := putKey(collection, "user", "krb_ccache:primary", payload); err != nil {
+			return "", err
+		}
+		return fallback, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	payload, err := keyringRead(id)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) < 8 || binary.BigEndian.Uint32(payload[:4]) != 1 {
+		return "", errors.New("ccache: invalid KEYRING primary metadata")
+	}
+	length := binary.BigEndian.Uint32(payload[4:8])
+	if uint64(length) > uint64(len(payload)-8) {
+		return "", errors.New("ccache: truncated KEYRING primary metadata")
+	}
+	return string(payload[8 : 8+length]), nil
 }
 
 func keyringAnchor(kind string) (int, error) {
@@ -255,6 +287,16 @@ func (h *keyringHandle) destroy() error {
 	if h == nil || h.ring == 0 {
 		return errors.New("ccache: invalid KEYRING handle")
 	}
-	_, err := unix.KeyctlInt(keyctlClear, h.ring, 0, 0, 0)
-	return err
+	if _, err := unix.KeyctlInt(keyctlClear, h.ring, 0, 0, 0); err != nil {
+		return err
+	}
+	if h.collection != 0 {
+		if _, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, h.ring, h.collection, 0, 0); err != nil {
+			return err
+		}
+	}
+	h.ring = 0
+	h.collection = 0
+	h.anchor = 0
+	return nil
 }
