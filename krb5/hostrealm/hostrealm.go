@@ -290,6 +290,15 @@ func fallbackRealm(ctx context.Context, cfg *config.Config, host string, opts Op
 	realmExists := opts.RealmExists
 	if realmExists == nil {
 		realmExists = func(ctx context.Context, realm string) bool {
+			for configuredRealm, values := range cfg.Realms {
+				if strings.EqualFold(configuredRealm, realm) {
+					for _, value := range values {
+						if strings.TrimSpace(value) != "" {
+							return true
+						}
+					}
+				}
+			}
 			resolver, ok := opts.Resolver.(discovery.Resolver)
 			if !ok {
 				resolver = discovery.NetResolver{}

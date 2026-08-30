@@ -1897,6 +1897,9 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		if !exists || len(record.Name.Components) == 0 {
 			return s.tgsErrorResponse(armor, kdcErrCPrincipal, request.ReqBody.SName)
 		}
+		if code := s.validateS4UClient(record); code != 0 {
+			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+		}
 		issuedClient = &user
 		if s.CheckAllowedToDelegate == nil {
 			ticketPart.Flags &^= types.TicketForwardable
@@ -1956,6 +1959,13 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 			}
 		}
 		client := principalFromProtocol(evidencePart.CName, evidencePart.CRealm)
+		if clientRecord, found, lookupErr := s.DB.Lookup(client); lookupErr != nil {
+			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+		} else if found {
+			if code := s.validateS4UClient(clientRecord); code != 0 {
+				return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+			}
+		}
 		if err := s.CheckAllowedToDelegate(&client, requester, &serviceName); err != nil {
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 		}
@@ -2216,7 +2226,9 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if issuedClient != nil {
 		ticketClient = *issuedClient
 	}
-	if record, ok, err := s.DB.Lookup(ticketClient); err == nil && ok {
+	if record, ok, err := s.DB.Lookup(ticketClient); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	} else if ok {
 		clientRecord = &record
 	}
 	authTime := ticketPart.AuthTime
@@ -2741,10 +2753,24 @@ func (s *Server) passwordExpiredForService(client, service kdb.PrincipalRecord) 
 	return s.passwordExpired(client) && service.Flags&kdb.PWChangeService == 0
 }
 
+func (s *Server) validateS4UClient(client kdb.PrincipalRecord) int32 {
+	now := s.now()
+	if !client.Expiration.IsZero() && now.After(client.Expiration) {
+		return kdcErrNameExpired
+	}
+	if client.Flags&kdb.DisallowAllTickets != 0 {
+		return kdcErrClientRevoked
+	}
+	return 0
+}
+
 func (s *Server) validateASAccount(client, service kdb.PrincipalRecord, options types.KDCOptions) int32 {
 	now := s.now()
 	if !client.Expiration.IsZero() && now.After(client.Expiration) {
 		return kdcErrNameExpired
+	}
+	if s.passwordExpiredForService(client, service) {
+		return kdcErrKeyExpired
 	}
 	if !service.Expiration.IsZero() && now.After(service.Expiration) {
 		return kdcErrServiceExpired

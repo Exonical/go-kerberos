@@ -175,6 +175,21 @@ func TestHostRealmRealmTryDomainsUsesDefaultLocator(t *testing.T) {
 	}
 }
 
+func TestHostRealmRealmTryDomainsUsesConfiguredKDC(t *testing.T) {
+	cfg := &config.Config{
+		DNSLookupRealm: true, RealmTryDomainsSet: true, RealmTryDomains: 0,
+		Realms: map[string][]string{
+			"a.b.example.test": {"kdc.example.test:88"},
+		},
+	}
+	realm, authoritative, err := HostRealm(context.Background(), cfg,
+		"a.b.example.test", Options{Resolver: &hostRealmResolver{}})
+	if err != nil || authoritative || realm != "A.B.EXAMPLE.TEST" {
+		t.Fatalf("configured realm result = %q, authoritative=%v, err=%v",
+			realm, authoritative, err)
+	}
+}
+
 func TestCanonicalizePrincipalPreservesTrailer(t *testing.T) {
 	cfg := &config.Config{DNSCanonicalizeHostname: "false", QualifyShortname: "example.test", QualifyShortnameSet: true}
 	p := principal.Principal{NameType: principal.NTSrvHst, Components: []string{"HTTP", "web:8443"}}

@@ -31,6 +31,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
+var errUnexpectedReferral = errors.New("unexpected referral TGT")
+
 // Client performs Kerberos client exchanges.
 type Client struct {
 	Config *config.Config
@@ -276,14 +278,11 @@ func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principa
 	}
 	for index := range candidates {
 		if candidates[index].Realm == "" {
-			realm, _, resolveErr := c.resolveServiceRealm(ctx, candidates[index])
-			if resolveErr != nil {
-				return nil, resolveErr
-			}
-			if realm == "" {
-				realm = clientPrincipal.Realm
-			}
-			candidates[index].Realm = realm
+			// AS requests are always sent to the client's realm, and the
+			// request body's service realm follows that realm.  Host-realm
+			// mappings still determine the candidate hostname, but cannot
+			// redirect an initial-credentials request to another KDC realm.
+			candidates[index].Realm = clientPrincipal.Realm
 		}
 	}
 	var last error
@@ -850,10 +849,10 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 			return result, nil
 		}
 		last = err
-		if service.Realm == "" && isKRBError(err) {
+		if service.Realm == "" && (isKRBError(err) || errors.Is(err, errUnexpectedReferral)) {
 			fallback, authoritative, fallbackErr := c.resolveServiceRealm(ctx, candidate)
 			if fallbackErr != nil {
-				return nil, fallbackErr
+				return nil, errors.Join(last, fallbackErr)
 			}
 			if fallback != "" {
 				fallbackCandidate := candidate
@@ -863,7 +862,7 @@ func (c *Client) TGSExchangeU2U(ctx context.Context, tgt *Credentials, secondTic
 				if fallbackErr == nil {
 					return result, nil
 				}
-				last = fallbackErr
+				last = errors.Join(last, fallbackErr)
 			}
 		}
 		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
@@ -934,10 +933,13 @@ func (c *Client) tgsExchangeU2UOnceWithMode(ctx context.Context, tgt *Credential
 	if kerberosError, ok := decodeKRBError(response); ok {
 		return nil, kerberosError
 	}
-	result, _, err := c.decodeTGSRepForExchange(response, tgt.Client, service, service,
+	result, referralResult, err := c.decodeTGSRepForExchange(response, tgt.Client, service, service,
 		serviceRealmKnown, nonce, tgt.Key.KeyType, tgt.Key.KeyValue, now)
 	if err != nil {
 		return nil, err
+	}
+	if referralResult {
+		return nil, errUnexpectedReferral
 	}
 	result.IsSKey = true
 	result.SecondTicket = append([]byte(nil), secondTicket...)
@@ -1019,10 +1021,10 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 			return result, nil
 		}
 		last = err
-		if service.Realm == "" && isKRBError(err) {
+		if service.Realm == "" && (isKRBError(err) || errors.Is(err, errUnexpectedReferral)) {
 			fallback, authoritative, fallbackErr := c.resolveServiceRealm(ctx, candidate)
 			if fallbackErr != nil {
-				return nil, fallbackErr
+				return nil, errors.Join(last, fallbackErr)
 			}
 			if fallback != "" {
 				fallbackCandidate := candidate
@@ -1032,7 +1034,7 @@ func (c *Client) TGSExchangeFAST(ctx context.Context, tgt *Credentials, service 
 				if fallbackErr == nil {
 					return result, nil
 				}
-				last = fallbackErr
+				last = errors.Join(last, fallbackErr)
 			}
 		}
 		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
@@ -1091,8 +1093,15 @@ func (c *Client) tgsExchangeFASTOnceWithMode(ctx context.Context, tgt *Credentia
 	if err != nil {
 		return nil, err
 	}
-	return c.decodeFASTTGSRep(response, tgt.Client, service, service, serviceRealmKnown, nonce,
-		replyKey, armor, now)
+	result, referralResult, err := c.decodeFASTTGSRep(response, tgt.Client, service, service,
+		serviceRealmKnown, nonce, replyKey, armor, now)
+	if err != nil {
+		return nil, err
+	}
+	if referralResult {
+		return nil, errUnexpectedReferral
+	}
+	return result, nil
 }
 
 func (c *Client) newTGSReq(tgt *Credentials, service principal.Principal, realm string, now time.Time, referral bool) (protocol.TGSReq, uint32, error) {
@@ -1214,33 +1223,33 @@ func (c *Client) decodeTGSRepForExchange(data []byte, clientPrincipal, service, 
 		serviceRealmKnown, nonce, keyType, key, 8, now)
 }
 
-func (c *Client) decodeFASTTGSRep(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, replyKey protocol.EncryptionKey, armor *fast.Armor, now time.Time) (*Credentials, error) {
+func (c *Client) decodeFASTTGSRep(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, replyKey protocol.EncryptionKey, armor *fast.Armor, now time.Time) (*Credentials, bool, error) {
 	var reply protocol.TGSRep
 	if err := asn1.Unmarshal(data, &reply); err != nil {
 		if kerberosError, ok := decodeKRBError(data); ok {
-			return nil, kerberosError
+			return nil, false, kerberosError
 		}
-		return nil, fmt.Errorf("FAST TGS exchange TGS-REP: %w", err)
+		return nil, false, fmt.Errorf("FAST TGS exchange TGS-REP: %w", err)
 	}
 	ticket, err := asn1.Marshal(reply.Ticket)
 	if err != nil {
-		return nil, fmt.Errorf("FAST TGS exchange ticket: %w", err)
+		return nil, false, fmt.Errorf("FAST TGS exchange ticket: %w", err)
 	}
 	fastReply, err := armor.UnwrapReply(reply.PAData, ticket, nonce)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	replyKey, err = armor.ReplyKey(replyKey, fastReply.StrengthenKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	rewrapped, err := asn1.Marshal(reply)
 	if err != nil {
-		return nil, fmt.Errorf("FAST TGS exchange reply: %w", err)
+		return nil, false, fmt.Errorf("FAST TGS exchange reply: %w", err)
 	}
-	result, _, err := c.decodeTGSRepForExchangeWithUsage(rewrapped, clientPrincipal, service,
+	result, referral, err := c.decodeTGSRepForExchangeWithUsage(rewrapped, clientPrincipal, service,
 		requestedService, serviceRealmKnown, nonce, replyKey.KeyType, replyKey.KeyValue, 9, now)
-	return result, err
+	return result, referral, err
 }
 
 func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, service, requestedService principal.Principal, serviceRealmKnown bool, nonce uint32, keyType int32, key []byte, usage uint32, now time.Time) (*Credentials, bool, error) {

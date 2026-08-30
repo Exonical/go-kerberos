@@ -108,6 +108,49 @@ func TestASExchangePreauthRetry(t *testing.T) {
 	}
 }
 
+func TestASExchangeServiceKeepsClientRealmForRealmlessService(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	clientPrincipal := principal.Principal{
+		Realm: testRealm, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	service := principal.Principal{
+		NameType:   principal.NTSrvHst,
+		Components: []string{"host", "service.foreign.test"},
+	}
+	var calls int
+	client := &Client{
+		Now: func() time.Time { return now },
+		Config: &config.Config{
+			DefaultRealm: testRealm, DNSCanonicalizeHostname: "false",
+			DomainRealm: map[string]string{".foreign.test": "FOREIGN.REALM"},
+		},
+		Exchange: func(_ context.Context, realm string, payload []byte) ([]byte, error) {
+			calls++
+			if realm != testRealm {
+				t.Fatalf("AS transport realm = %q, want %q", realm, testRealm)
+			}
+			var request protocol.ASReq
+			if err := asn1.Unmarshal(payload, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ReqBody.Realm != testRealm {
+				t.Fatalf("AS request realm = %q, want %q", request.ReqBody.Realm, testRealm)
+			}
+			return mustMarshal(t, protocol.KRBError{
+				PVNO: 5, MsgType: 30, ErrorCode: int32(krberrors.KDCErrSPrincipalUnknown),
+				STime: kerberosTime(now), Susec: 0,
+				Realm: testRealm, SName: *request.ReqBody.SName,
+			}), nil
+		},
+	}
+	_, err := client.ASExchangeService(context.Background(), clientPrincipal,
+		"password", service)
+	if err == nil || !isKRBError(err) || calls != 1 {
+		t.Fatalf("AS service result = %v, calls=%d", err, calls)
+	}
+}
+
 func TestASExchangeFASTEchoesKDCookie(t *testing.T) {
 	for _, encryptedChallenge := range []bool{false, true} {
 		name := "encrypted-timestamp"
@@ -1017,6 +1060,68 @@ func TestTGSExchangeU2UAddsSecondTicketAndMarksCredentials(t *testing.T) {
 	}
 }
 
+func TestTGSExchangeU2UFollowsReferralBeforeHostRealmFallback(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x42}, profile.KeySize())
+	tgt := &Credentials{
+		Client: principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"bob"}},
+		Server: principal.Principal{Realm: testRealm, NameType: principal.NTSrvInstance, Components: []string{"krbtgt", testRealm}},
+		Key:    protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: key},
+		Ticket: mustMarshal(t, protocol.Ticket{
+			TktVNO: 5, Realm: testRealm,
+			SName:   protocol.PrincipalName{NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", testRealm}},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{1}},
+		}),
+	}
+	secondTicket := tgt.Ticket
+	service := principal.Principal{
+		NameType:   principal.NTSrvHst,
+		Components: []string{"host", "service.example.test"},
+	}
+	fallback := "FALLBACK.REALM"
+	var requests []string
+	client := &Client{
+		Now: func() time.Time { return now },
+		Config: &config.Config{
+			DefaultRealm: testRealm, DNSCanonicalizeHostname: "false",
+			DomainRealm: map[string]string{".example.test": fallback},
+		},
+		Exchange: func(_ context.Context, realm string, payload []byte) ([]byte, error) {
+			var request protocol.TGSReq
+			if err := asn1.Unmarshal(payload, &request); err != nil {
+				t.Fatal(err)
+			}
+			requests = append(requests, realm)
+			if len(requests) == 1 {
+				return makeTGSReplyForClient(t, profile, key, request.ReqBody.Nonce,
+					now, tgt.Client, testRealm, principal.Principal{
+						Realm: testRealm, NameType: principal.NTSrvInstance,
+						Components: []string{"krbtgt", fallback},
+					}), nil
+			}
+			return makeTGSReplyForClient(t, profile, key, request.ReqBody.Nonce,
+				now, tgt.Client, fallback, serviceWithRealm(service, fallback)), nil
+		},
+	}
+	result, err := client.TGSExchangeU2U(context.Background(), tgt, secondTicket, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantServer := serviceWithRealm(service, fallback)
+	if result.Server.Realm != wantServer.Realm ||
+		result.Server.NameType != wantServer.NameType ||
+		!reflect.DeepEqual(result.Server.Components, wantServer.Components) {
+		t.Fatalf("U2U server = %v, want fallback service", result.Server)
+	}
+	if !reflect.DeepEqual(requests, []string{testRealm, fallback}) {
+		t.Fatalf("U2U request realms = %v", requests)
+	}
+}
+
 func makeTGSReply(t *testing.T, profile crypto.EType, decryptKey []byte, nonce uint32, now time.Time, sessionKey []byte, realm string, server principal.Principal) []byte {
 	t.Helper()
 	partDER := mustMarshal(t, protocol.EncTGSRepPart{
@@ -1041,6 +1146,34 @@ func makeTGSReply(t *testing.T, profile crypto.EType, decryptKey []byte, nonce u
 		PVNO: 5, MsgType: 13, CRealm: "HOME",
 		CName:  protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
 		Ticket: ticket, EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
+	})
+}
+
+func makeTGSReplyForClient(t *testing.T, profile crypto.EType, decryptKey []byte,
+	nonce uint32, now time.Time, client principal.Principal, realm string,
+	server principal.Principal) []byte {
+	t.Helper()
+	partDER := mustMarshal(t, protocol.EncTGSRepPart{
+		Key:      protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: decryptKey},
+		Nonce:    nonce,
+		AuthTime: kerberosTime(now),
+		EndTime:  kerberosTime(now.Add(time.Hour)),
+		SRealm:   server.Realm,
+		SName:    protocol.PrincipalName{NameType: int32(server.NameType), NameString: server.Components},
+	})
+	cipher, err := profile.Encrypt(decryptKey, 8, partDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mustMarshal(t, protocol.TGSRep{
+		PVNO: 5, MsgType: 13, CRealm: client.Realm,
+		CName: protocol.PrincipalName{NameType: int32(client.NameType), NameString: client.Components},
+		Ticket: protocol.Ticket{
+			TktVNO: 5, Realm: realm,
+			SName:   protocol.PrincipalName{NameType: int32(server.NameType), NameString: server.Components},
+			EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: []byte{2}},
+		},
+		EncPart: protocol.EncryptedData{EType: crypto.EnctypeAES256SHA1, Cipher: cipher},
 	})
 }
 
