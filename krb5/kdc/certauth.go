@@ -2,14 +2,24 @@ package kdc
 
 import (
 	"crypto/x509"
+	"crypto/x509/pkix"
+	stdasn1 "encoding/asn1"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+)
+
+const (
+	certAuthClientNameMismatch     int32 = 75
+	certAuthCertificateMismatch    int32 = 66
+	certAuthInconsistentKeyPurpose int32 = 77
 )
 
 // CertAuthDecision is the result of one PKINIT certificate authorization
@@ -66,16 +76,16 @@ func (pkinitSANModule) Authorize(cert *x509.Certificate, client principal.Princi
 		return CertAuthPass, nil, nil
 	}
 	if err != nil {
-		return CertAuthPass, nil, certAuthError(kdcErrClientNotTrusted,
+		return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
 			"pkinit: malformed client subject alternative name")
 	}
 	if realm != client.Realm || len(components) != len(client.Components) {
-		return CertAuthPass, nil, certAuthError(kdcErrClientNotTrusted,
+		return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
 			"pkinit: client certificate SAN principal mismatch")
 	}
 	for i := range components {
 		if components[i] != client.Components[i] {
-			return CertAuthPass, nil, certAuthError(kdcErrClientNotTrusted,
+			return CertAuthPass, nil, certAuthError(certAuthClientNameMismatch,
 				"pkinit: client certificate SAN principal mismatch")
 		}
 	}
@@ -87,7 +97,7 @@ type pkinitEKUModule struct{}
 func (pkinitEKUModule) Authorize(cert *x509.Certificate, client principal.Principal,
 	entry *kdb.PrincipalRecord) (CertAuthDecision, []string, error) {
 	if !pkinit.HasClientAuthEKU(cert) {
-		return CertAuthPass, nil, certAuthError(77,
+		return CertAuthPass, nil, certAuthError(certAuthInconsistentKeyPurpose,
 			"pkinit: client certificate lacks id-pkinit-KPClientAuth EKU")
 	}
 	return CertAuthPass, nil, nil
@@ -109,15 +119,15 @@ func (dbMatchModule) Authorize(cert *x509.Certificate, client principal.Principa
 		return CertAuthPass, nil, err
 	}
 	if !matched {
-		return CertAuthPass, nil, certAuthError(89,
+		return CertAuthPass, nil, certAuthError(certAuthCertificateMismatch,
 			"pkinit: client certificate does not match pkinit_cert_match")
 	}
 	return CertAuthAccept, nil, nil
 }
 
 // MatchCertificate evaluates MIT's pkinit_cert_match expression syntax for a
-// single certificate. Subject and issuer use the RFC2253-style rendering
-// returned by x509.Name.String, matching MIT's X509_NAME_print_ex output.
+// single certificate. Subject and issuer use the certificate's RDN order and
+// comma/plus separators, matching X509_NAME_print_ex(..., XN_FLAG_SEP_COMMA_PLUS).
 func MatchCertificate(cert *x509.Certificate, rule string) (bool, error) {
 	if cert == nil {
 		return false, errors.New("pkinit: missing certificate")
@@ -173,9 +183,11 @@ func MatchCertificate(cert *x509.Certificate, rule string) (bool, error) {
 	for i, c := range components {
 		switch c.kind {
 		case "<SUBJECT>":
-			matches[i], matchErr = matchRegexp(c.value, cert.Subject.String())
+			matches[i], matchErr = matchRegexp(c.value, certificateName(
+				cert.Subject, cert.RawSubject))
 		case "<ISSUER>":
-			matches[i], matchErr = matchRegexp(c.value, cert.Issuer.String())
+			matches[i], matchErr = matchRegexp(c.value, certificateName(
+				cert.Issuer, cert.RawIssuer))
 		case "<SAN>":
 			matches[i], matchErr = matchSAN(cert, c.value)
 		case "<EKU>":
@@ -222,36 +234,175 @@ func matchRegexp(pattern, value string) (bool, error) {
 }
 
 func matchSAN(cert *x509.Certificate, pattern string) (bool, error) {
+	regexpMatcher, err := regexp.Compile(pattern)
+	if err != nil {
+		return false, err
+	}
 	realm, components, err := pkinit.ClientSAN(cert)
 	if err == nil {
 		p := principal.Principal{Realm: realm, Components: components}.String()
-		matched, regexpErr := matchRegexp(pattern, p)
-		if regexpErr != nil {
-			return false, regexpErr
-		}
-		if matched {
+		if regexpMatcher.MatchString(p) {
 			return true, nil
 		}
 	}
-	for _, value := range cert.EmailAddresses {
-		matched, regexpErr := matchRegexp(pattern, value)
-		if regexpErr != nil {
-			return false, regexpErr
-		}
-		if matched {
-			return true, nil
-		}
-	}
-	for _, value := range cert.DNSNames {
-		matched, regexpErr := matchRegexp(pattern, value)
-		if regexpErr != nil {
-			return false, regexpErr
-		}
-		if matched {
+	for _, value := range certificateUPNSANs(cert) {
+		if regexpMatcher.MatchString(value) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+var certificateAttributeNames = map[string]string{
+	"2.5.4.3":                    "CN",
+	"2.5.4.4":                    "SN",
+	"2.5.4.5":                    "serialNumber",
+	"2.5.4.6":                    "C",
+	"2.5.4.7":                    "L",
+	"2.5.4.8":                    "ST",
+	"2.5.4.9":                    "street",
+	"2.5.4.10":                   "O",
+	"2.5.4.11":                   "OU",
+	"2.5.4.12":                   "title",
+	"1.2.840.113549.1.9.1":       "emailAddress",
+	"0.9.2342.19200300.100.1.25": "DC",
+}
+
+func certificateName(name pkix.Name, raw []byte) string {
+	if len(raw) == 0 {
+		return name.String()
+	}
+	var sequence pkix.RDNSequence
+	if _, err := stdasn1.Unmarshal(raw, &sequence); err != nil {
+		return name.String()
+	}
+	var result strings.Builder
+	for i, set := range sequence {
+		if i > 0 {
+			result.WriteByte(',')
+		}
+		for j, attribute := range set {
+			if j > 0 {
+				result.WriteByte('+')
+			}
+			if label, ok := certificateAttributeNames[attribute.Type.String()]; ok {
+				result.WriteString(label)
+			} else {
+				result.WriteString(attribute.Type.String())
+			}
+			result.WriteByte('=')
+			result.WriteString(escapeCertificateNameValue(attribute.Value))
+		}
+	}
+	return result.String()
+}
+
+func escapeCertificateNameValue(value any) string {
+	text, ok := value.(string)
+	if !ok {
+		if raw, ok := value.(stdasn1.RawValue); ok {
+			text = string(raw.Bytes)
+		} else {
+			text = fmt.Sprint(value)
+		}
+	}
+	var result strings.Builder
+	for i, r := range text {
+		if (i == 0 && (r == ' ' || r == '#')) ||
+			(i == len(text)-1 && r == ' ') ||
+			strings.ContainsRune(",+\\=", r) {
+			result.WriteByte('\\')
+		}
+		if unicode.IsControl(r) {
+			result.WriteString(fmt.Sprintf("\\%02X", r))
+		} else {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
+}
+
+const microsoftUPNSANOID = "1.3.6.1.4.1.311.20.2.3"
+
+func certificateUPNSANs(cert *x509.Certificate) []string {
+	var result []string
+	for _, extension := range cert.Extensions {
+		if !extension.Id.Equal([]int{2, 5, 29, 17}) {
+			continue
+		}
+		sequence, err := derRawFields(extension.Value)
+		if err != nil || len(sequence) != 1 ||
+			sequence[0].Class != 0 || sequence[0].Tag != 16 {
+			continue
+		}
+		names, err := derRawFields(sequence[0].Bytes)
+		if err != nil {
+			continue
+		}
+		for _, name := range names {
+			if name.Class != 2 || name.Tag != 0 {
+				continue
+			}
+			otherName, err := derRawFields(name.Bytes)
+			if err != nil || len(otherName) != 2 {
+				continue
+			}
+			var oid stdasn1.ObjectIdentifier
+			if _, err := stdasn1.Unmarshal(otherName[0].FullBytes, &oid); err != nil ||
+				oid.String() != microsoftUPNSANOID {
+				continue
+			}
+			if otherName[1].Class != 2 || otherName[1].Tag != 0 {
+				continue
+			}
+			value, err := derRawFields(otherName[1].Bytes)
+			if err != nil || len(value) != 1 {
+				continue
+			}
+			if text, ok := derString(value[0]); ok {
+				if strings.IndexByte(text, 0) >= 0 {
+					continue
+				}
+				result = append(result, text)
+			}
+		}
+	}
+	return result
+}
+
+func derRawFields(data []byte) ([]stdasn1.RawValue, error) {
+	var fields []stdasn1.RawValue
+	for len(data) > 0 {
+		var field stdasn1.RawValue
+		rest, err := stdasn1.Unmarshal(data, &field)
+		if err != nil || len(rest) == len(data) {
+			if err == nil {
+				err = errors.New("pkinit: malformed certificate SAN")
+			}
+			return nil, err
+		}
+		fields = append(fields, field)
+		data = rest
+	}
+	return fields, nil
+}
+
+func derString(value stdasn1.RawValue) (string, bool) {
+	switch value.Tag {
+	case 12, 19, 20, 22:
+		return string(value.Bytes), true
+	case 30:
+		if len(value.Bytes)%2 != 0 {
+			return "", false
+		}
+		units := make([]uint16, len(value.Bytes)/2)
+		for i := range units {
+			units[i] = uint16(value.Bytes[2*i])<<8 | uint16(value.Bytes[2*i+1])
+		}
+		return string(utf16.Decode(units)), true
+	default:
+		return "", false
+	}
 }
 
 var ekuMatchBits = map[string]uint32{
@@ -345,7 +496,7 @@ func authorizeCertificateModules(modules []CertAuthModule, cert *x509.Certificat
 		}
 	}
 	if !accepted {
-		return false, hwauth, indicators, certAuthError(62,
+		return false, hwauth, indicators, certAuthError(certAuthClientNameMismatch,
 			"pkinit: no certificate authorization module accepted the certificate")
 	}
 	return accepted, hwauth, indicators, nil
