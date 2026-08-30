@@ -212,6 +212,29 @@ func TestParseRejectsOverlapAndDuplicateTypes(t *testing.T) {
 	}
 }
 
+func TestCVE202242898RejectsOverflowingBufferHeaders(t *testing.T) {
+	countOverflow := make([]byte, headerLen)
+	binary.LittleEndian.PutUint32(countOverflow, ^uint32(0))
+	if _, err := Parse(countOverflow); err == nil {
+		t.Fatal("PAC accepted an overflowing buffer count")
+	}
+
+	sizeOverflow := make([]byte, headerLen+bufferLen)
+	binary.LittleEndian.PutUint32(sizeOverflow, 1)
+	binary.LittleEndian.PutUint32(sizeOverflow[headerLen+4:], ^uint32(0))
+	binary.LittleEndian.PutUint64(sizeOverflow[headerLen+8:], uint64(headerLen+bufferLen))
+	if _, err := Parse(sizeOverflow); err == nil {
+		t.Fatal("PAC accepted an overflowing buffer size")
+	}
+
+	offsetOverflow := make([]byte, headerLen+bufferLen)
+	binary.LittleEndian.PutUint32(offsetOverflow, 1)
+	binary.LittleEndian.PutUint64(offsetOverflow[headerLen+8:], ^uint64(0))
+	if _, err := Parse(offsetOverflow); err == nil {
+		t.Fatal("PAC accepted an overflowing buffer offset")
+	}
+}
+
 func TestAuthorizationDataRoundTrip(t *testing.T) {
 	raw := (&PAC{Buffers: []Buffer{{Type: LogonInfoBuffer, Data: []byte{1, 2, 3}}}}).mustMarshal(t)
 	ad, err := AuthorizationData(raw)
