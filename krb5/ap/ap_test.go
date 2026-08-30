@@ -88,6 +88,25 @@ func TestVerifyAPReqExposesVerifiedCAMMACElements(t *testing.T) {
 	}
 }
 
+func TestVerifyAPReqRejectsMalformedCAMMAC(t *testing.T) {
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	creds, kt := apFixture(t, now, now.Add(time.Hour))
+	ticket := decodeTicket(t, creds.Ticket)
+	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part.AuthorizationData = protocol.AuthorizationData{{
+		ADType: protocol.ADIfRelevant, ADData: []byte{0x30, 0x01, 0x00},
+	}}
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	creds.Ticket = mustMarshalAP(t, ticket)
+	_, der, err := BuildAPReq(creds, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); err == nil {
+		t.Fatal("VerifyAPReq accepted malformed CAMMAC")
+	}
+}
+
 func TestVerifyAPReqWithSessionKeyRequiresOption(t *testing.T) {
 	now := time.Date(2025, 1, 3, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
@@ -383,14 +402,14 @@ func apFixture(t *testing.T, start, end time.Time) (*client.Credentials, *keytab
 		EncPart: protocol.EncryptedData{EType: apEtype, KVNO: &kvno, Cipher: ticketCipher},
 	}
 	return &client.Credentials{
-		Client: clientPrincipal, Server: service,
-		Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
-		Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
-		StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
-		Ticket: mustMarshalAP(t, ticket),
-	}, &keytab.Keytab{Entries: []keytab.Entry{{
-		Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
-	}}}
+			Client: clientPrincipal, Server: service,
+			Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
+			Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
+			StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
+			Ticket: mustMarshalAP(t, ticket),
+		}, &keytab.Keytab{Entries: []keytab.Entry{{
+			Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
+		}}}
 }
 
 func encryptTicket(t *testing.T, key []byte, part protocol.EncTicketPart) []byte {

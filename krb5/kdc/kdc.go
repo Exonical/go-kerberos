@@ -1164,7 +1164,8 @@ func stripCAMMAC(data protocol.AuthorizationData) (protocol.AuthorizationData, e
 	return out, nil
 }
 
-func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.Key) error {
+func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.Key,
+	verifiedElements protocol.AuthorizationData) error {
 	var elements protocol.AuthorizationData
 	var err error
 	if len(s.AuthIndicators) > 0 {
@@ -1179,13 +1180,16 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 		elements = protocol.AuthorizationData{{
 			ADType: protocol.ADAuthIndicator, ADData: encodedIndicators,
 		}}
-	} else if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
+	} else if verifiedElements != nil {
+		elements = verifiedElements
+	} else {
 		elements, err = cammac.ProtectedElements(ticketPart.AuthorizationData)
-		if err != nil {
+		if err != nil && !stderrors.Is(err, cammac.ErrNotFound) {
 			return err
 		}
-	} else {
-		return nil
+		if stderrors.Is(err, cammac.ErrNotFound) {
+			return nil
+		}
 	}
 	kdcKey, ok := s.freshnessKey([]int32{serviceKey.Enctype})
 	if !ok {
@@ -1271,11 +1275,11 @@ func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Princip
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
-	if err := s.issuePACWithOptions(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false,
-		replyEncryptionKey, nil, nil); err != nil {
+	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
-	if err := s.issueCAMMAC(&ticketPart, serviceKey); err != nil {
+	if err := s.issuePACWithOptions(&ticketPart, clientName, serviceName, serviceKey, serviceKey, false, false,
+		replyEncryptionKey, nil, nil); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketPlain := marshalDER(ticketPart)
@@ -1580,6 +1584,11 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		}
 	}
 	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
+	if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
+		protocol.EncryptionKey{KeyType: ticketKey.Enctype, KeyValue: ticketKey.Key}); err != nil &&
+		!stderrors.Is(err, cammac.ErrNotFound) {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
 	options := request.ReqBody.KDCOptions
 	if options&types.KDCEncTktInSkey != 0 {
 		if len(request.ReqBody.AdditionalTickets) != 1 ||
@@ -1731,6 +1740,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	var delegationEvidence *principal.Principal
 	var pacVerifyKey *kdb.Key
 	var u2uTicketKey *kdb.Key
+	var verifiedCAMMACElements protocol.AuthorizationData
 	if s4uUser != nil {
 		if serviceName.String() != requester.String() || options&types.KDCCNameInAddlTkt != 0 {
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
@@ -1790,6 +1800,19 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		}
 		if code, valid := s.ticketValidity(evidencePart); !valid {
 			return s.tgsErrorResponse(armor, code, request.ReqBody.SName)
+		}
+		evidenceKDCKey := protocol.EncryptionKey{}
+		if key, ok := s.freshnessKey([]int32{evidence.EncPart.EType}); ok {
+			evidenceKDCKey = protocol.EncryptionKey{KeyType: key.Enctype, KeyValue: key.Key}
+		}
+		if verifyErr := cammac.VerifyKDC(evidencePart.AuthorizationData,
+			evidencePart, evidenceKDCKey); verifyErr != nil && !stderrors.Is(verifyErr, cammac.ErrNotFound) {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		} else if verifyErr == nil {
+			verifiedCAMMACElements, err = cammac.ProtectedElements(evidencePart.AuthorizationData)
+			if err != nil {
+				return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+			}
 		}
 		client := principalFromProtocol(evidencePart.CName, evidencePart.CRealm)
 		if err := s.CheckAllowedToDelegate(&client, requester, &serviceName); err != nil {
@@ -1891,7 +1914,7 @@ func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, pacVerifyKey, u2uTicketKey)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey)
 }
 
 func samePrincipalIdentity(left, right principal.Principal) bool {
@@ -2029,16 +2052,10 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
-	}
-	if cammac.HasCAMMAC(ticketPart.AuthorizationData) {
-		if err := cammac.VerifyKDC(ticketPart.AuthorizationData, ticketPart,
-			protocol.EncryptionKey{KeyType: headerKey.Enctype, KeyValue: headerKey.Key}); err != nil {
-			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
-		}
 	}
 	sessionValue := make([]byte, etype.KeySize())
 	if _, err := io.ReadFull(crypto.RandomSource, sessionValue); err != nil {
@@ -2131,14 +2148,6 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
-	if err := s.issuePACWithOptions(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
-		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
-		issuedClient != nil, nil, delegationEvidence, pacVerifyKey); err != nil {
-		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
-	}
-	if err := s.issueCAMMAC(&ticketPart, serviceKey); err != nil {
-		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
-	}
 	ticketEncryptionKey := serviceKey
 	ticketKVNO := serviceKey.KVNO
 	var ticketKVNOPtr = &ticketKVNO
@@ -2147,6 +2156,14 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		ticketKVNO = 0
 		// MIT's optional-zero KVNO encoder omits a zero value on U2U tickets.
 		ticketKVNOPtr = nil
+	}
+	if err := s.issueCAMMAC(&ticketPart, ticketEncryptionKey, verifiedCAMMACElements); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if err := s.issuePACWithOptions(&ticketPart, principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
+		serviceName, headerKey, serviceKey, !(len(serviceName.Components) == 2 && serviceName.Components[0] == "krbtgt"),
+		issuedClient != nil, nil, delegationEvidence, pacVerifyKey); err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	ticketCipher, err := encryptWithKey(ticketEncryptionKey, 2, marshalDER(ticketPart))
 	if err != nil {
