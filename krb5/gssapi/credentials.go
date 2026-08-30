@@ -65,10 +65,11 @@ func AcquireInitiatorCredential(ctx context.Context, kclient *client.Client, nam
 // AcquireAcceptorCredential creates an acceptor credential from an explicit
 // keytab. An unspecified name accepts any service principal present in it.
 func AcquireAcceptorCredential(kt *keytab.Keytab, name *principal.Principal) (*Credential, error) {
-	if kt == nil || len(kt.Entries) == 0 {
+	entries := kt.EntriesSnapshot()
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("GSS acquire acceptor credential: keytab unavailable")
 	}
-	if name != nil && !keytabContainsPrincipal(kt, *name) {
+	if name != nil && !keytabContainsPrincipal(entries, *name) {
 		return nil, fmt.Errorf("GSS acquire acceptor credential: principal not found")
 	}
 	return &Credential{keytab: kt, name: clonePrincipal(name), usage: CredentialAccept}, nil
@@ -222,8 +223,8 @@ func clonePrincipal(value *principal.Principal) *principal.Principal {
 	return &copyValue
 }
 
-func keytabContainsPrincipal(kt *keytab.Keytab, wanted principal.Principal) bool {
-	for _, entry := range kt.Entries {
+func keytabContainsPrincipal(entries []keytab.Entry, wanted principal.Principal) bool {
+	for _, entry := range entries {
 		if gssPrincipalEqual(entry.Principal, wanted) {
 			return true
 		}

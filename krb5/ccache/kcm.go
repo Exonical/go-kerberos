@@ -572,8 +572,9 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 		if err != nil {
 			return Credential{}, err
 		}
+		wireFlags := MapTCFlags(flags)
 		for _, candidate := range cache.Credentials {
-			if credentialMatches(candidate, match, flags) {
+			if credentialMatches(candidate, match, wireFlags) {
 				return candidate, nil
 			}
 		}
@@ -621,17 +622,7 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 // Remove removes the first credential matching match and flags.
 func (h *Handle) Remove(match Credential, flags uint32) error {
 	if h != nil && h.typ == TypeKeyring {
-		cache, err := h.Read()
-		if err != nil {
-			return err
-		}
-		for i, candidate := range cache.Credentials {
-			if credentialMatches(candidate, match, flags) {
-				cache.Credentials = append(cache.Credentials[:i], cache.Credentials[i+1:]...)
-				return h.Write(cache)
-			}
-		}
-		return errors.New("ccache: KEYRING credential not found")
+		return h.keyring.remove(match, flags)
 	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: remove requires a KCM cache")

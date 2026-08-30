@@ -495,7 +495,7 @@ func findServiceEntry(kt *keytab.Keytab, ticket protocol.Ticket) (keytab.Entry, 
 	}
 	var selected keytab.Entry
 	found := false
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		if !servicePrincipalEqual(entry.Principal, target) || entry.Enctype != ticket.EncPart.EType {
 			continue
 		}

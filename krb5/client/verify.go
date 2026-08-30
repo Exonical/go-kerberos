@@ -76,7 +76,7 @@ func (c *Client) VerifyInitCreds(ctx context.Context, creds *Credentials,
 	if !options.NoFailSet {
 		nofail = c.verifyInitCredsNoFail(creds.Client.Realm)
 	}
-	if kt == nil || len(kt.Entries) == 0 {
+	if kt == nil || len(kt.EntriesSnapshot()) == 0 {
 		if nofail {
 			return fmt.Errorf("verify initial credentials: keytab unavailable")
 		}
@@ -146,8 +146,9 @@ func verifyInitCredsPrincipals(kt *keytab.Keytab, explicit *principal.Principal)
 	if explicit != nil {
 		return []principal.Principal{*explicit}
 	}
-	servers := make([]principal.Principal, 0, len(kt.Entries))
-	for _, entry := range kt.Entries {
+	entries := kt.EntriesSnapshot()
+	servers := make([]principal.Principal, 0, len(entries))
+	for _, entry := range entries {
 		if len(entry.Principal.Components) != 2 || entry.Principal.Components[0] != "host" {
 			continue
 		}
@@ -167,7 +168,7 @@ func verifyInitCredsPrincipals(kt *keytab.Keytab, explicit *principal.Principal)
 
 func keytabEntriesForPrincipal(kt *keytab.Keytab, server principal.Principal) []keytab.Entry {
 	entries := make([]keytab.Entry, 0)
-	for _, entry := range kt.Entries {
+	for _, entry := range kt.EntriesSnapshot() {
 		if sameClientPrincipal(entry.Principal, server) {
 			entries = append(entries, entry)
 		}

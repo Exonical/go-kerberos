@@ -313,6 +313,9 @@ func (h *Handle) Collection() ([]*Handle, error) {
 	if h.typ == TypeKCM {
 		return h.kcm.collection()
 	}
+	if h.typ == TypeKeyring {
+		return h.keyring.collectionHandles()
+	}
 	if h.typ != TypeDir {
 		return []*Handle{h}, nil
 	}
