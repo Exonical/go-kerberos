@@ -53,6 +53,60 @@ func TestServerASAndTGSExchange(t *testing.T) {
 	}
 }
 
+func TestServerVerifyInitCreds(t *testing.T) {
+	now := time.Unix(2000000001, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("ASExchange: %v", err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	record, ok, err := server.DB.Lookup(service)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	serviceKey := record.Keys[crypto.EnctypeAES256SHA1]
+	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+		Principal: service,
+		KVNO:      serviceKey.KVNO,
+		Enctype:   serviceKey.Enctype,
+		Key:       append([]byte(nil), serviceKey.Key...),
+	}}}
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, kt,
+		client.VerifyInitCredsOptions{Server: &service, NoFailSet: true, NoFail: true}); err != nil {
+		t.Fatalf("VerifyInitCreds: %v", err)
+	}
+	if _, err := kclient.ASExchangeWithOptions(context.Background(), user, "alice-password",
+		client.ASExchangeOptions{
+			Keytab: kt,
+			VerifyInitCreds: &client.VerifyInitCredsOptions{
+				Server: &service, NoFailSet: true, NoFail: true,
+			},
+		}); err != nil {
+		t.Fatalf("ASExchangeWithOptions VerifyInitCreds: %v", err)
+	}
+
+	wrong := *kt
+	wrong.Entries = append([]keytab.Entry(nil), kt.Entries...)
+	wrong.Entries[0].Key = append([]byte(nil), wrong.Entries[0].Key...)
+	wrong.Entries[0].Key[0] ^= 0xff
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, &wrong,
+		client.VerifyInitCredsOptions{Server: &service, NoFailSet: true, NoFail: true}); err == nil {
+		t.Fatal("VerifyInitCreds accepted wrong service key")
+	}
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, nil,
+		client.VerifyInitCredsOptions{}); err != nil {
+		t.Fatalf("VerifyInitCreds missing keytab with nofail=false: %v", err)
+	}
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, nil,
+		client.VerifyInitCredsOptions{NoFailSet: true, NoFail: true}); err == nil {
+		t.Fatal("VerifyInitCreds accepted missing keytab with nofail=true")
+	}
+}
+
 func TestServerIssuesAndVerifiesCAMMAC(t *testing.T) {
 	now := time.Unix(2000000005, 0).UTC()
 	server, _ := testServer(t, now)

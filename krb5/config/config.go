@@ -43,8 +43,11 @@ type Config struct {
 	Realms                  map[string][]string
 	DomainRealm             map[string]string
 	Capaths                 map[string][]string
-	RealmOptions            map[string]map[string][]string
-	CapathOptions           map[string]map[string][]string
+	// RealmLibDefaults contains [libdefaults] options overridden for a
+	// particular realm.
+	RealmLibDefaults map[string]map[string][]string
+	RealmOptions     map[string]map[string][]string
+	CapathOptions    map[string]map[string][]string
 	// RealmAuthToLocal contains ordered auth_to_local mappings for each
 	// realm. RealmAuthToLocalNames contains explicit principal-name mappings.
 	RealmAuthToLocal      map[string][]string
@@ -121,6 +124,7 @@ func Parse(data []byte) (*Config, error) {
 		Realms:                  make(map[string][]string),
 		DomainRealm:             make(map[string]string),
 		Capaths:                 make(map[string][]string),
+		RealmLibDefaults:        make(map[string]map[string][]string),
 		RealmOptions:            make(map[string]map[string][]string),
 		CapathOptions:           make(map[string]map[string][]string),
 		RealmAuthToLocal:        make(map[string][]string),
@@ -438,6 +442,8 @@ func addSubsection(cfg *Config, section, subsection, key string, values []string
 	target := cfg.RealmOptions
 	if section == "capaths" {
 		target = cfg.CapathOptions
+	} else if section == "libdefaults" {
+		target = cfg.RealmLibDefaults
 	}
 	if target[subsection] == nil {
 		target[subsection] = make(map[string][]string)
@@ -452,6 +458,31 @@ func addSubsection(cfg *Config, section, subsection, key string, values []string
 	} else if section == "capaths" {
 		cfg.Capaths[subsection] = append(cfg.Capaths[subsection], values...)
 	}
+}
+
+// LibDefaultValues returns the realm-specific libdefaults value when present,
+// otherwise the global value. Both realm and option names are
+// case-insensitive.
+func (cfg *Config) LibDefaultValues(realm, option string) []string {
+	if cfg == nil {
+		return nil
+	}
+	option = strings.ToLower(strings.TrimSpace(option))
+	for configuredRealm, values := range cfg.RealmLibDefaults {
+		if strings.EqualFold(configuredRealm, realm) {
+			for configuredOption, entries := range values {
+				if strings.EqualFold(configuredOption, option) {
+					return append([]string(nil), entries...)
+				}
+			}
+		}
+	}
+	for configuredOption, entries := range cfg.Options["libdefaults"] {
+		if strings.EqualFold(configuredOption, option) {
+			return append([]string(nil), entries...)
+		}
+	}
+	return nil
 }
 
 func addNestedSubsection(cfg *Config, subsection, nested, key string, values []string) {
