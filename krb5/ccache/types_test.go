@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -45,6 +46,20 @@ func TestResolveCacheNames(t *testing.T) {
 	}
 	if _, err := Resolve("DIR::" + filepath.Join(dir, "not-a-cache")); err == nil {
 		t.Fatal("invalid DIR subsidiary unexpectedly resolved")
+	}
+}
+
+func TestResolveWithConfigExpandsDefaultName(t *testing.T) {
+	dir := t.TempDir()
+	name, err := ResolveWithConfig("", &config.Config{DefaultCCacheName: "FILE:" + filepath.Join(dir, "krb5cc_%{uid}")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name == nil || name.name == "" {
+		t.Fatalf("resolved cache = %#v", name)
+	}
+	if filepath.Base(name.path) == "krb5cc_%{uid}" {
+		t.Fatalf("profile token was not expanded: %q", name.path)
 	}
 }
 

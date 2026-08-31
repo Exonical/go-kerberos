@@ -4,6 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"os"
+	"os/user"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -115,7 +119,257 @@ func (cfg *Config) RealmPath(client, server string) ([]string, bool, error) {
 	return append(path, server), true, nil
 }
 
+// Parse parses a krb5.conf profile, including nested include directives.
 func Parse(data []byte) (*Config, error) {
+	// Keep the established parser on ordinary profiles; the recursive parser
+	// is needed only when include directives can alter parser state.
+	if !strings.Contains(string(data), "include") {
+		return parseLegacy(data)
+	}
+	cfg := newConfig()
+	if err := parseProfileContent(cfg, data, map[string]bool{}, new(int)); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// ParseFile reads a krb5.conf profile and expands include and includedir
+// directives using MIT's in-place ordering rules.
+func ParseFile(filename string) (*Config, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("parse krb5.conf: empty filename")
+	}
+	cfg := newConfig()
+	clean, err := filepath.Abs(filename)
+	if err != nil {
+		return nil, fmt.Errorf("parse krb5.conf: resolve %q: %w", filename, err)
+	}
+	if err := parseProfilePath(cfg, filename, map[string]bool{clean: true}, new(int)); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func parseProfilePath(cfg *Config, filename string, stack map[string]bool, total *int) error {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("parse krb5.conf: read %q: %w", filename, err)
+	}
+	return parseProfileContent(cfg, data, stack, total)
+}
+
+func parseProfileContent(cfg *Config, data []byte, stack map[string]bool, total *int) error {
+	const maxConfigSize = 16 << 20
+	*total += len(data)
+	if *total > maxConfigSize {
+		return fmt.Errorf("parse krb5.conf: input exceeds %d bytes", maxConfigSize)
+	}
+	section := ""
+	subsection := ""
+	nestedSubsection := ""
+	pendingSubsection := ""
+	pendingNestedSubsection := ""
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner.Buffer(make([]byte, 1024), maxConfigSize)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(stripComment(scanner.Text()))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "include") && len(line) > len("include") &&
+			isProfileSpace(line[len("include")]) {
+			filename := strings.TrimSpace(line[len("include"):])
+			if filename == "" {
+				return fmt.Errorf("parse krb5.conf line %d: empty include filename", lineNumber)
+			}
+			clean, err := filepath.Abs(filename)
+			if err != nil {
+				return fmt.Errorf("parse krb5.conf line %d: resolve include: %w", lineNumber, err)
+			}
+			if stack[clean] {
+				return fmt.Errorf("parse krb5.conf line %d: recursive include %q", lineNumber, filename)
+			}
+			stack[clean] = true
+			err = parseProfilePath(cfg, filename, stack, total)
+			delete(stack, clean)
+			if err != nil {
+				return fmt.Errorf("parse krb5.conf line %d: %w", lineNumber, err)
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "includedir") && len(line) > len("includedir") &&
+			isProfileSpace(line[len("includedir")]) {
+			dirname := strings.TrimSpace(line[len("includedir"):])
+			if dirname == "" {
+				return fmt.Errorf("parse krb5.conf line %d: empty includedir name", lineNumber)
+			}
+			entries, err := os.ReadDir(dirname)
+			if err != nil {
+				return fmt.Errorf("parse krb5.conf line %d: read includedir %q: %w", lineNumber, dirname, err)
+			}
+			sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+			for _, entry := range entries {
+				if !validIncludedFilename(entry.Name()) {
+					continue
+				}
+				filename := filepath.Join(dirname, entry.Name())
+				clean, err := filepath.Abs(filename)
+				if err != nil {
+					return fmt.Errorf("parse krb5.conf line %d: resolve includedir file: %w", lineNumber, err)
+				}
+				if stack[clean] {
+					return fmt.Errorf("parse krb5.conf line %d: recursive include %q", lineNumber, filename)
+				}
+				stack[clean] = true
+				err = parseProfilePath(cfg, filename, stack, total)
+				delete(stack, clean)
+				if err != nil {
+					return fmt.Errorf("parse krb5.conf line %d: %w", lineNumber, err)
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if subsection != "" || nestedSubsection != "" || pendingSubsection != "" ||
+				pendingNestedSubsection != "" {
+				return fmt.Errorf("parse krb5.conf line %d: unclosed subsection", lineNumber)
+			}
+			if !strings.HasSuffix(line, "]") || strings.Count(line, "[") != 1 ||
+				strings.Count(line, "]") != 1 {
+				return fmt.Errorf("parse krb5.conf line %d: malformed section", lineNumber)
+			}
+			section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
+			if section == "" {
+				return fmt.Errorf("parse krb5.conf line %d: empty section", lineNumber)
+			}
+			continue
+		}
+		if section == "" {
+			return fmt.Errorf("parse krb5.conf line %d: relation before section", lineNumber)
+		}
+		if line == "{" {
+			if pendingNestedSubsection != "" {
+				nestedSubsection = pendingNestedSubsection
+				pendingNestedSubsection = ""
+				continue
+			}
+			if pendingSubsection == "" {
+				return fmt.Errorf("parse krb5.conf line %d: unexpected opening brace", lineNumber)
+			}
+			subsection = pendingSubsection
+			pendingSubsection = ""
+			continue
+		}
+		if line == "}" {
+			if nestedSubsection != "" {
+				nestedSubsection = ""
+				continue
+			}
+			if subsection == "" {
+				return fmt.Errorf("parse krb5.conf line %d: unexpected closing brace", lineNumber)
+			}
+			subsection = ""
+			continue
+		}
+		key, value, ok := splitRelation(line)
+		if !ok {
+			return fmt.Errorf("parse krb5.conf line %d: malformed relation", lineNumber)
+		}
+		rawKey := key
+		key = strings.ToLower(key)
+		if key == "" {
+			return fmt.Errorf("parse krb5.conf line %d: empty relation key", lineNumber)
+		}
+		if pendingSubsection != "" || pendingNestedSubsection != "" {
+			return fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
+		}
+		if strings.HasSuffix(value, "{") {
+			if strings.TrimSpace(strings.TrimSuffix(value, "{")) != "" {
+				return fmt.Errorf("parse krb5.conf line %d: malformed subsection", lineNumber)
+			}
+			if subsection != "" {
+				if strings.ToLower(strings.TrimSpace(rawKey)) != "auth_to_local_names" {
+					return fmt.Errorf("parse krb5.conf line %d: nested subsection %q unsupported", lineNumber, rawKey)
+				}
+				nestedSubsection = strings.TrimSpace(rawKey)
+			} else {
+				subsection = strings.TrimSpace(rawKey)
+			}
+			continue
+		}
+		if value == "" {
+			if subsection != "" {
+				if nestedSubsection == "" && strings.EqualFold(rawKey, "auth_to_local_names") {
+					pendingNestedSubsection = rawKey
+					continue
+				}
+				return fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
+			}
+			pendingSubsection = strings.TrimSpace(rawKey)
+			continue
+		}
+		values := splitValues(value)
+		if len(values) == 0 {
+			return fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
+		}
+		if nestedSubsection != "" {
+			addNestedSubsection(cfg, subsection, nestedSubsection, rawKey, values)
+		} else if subsection != "" {
+			addSubsection(cfg, section, subsection, key, values)
+		} else if err := applyOption(cfg, section, key, values); err != nil {
+			return fmt.Errorf("parse krb5.conf line %d: %w", lineNumber, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("parse krb5.conf: %w", err)
+	}
+	if subsection != "" || pendingSubsection != "" || pendingNestedSubsection != "" {
+		return fmt.Errorf("parse krb5.conf: unclosed subsection")
+	}
+	return nil
+}
+
+func newConfig() *Config {
+	return &Config{
+		Realms:                  make(map[string][]string),
+		DomainRealm:             make(map[string]string),
+		Capaths:                 make(map[string][]string),
+		RealmLibDefaults:        make(map[string]map[string][]string),
+		RealmOptions:            make(map[string]map[string][]string),
+		CapathOptions:           make(map[string]map[string][]string),
+		RealmAuthToLocal:        make(map[string][]string),
+		RealmAuthToLocalNames:   make(map[string]map[string][]string),
+		Options:                 make(map[string]map[string][]string),
+		DNSURILookup:            true,
+		RDNS:                    true,
+		DNSCanonicalizeHostname: "fallback",
+	}
+}
+
+func isProfileSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n' ||
+		value == '\f' || value == '\v'
+}
+
+func validIncludedFilename(name string) bool {
+	if name == "" || name[0] == '.' {
+		return false
+	}
+	if strings.HasSuffix(name, ".conf") {
+		return true
+	}
+	for i := 0; i < len(name); i++ {
+		if !((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
+			(name[i] >= '0' && name[i] <= '9') || name[i] == '-' || name[i] == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func parseLegacy(data []byte) (*Config, error) {
 	const maxConfigSize = 16 << 20
 	if len(data) > maxConfigSize {
 		return nil, fmt.Errorf("parse krb5.conf: input exceeds %d bytes", maxConfigSize)
@@ -311,6 +565,64 @@ func ParseDuration(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("parse MIT duration: invalid value")
 	}
 	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+// ExpandPathTokens expands the POSIX profile path tokens supported by MIT
+// Kerberos. Windows registry and shell-specific tokens are intentionally not
+// supported.
+func ExpandPathTokens(path string) (string, error) {
+	var expanded strings.Builder
+	for len(path) > 0 {
+		start := strings.Index(path, "%{")
+		if start < 0 {
+			expanded.WriteString(path)
+			break
+		}
+		expanded.WriteString(path[:start])
+		end := strings.IndexByte(path[start+2:], '}')
+		if end < 0 {
+			return "", fmt.Errorf("expand path: variable missing }")
+		}
+		end += start + 2
+		token := path[start+2 : end]
+		value, err := expandPathToken(token)
+		if err != nil {
+			return "", err
+		}
+		expanded.WriteString(value)
+		path = path[end+1:]
+	}
+	return expanded.String(), nil
+}
+
+func expandPathToken(token string) (string, error) {
+	switch token {
+	case "TEMP":
+		if value := os.Getenv("TMPDIR"); value != "" {
+			return value, nil
+		}
+		return os.TempDir(), nil
+	case "uid", "USERID":
+		return strconv.FormatUint(uint64(os.Getuid()), 10), nil
+	case "euid":
+		return strconv.FormatUint(uint64(os.Geteuid()), 10), nil
+	case "username":
+		current, err := user.Current()
+		if err != nil {
+			return "", fmt.Errorf("expand path: resolve username: %w", err)
+		}
+		return current.Username, nil
+	case "LIBDIR":
+		return "/usr/lib", nil
+	case "BINDIR":
+		return "/usr/bin", nil
+	case "SBINDIR":
+		return "/usr/sbin", nil
+	case "null":
+		return "", nil
+	default:
+		return "", fmt.Errorf("expand path: invalid token %%{%s}", token)
+	}
 }
 
 func stripComment(line string) string {

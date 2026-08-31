@@ -122,23 +122,31 @@ func runInit(args []string, stdin io.Reader, _ io.Writer, stderr io.Writer, inte
 	if err != nil {
 		return err
 	}
-	cachePath := resolveCachePath(options.CachePath, os.Getenv, os.Getuid())
+	cacheName, err := configuredCacheName(options.CachePath, os.Getenv, os.Getuid(), cfg)
+	if err != nil {
+		return err
+	}
 	cache := &ccache.Cache{
 		DefaultPrincipal: clientPrincipal,
 		Credentials:      []ccache.Credential{credentials.ToCCacheCredential()},
 	}
-	file, err := os.OpenFile(cachePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open cache: %w", err)
-	}
-	if err := ccache.Write(file, cache); err != nil {
-		_ = file.Close()
+	if err := ccache.WriteName(cacheName, cache); err != nil {
 		return fmt.Errorf("write cache: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close cache: %w", err)
-	}
 	return nil
+}
+
+func configuredCacheName(explicit string, getenv func(string) string, uid int, cfg *config.Config) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if value := getenv("KRB5CCNAME"); value != "" {
+		return value, nil
+	}
+	if cfg != nil && cfg.DefaultCCacheName != "" {
+		return config.ExpandPathTokens(cfg.DefaultCCacheName)
+	}
+	return fmt.Sprintf("/tmp/krb5cc_%d", uid), nil
 }
 
 func loadInitConfig(getenv func(string) string) (*config.Config, error) {
@@ -146,11 +154,7 @@ func loadInitConfig(getenv func(string) string) (*config.Config, error) {
 	if path == "" {
 		path = "/etc/krb5.conf"
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read configuration: %w", err)
-	}
-	cfg, err := config.Parse(data)
+	cfg, err := config.ParseFile(path)
 	if err != nil {
 		return nil, err
 	}

@@ -78,16 +78,14 @@ func runVNO(args []string, stdout io.Writer) error {
 	}
 	cachePath := options.CachePath
 	if cachePath == "" {
-		cachePath = resolveVNOCachePath(os.Getenv("KRB5CCNAME"), os.Getuid())
+		cachePath, err = configuredVNOCacheName(os.Getenv, os.Getuid(), cfg)
+		if err != nil {
+			return err
+		}
 	} else {
 		cachePath = strings.TrimPrefix(cachePath, "FILE:")
 	}
-	file, err := os.Open(cachePath)
-	if err != nil {
-		return fmt.Errorf("open cache: %w", err)
-	}
-	cache, err := ccache.Read(file)
-	_ = file.Close()
+	cache, err := ccache.ReadName(cachePath)
 	if err != nil {
 		return fmt.Errorf("read cache: %w", err)
 	}
@@ -113,16 +111,8 @@ func runVNO(args []string, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "%s: kvno = %d\n", service.String(), kvno)
 	}
-	file, err = os.OpenFile(cachePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open cache for writing: %w", err)
-	}
-	if err := ccache.Write(file, cache); err != nil {
-		_ = file.Close()
+	if err := ccache.WriteName(cachePath, cache); err != nil {
 		return fmt.Errorf("write cache: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close cache: %w", err)
 	}
 	return nil
 }
@@ -139,15 +129,21 @@ func loadVNOConfig() (*config.Config, error) {
 	if path == "" {
 		path = "/etc/krb5.conf"
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read configuration: %w", err)
-	}
-	cfg, err := config.Parse(data)
+	cfg, err := config.ParseFile(path)
 	if err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func configuredVNOCacheName(getenv func(string) string, uid int, cfg *config.Config) (string, error) {
+	if value := getenv("KRB5CCNAME"); value != "" {
+		return value, nil
+	}
+	if cfg != nil && cfg.DefaultCCacheName != "" {
+		return config.ExpandPathTokens(cfg.DefaultCCacheName)
+	}
+	return fmt.Sprintf("/tmp/krb5cc_%d", uid), nil
 }
 
 func findTGT(cache *ccache.Cache) int {

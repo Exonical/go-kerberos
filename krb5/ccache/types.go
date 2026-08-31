@@ -79,6 +79,26 @@ func Resolve(name string) (*Handle, error) {
 	}
 }
 
+// ResolveWithConfig resolves a cache name using the configured default when
+// no explicit name or KRB5CCNAME value is present. Profile path tokens in
+// default_ccache_name are expanded before resolving the cache.
+func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
+	if name == "" {
+		name = os.Getenv("KRB5CCNAME")
+	}
+	if name == "" && cfg != nil {
+		name = cfg.DefaultCCacheName
+	}
+	if name == "" {
+		name = fmt.Sprintf("/tmp/krb5cc_%d", os.Getuid())
+	}
+	expanded, err := config.ExpandPathTokens(name)
+	if err != nil {
+		return nil, err
+	}
+	return Resolve(expanded)
+}
+
 func resolveFile(path string) (*Handle, error) {
 	if path == "" {
 		return nil, errors.New("ccache: empty FILE cache path")

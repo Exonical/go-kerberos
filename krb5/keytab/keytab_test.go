@@ -5,9 +5,12 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -19,6 +22,54 @@ func counted16(w io.Writer, value []byte) error {
 	}
 	_, err := w.Write(value)
 	return err
+}
+
+func TestResolveWithConfigExpandsDefaultKeytab(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keytab")
+	if err := os.WriteFile(path, []byte{0x05, 0x02}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	kt, err := ResolveWithConfig("", &config.Config{DefaultKeytabName: "FILE:" + path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kt == nil {
+		t.Fatal("ResolveWithConfig returned nil keytab")
+	}
+	if _, err := ResolveClientWithConfig("", &config.Config{DefaultClientKeytabName: "FILE:" + path}); err != nil {
+		t.Fatalf("ResolveClientWithConfig: %v", err)
+	}
+}
+
+func TestResolveClientWithConfigUsesMITNameChain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.keytab")
+	if err := os.WriteFile(path, []byte{0x05, 0x02}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_CLIENT_KTNAME", "FILE:"+path)
+	t.Setenv("KRB5_KTNAME", "FILE:"+filepath.Join(t.TempDir(), "server-must-not-win"))
+	if _, err := ResolveClientWithConfig("", &config.Config{
+		DefaultKeytabName:       "FILE:" + filepath.Join(t.TempDir(), "default-must-not-win"),
+		DefaultClientKeytabName: "FILE:" + filepath.Join(t.TempDir(), "client-must-not-win"),
+	}); err != nil {
+		t.Fatalf("client environment keytab: %v", err)
+	}
+
+	t.Setenv("KRB5_CLIENT_KTNAME", "")
+	clientDefault := filepath.Join(t.TempDir(), "client-default")
+	if _, err := ResolveClientWithConfig("", &config.Config{
+		DefaultKeytabName:       "FILE:" + path,
+		DefaultClientKeytabName: "FILE:" + clientDefault,
+	}); err == nil {
+		t.Fatal("client resolver unexpectedly used server default")
+	}
+	t.Setenv("KRB5_KTNAME", "")
+	errTarget := "/var/kerberos/krb5/user/"
+	if _, err := ResolveClientWithConfig("", &config.Config{DefaultKeytabName: "FILE:" + path}); err == nil {
+		t.Fatal("client resolver unexpectedly used default_keytab_name")
+	} else if !strings.Contains(err.Error(), errTarget) {
+		t.Fatalf("client default error = %v, want compile-time client path", err)
+	}
 }
 
 func keytabRecord(p principal.Principal, timestamp uint32, kvno uint32, enctype uint16, key []byte) ([]byte, error) {
