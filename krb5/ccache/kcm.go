@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -643,11 +644,36 @@ func (h *Handle) Destroy() error {
 	if h != nil && h.typ == TypeKeyring {
 		return h.keyring.destroy()
 	}
-	if h == nil || h.typ != TypeKCM {
-		return errors.New("ccache: destroy requires a KCM cache")
+	if h == nil {
+		return errors.New("ccache: destroy requires a cache")
 	}
-	_, err := h.kcm.call(kcmOpDestroy, cstring(h.kcm.name))
-	return err
+	switch h.typ {
+	case TypeFile, TypeDir:
+		if err := os.Remove(h.path); err != nil {
+			return err
+		}
+		return nil
+	case TypeMemory:
+		residual := strings.TrimPrefix(h.name, "MEMORY:")
+		memoryMu.Lock()
+		h.memoryHandleMu.RLock()
+		memory := h.memory
+		h.memoryHandleMu.RUnlock()
+		if current := memoryCaches[residual]; current == memory {
+			memory.mu.Lock()
+			memory.cache = nil
+			memory.destroyed = true
+			memory.mu.Unlock()
+			delete(memoryCaches, residual)
+		}
+		memoryMu.Unlock()
+		return nil
+	case TypeKCM:
+		_, err := h.kcm.call(kcmOpDestroy, cstring(h.kcm.name))
+		return err
+	default:
+		return errors.New("ccache: unsupported cache destruction")
+	}
 }
 
 // SetDefault makes this KCM cache the collection default.
