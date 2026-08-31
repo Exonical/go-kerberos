@@ -81,20 +81,28 @@ func Resolve(name string) (*Handle, error) {
 // no explicit name or KRB5CCNAME value is present. Profile path tokens in
 // default_ccache_name are expanded before resolving the cache.
 func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
+	expand := false
 	if name == "" {
 		name = os.Getenv("KRB5CCNAME")
 	}
 	if name == "" && cfg != nil {
 		name = cfg.DefaultCCacheName
+		expand = name != ""
 	}
 	if name == "" {
 		name = fmt.Sprintf("/tmp/krb5cc_%d", os.Getuid())
 	}
-	expanded, err := config.ExpandPathTokens(name)
-	if err != nil {
-		return nil, err
+	if expand {
+		var err error
+		name, err = config.ExpandPathTokens(name)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return Resolve(expanded)
+	if strings.HasPrefix(name, "KCM:") && cfg != nil {
+		return ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
+	}
+	return Resolve(name)
 }
 
 func resolveFile(path string) (*Handle, error) {
@@ -374,9 +382,31 @@ func ReadName(name string) (*Cache, error) {
 	return cache.Read()
 }
 
+// ReadNameWithConfig resolves and reads a cache using configured defaults and
+// the configured KCM socket.
+func ReadNameWithConfig(name string, cfg *config.Config) (*Cache, error) {
+	cache, err := ResolveWithConfig(name, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer cache.Close()
+	return cache.Read()
+}
+
 // WriteName resolves and writes a named cache.
 func WriteName(name string, cache *Cache) error {
 	resolved, err := Resolve(name)
+	if err != nil {
+		return err
+	}
+	defer resolved.Close()
+	return resolved.Write(cache)
+}
+
+// WriteNameWithConfig resolves and writes a cache using configured defaults
+// and the configured KCM socket.
+func WriteNameWithConfig(name string, cfg *config.Config, cache *Cache) error {
+	resolved, err := ResolveWithConfig(name, cfg)
 	if err != nil {
 		return err
 	}
