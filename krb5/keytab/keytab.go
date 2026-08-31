@@ -73,26 +73,34 @@ func ResolveWithConfig(name string, cfg *config.Config) (*Keytab, error) {
 	return resolveWithConfig(name, cfg, false)
 }
 
-// ResolveClientWithConfig resolves the configured client keytab name,
-// preferring default_client_keytab_name over default_keytab_name.
+// ResolveClientWithConfig resolves the configured client keytab name using
+// MIT's KRB5_CLIENT_KTNAME, default_client_keytab_name, and compile-time
+// default chain. It does not consult KRB5_KTNAME or default_keytab_name.
 func ResolveClientWithConfig(name string, cfg *config.Config) (*Keytab, error) {
 	return resolveWithConfig(name, cfg, true)
 }
 
 func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, error) {
 	if name == "" {
-		name = os.Getenv("KRB5_KTNAME")
+		if client {
+			name = os.Getenv("KRB5_CLIENT_KTNAME")
+		} else {
+			name = os.Getenv("KRB5_KTNAME")
+		}
 	}
 	if name == "" && cfg != nil {
 		if client {
 			name = cfg.DefaultClientKeytabName
-		}
-		if name == "" {
+		} else {
 			name = cfg.DefaultKeytabName
 		}
 	}
 	if name == "" {
-		name = "/etc/krb5.keytab"
+		if client {
+			name = "FILE:/var/kerberos/krb5/user/%{euid}/client.keytab"
+		} else {
+			name = "/etc/krb5.keytab"
+		}
 	}
 	expanded, err := config.ExpandPathTokens(name)
 	if err != nil {
