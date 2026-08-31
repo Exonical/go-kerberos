@@ -63,6 +63,47 @@ func TestResolveWithConfigExpandsDefaultName(t *testing.T) {
 	}
 }
 
+func TestResolveWithConfigPreservesExplicitLiteralTokens(t *testing.T) {
+	dir := t.TempDir()
+	for _, token := range []string{"%{uid}", "%{unknown}"} {
+		name := "FILE:" + filepath.Join(dir, "literal_"+token)
+		cache, err := ResolveWithConfig(name, &config.Config{
+			DefaultCCacheName: "FILE:/must/not/use/%{unknown}",
+		})
+		if err != nil {
+			t.Fatalf("ResolveWithConfig(%q): %v", name, err)
+		}
+		if cache.path != filepath.Join(dir, "literal_"+token) {
+			t.Fatalf("literal cache path = %q, want %q", cache.path, filepath.Join(dir, "literal_"+token))
+		}
+	}
+	t.Setenv("KRB5CCNAME", "FILE:"+filepath.Join(dir, "environment_%{unknown}"))
+	cache, err := ResolveWithConfig("", &config.Config{
+		DefaultCCacheName: "FILE:/must/not/use/%{unknown}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "environment_%{unknown}"); cache.path != want {
+		t.Fatalf("environment cache path = %q, want %q", cache.path, want)
+	}
+}
+
+func TestResolveWithConfigUsesConfiguredKCMSocket(t *testing.T) {
+	_, socket := startKCMTestServer(t, false, nil)
+	cache, err := ResolveWithConfig("KCM:configured", &config.Config{KCMSocket: socket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	if cache.typ != TypeKCM || cache.kcm == nil || cache.kcm.socket != socket {
+		t.Fatalf("KCM resolution = %#v, want socket %q", cache, socket)
+	}
+	if err := cache.Write(testCache()); err != nil {
+		t.Fatalf("KCM write through configured socket: %v", err)
+	}
+}
+
 func TestDIRPrimaryAndCollection(t *testing.T) {
 	dir := t.TempDir()
 	collection, err := Resolve("DIR:" + dir)
