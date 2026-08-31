@@ -128,7 +128,7 @@ func (s *Server) checkPasswordQuality(password, policyName string, name principa
 			}
 		}
 		if !found {
-			modules = append(modules, NewDictionaryPasswordQuality(s.DictionaryFile))
+			modules = append(modules, s.dictionaryModule())
 		}
 	}
 	for _, module := range modules {
@@ -140,6 +140,16 @@ func (s *Server) checkPasswordQuality(password, policyName string, name principa
 		}
 	}
 	return nil
+}
+
+func (s *Server) dictionaryModule() *DictionaryPasswordQuality {
+	s.dictionaryMu.Lock()
+	defer s.dictionaryMu.Unlock()
+	if s.dictionary == nil || s.dictionaryKey != s.DictionaryFile {
+		s.dictionary = NewDictionaryPasswordQuality(s.DictionaryFile)
+		s.dictionaryKey = s.DictionaryFile
+	}
+	return s.dictionary
 }
 
 // HookStage identifies whether a kadm5 hook runs before or after commit.

@@ -163,6 +163,122 @@ func TestChangePasswordPolicy(t *testing.T) {
 	}
 }
 
+func TestCreatePrincipalWithOptionsAppliesPolicyAtomically(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	db.ConfigureUpdateLog(10)
+	policy := PolicyRecord{Name: "strong", MaxLife: 3600, MaxRenewableLife: 7200}
+	if err := db.CreatePolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().UTC()
+	if err := db.CreatePrincipalWithOptions("alice", "alice-password", &policy); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	if record.Policy != policy.Name || record.MaxLife != time.Hour ||
+		record.MaxRenew != 2*time.Hour {
+		t.Fatalf("policy fields = %#v", record)
+	}
+	if record.PasswordExpiration.Before(before.Add(time.Hour)) {
+		t.Fatalf("password expiration = %v, want at least %v", record.PasswordExpiration, before.Add(time.Hour))
+	}
+	if status, updates := db.UpdateLog.Entries(0, time.Time{}); status != 0 || len(updates) != 1 {
+		t.Fatalf("updates = status %d, entries %d; want one entry", status, len(updates))
+	}
+}
+
+func TestCreatePrincipalWithOptionsRejectsDeletedPolicyWithoutPrincipal(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	policy := PolicyRecord{Name: "ephemeral"}
+	if err := db.CreatePolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeletePolicy(policy.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePrincipalWithOptions("alice", "alice-password", &policy); err != ErrPolicyNotFound {
+		t.Fatalf("create error = %v, want %v", err, ErrPolicyNotFound)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := db.Lookup(*name); ok {
+		t.Fatal("principal created after policy disappeared")
+	}
+}
+
+func TestCreatePrincipalWithKeySaltsAndOptionsAppliesPolicyAtomically(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	db.ConfigureUpdateLog(10)
+	policy := PolicyRecord{Name: "tuple-policy", MaxLife: 3600, MaxRenewableLife: 7200}
+	if err := db.CreatePolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().UTC()
+	if err := db.CreatePrincipalWithKeySaltsAndOptions("alice", "alice-password",
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeNoRealm}},
+		&policy); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %#v, %v, %v", record, ok, err)
+	}
+	if record.Policy != policy.Name || record.MaxLife != time.Hour ||
+		record.MaxRenew != 2*time.Hour || len(record.Keys) != 1 ||
+		record.Keys[crypto.EnctypeAES128SHA1].Salt != "alice" {
+		t.Fatalf("created record = %#v", record)
+	}
+	if record.PasswordExpiration.Before(before.Add(time.Hour)) {
+		t.Fatalf("password expiration = %v, want at least %v",
+			record.PasswordExpiration, before.Add(time.Hour))
+	}
+	if status, updates := db.UpdateLog.Entries(0, time.Time{}); status != 0 || len(updates) != 1 {
+		t.Fatalf("updates = status %d, entries %d; want one entry", status, len(updates))
+	}
+}
+
+func TestChangePasswordKeepOldRetainsPreviousKVNO(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principal.Parse("alice@TEST.REALM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	old := before.Keys[crypto.EnctypeAES256SHA1]
+	if err := db.ChangePasswordWithPolicyAndKeepOld(*name, "new-password", time.Now().UTC(), nil, false, true); err != nil {
+		t.Fatal(err)
+	}
+	after, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup after change = %v, %v", err, ok)
+	}
+	if len(after.PasswordHistory) != 1 || after.PasswordHistory[0][old.Enctype].KVNO != old.KVNO {
+		t.Fatalf("password history = %#v", after.PasswordHistory)
+	}
+	if got, ok := after.PasswordHistory[0][old.Enctype]; !ok || string(got.Key) != string(old.Key) {
+		t.Fatalf("old key = %#v, want %#v", got, old)
+	}
+}
+
 func TestAddPrincipalDerivesSupportedKeys(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddPrincipal("alice", "alice-password", 3, 7); err != nil {

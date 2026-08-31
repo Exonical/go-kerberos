@@ -241,8 +241,12 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 	if udpConn == nil || tcpListener == nil {
 		return fmt.Errorf("KDC listen: nil listener")
 	}
+	if udpConn.LocalAddr() == nil || tcpListener.Addr() == nil {
+		return fmt.Errorf("KDC listen: invalid listener")
+	}
 	s.AuditKDCStart(true)
-	defer s.AuditKDCStop(true)
+	serveSuccess := false
+	defer func() { s.AuditKDCStop(serveSuccess) }()
 	errs := make(chan error, 2)
 	go func() { errs <- s.serveUDP(udpConn) }()
 	go func() { errs <- s.serveTCP(tcpListener) }()
@@ -250,6 +254,7 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 	case <-ctx.Done():
 		_ = udpConn.Close()
 		_ = tcpListener.Close()
+		serveSuccess = true
 		return nil
 	case err := <-errs:
 		_ = udpConn.Close()
@@ -1655,14 +1660,13 @@ func (s *Server) tgsErrorResponse(armor *fastContext, code int32, service *proto
 
 func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
 	state := newTGSAuditState(request)
-	response := s.handleTGSReqCore(request, raw)
-	state.InputTicketID = auditID(raw)
-	state.OutputTicketID = auditID(response)
+	response := s.handleTGSReqCore(request, raw, &state)
+	state.SuccessState(response)
 	s.auditTGS(!isKRBErrorResponse(response), state)
 	return response
 }
 
-func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
+func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditState *AuditState) []byte {
 	if request.PVNO != 5 || request.MsgType != 12 || len(request.PAData) == 0 ||
 		request.ReqBody.SName == nil || request.ReqBody.Realm == "" {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
@@ -1675,6 +1679,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 	if err := asn1.Unmarshal(pa.PADataValue, &apRequest); err != nil ||
 		apRequest.PVNO != 5 || apRequest.MsgType != 14 {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
+	}
+	if auditState != nil {
+		auditState.InputTicketID = auditID(marshalDER(apRequest.Ticket))
 	}
 	tgtName := principal.Principal{
 		Realm: apRequest.Ticket.Realm, NameType: principal.NTSrvInstance,
@@ -1741,6 +1748,13 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 				return s.fastErrorResponse(errCode, request.ReqBody.SName, nil, armor.nonce, armor)
 			}
 			return s.errorResponse(errCode, request.ReqBody.SName)
+		}
+	}
+	if auditState != nil {
+		auditState.RequestType = classifyTGSRequest(request)
+		auditState.Client = principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
+		if request.ReqBody.SName != nil {
+			auditState.Service = principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 		}
 	}
 	requestedServiceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
@@ -1890,6 +1904,10 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 		}
 		id := value.UserID
 		s4uUser = &id
+		if auditState != nil {
+			user := principalFromProtocol(*id.CName, id.CRealm)
+			auditState.S4U2SelfUser = &user
+		}
 		checksum, err := makeS4UChecksum(s4uKey.KeyValue, value.Checksum.ChecksumType, 27, userIDDER)
 		if err != nil {
 			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
@@ -1928,6 +1946,10 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 			CName: &value.UserName, CRealm: value.UserRealm,
 		}
 		s4uUser = &id
+		if auditState != nil {
+			user := principalFromProtocol(*id.CName, id.CRealm)
+			auditState.S4U2SelfUser = &user
+		}
 	}
 	var issuedClient *principal.Principal
 	var delegationEvidence *principal.Principal
@@ -1971,6 +1993,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
 		}
 		evidence := request.ReqBody.AdditionalTickets[0]
+		if auditState != nil {
+			auditState.EvidenceTicketID = auditID(marshalDER(evidence))
+		}
 		requesterRecord, exists, err := s.DB.Lookup(requester)
 		if err != nil || !exists {
 			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
@@ -2601,11 +2626,20 @@ func selectServiceKey(enctypes []int32, service kdb.PrincipalRecord) (int32, kdb
 
 func selectKVNO(record kdb.PrincipalRecord, enctype int32, kvno *uint32) (kdb.Key, bool) {
 	key, ok := record.Keys[enctype]
-	if !ok || (kvno != nil && key.KVNO != *kvno) {
-		return kdb.Key{}, false
+	if ok && (kvno == nil || key.KVNO == *kvno) {
+		key.Enctype = enctype
+		return key, true
 	}
-	key.Enctype = enctype
-	return key, true
+	if kvno != nil {
+		for _, historical := range record.PasswordHistory {
+			key, ok = historical[enctype]
+			if ok && key.KVNO == *kvno {
+				key.Enctype = enctype
+				return key, true
+			}
+		}
+	}
+	return kdb.Key{}, false
 }
 
 func (s *Server) errorResponse(code int32, service *protocol.PrincipalName) []byte {

@@ -57,7 +57,10 @@ type Server struct {
 	// DictionaryFile configures the optional MIT dictionary module.
 	DictionaryFile string
 
-	wg sync.WaitGroup
+	wg            sync.WaitGroup
+	dictionaryMu  sync.Mutex
+	dictionary    *DictionaryPasswordQuality
+	dictionaryKey string
 }
 
 // NewServer creates a v4 kadm5 server.
@@ -517,17 +520,16 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
 			return status(kdbCode(hookErr))
 		}
-		if err := s.Database.CreatePrincipal(formatPrincipal(entry.Principal), password); err != nil {
-			return status(kdbCode(err))
+		var selectedPolicy *kdb.PolicyRecord
+		if policyName != "" {
+			policy, policyErr := s.Database.GetPolicy(policyName)
+			if policyErr != nil {
+				return status(kdbCode(policyErr))
+			}
+			selectedPolicy = &policy
 		}
-		if mask&KADM5Policy != 0 {
-			policy := policyName
-			if mask&KADM5PolicyClear != 0 {
-				policy = ""
-			}
-			if err := s.Database.SetPrincipalPolicy(entry.Principal, policy); err != nil {
-				return status(kdbCode(err))
-			}
+		if err := s.Database.CreatePrincipalWithOptions(formatPrincipal(entry.Principal), password, selectedPolicy); err != nil {
+			return status(kdbCode(err))
 		}
 		_ = s.runHooks(HookPostCommit, event)
 		_ = mask
@@ -573,15 +575,16 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
 			return status(kdbCode(hookErr))
 		}
-		err = s.Database.CreatePrincipalWithKeySalts(formatPrincipal(entry.Principal),
-			password, toKDBKeySaltTuples(tuples))
-		if err == nil && mask&KADM5Policy != 0 {
-			policy := policyName
-			if mask&KADM5PolicyClear != 0 {
-				policy = ""
+		var selectedPolicy *kdb.PolicyRecord
+		if policyName != "" {
+			policy, policyErr := s.Database.GetPolicy(policyName)
+			if policyErr != nil {
+				return status(kdbCode(policyErr))
 			}
-			err = s.Database.SetPrincipalPolicy(entry.Principal, policy)
+			selectedPolicy = &policy
 		}
+		err = s.Database.CreatePrincipalWithKeySaltsAndOptions(formatPrincipal(entry.Principal),
+			password, toKDBKeySaltTuples(tuples), selectedPolicy)
 		if err == nil {
 			_ = s.runHooks(HookPostCommit, event)
 		}
@@ -714,6 +717,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		}
 		bypassMinLife := !principalEqual(client, p) &&
 			s.authorize(client, "modify", p)
+		if policyErr := s.Database.CheckPasswordPolicy(p, password, s.now(), policy, bypassMinLife); policyErr != nil {
+			return status(kdbCode(policyErr))
+		}
 		if qualityErr := s.checkPasswordQuality(password, record.Policy, p); qualityErr != nil {
 			return status(kdbCode(qualityErr))
 		}
@@ -721,7 +727,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
 			return status(kdbCode(hookErr))
 		}
-		err = s.Database.ChangePasswordWithPolicy(p, password, s.now(), policy, bypassMinLife)
+		err = s.Database.ChangePasswordWithPolicyAndKeepOld(p, password, s.now(), policy, bypassMinLife, keepOld)
 		if err == nil {
 			_ = s.runHooks(HookPostCommit, event)
 		}

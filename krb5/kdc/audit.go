@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -171,11 +172,19 @@ func isKRBErrorResponse(response []byte) bool {
 }
 
 func (s *AuditState) SuccessState(response []byte) {
-	s.OutputTicketID = auditID(response)
 	if isKRBErrorResponse(response) {
 		s.Status = "error"
-	} else {
-		s.Status = "success"
+		return
+	}
+	s.Status = "success"
+	var tgs protocol.TGSRep
+	if err := asn1.Unmarshal(response, &tgs); err == nil && tgs.MsgType == 13 {
+		s.OutputTicketID = auditID(marshalDER(tgs.Ticket))
+		return
+	}
+	var as protocol.ASRep
+	if err := asn1.Unmarshal(response, &as); err == nil && as.MsgType == 11 {
+		s.OutputTicketID = auditID(marshalDER(as.Ticket))
 	}
 }
 
@@ -230,13 +239,19 @@ func newTGSAuditState(request protocol.TGSReq) AuditState {
 	if request.ReqBody.SName != nil {
 		state.Service = principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
 	}
-	if request.ReqBody.KDCOptions&types.KDCEncTktInSkey != 0 {
-		state.RequestType = "u2u"
-	} else if findPA(request.PAData, protocol.PADataForUser) != nil ||
-		findPA(request.PAData, protocol.PADataS4UX509User) != nil {
-		state.RequestType = "s4u2self"
-	} else if request.ReqBody.KDCOptions&types.KDCCNameInAddlTkt != 0 {
-		state.RequestType = "s4u2proxy"
-	}
 	return state
+}
+
+func classifyTGSRequest(request protocol.TGSReq) string {
+	if request.ReqBody.KDCOptions&types.KDCEncTktInSkey != 0 {
+		return "u2u"
+	}
+	if findPA(request.PAData, protocol.PADataForUser) != nil ||
+		findPA(request.PAData, protocol.PADataS4UX509User) != nil {
+		return "s4u2self"
+	}
+	if request.ReqBody.KDCOptions&types.KDCCNameInAddlTkt != 0 {
+		return "s4u2proxy"
+	}
+	return "tgs_req"
 }
