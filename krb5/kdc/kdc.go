@@ -149,6 +149,11 @@ type Server struct {
 	PKINITIndicators []string
 	// OTPIndicators are asserted after successful PA-OTP preauthentication.
 	OTPIndicators []string
+	// AuditModules receive KDC lifecycle and AS/TGS events in order.
+	AuditModules []AuditModule
+	// AuditErrorLog receives audit sink failures; sink failures never alter
+	// protocol replies.
+	AuditErrorLog func(error)
 
 	// MaxDatagramReplySize limits UDP replies. Zero uses MIT's default
 	// MAX_DGRAM_SIZE value of 65536 bytes.
@@ -236,6 +241,8 @@ func (s *Server) ListenAndServe(ctx context.Context, udpConn net.PacketConn, tcp
 	if udpConn == nil || tcpListener == nil {
 		return fmt.Errorf("KDC listen: nil listener")
 	}
+	s.AuditKDCStart(true)
+	defer s.AuditKDCStop(true)
 	errs := make(chan error, 2)
 	go func() { errs <- s.serveUDP(udpConn) }()
 	go func() { errs <- s.serveTCP(tcpListener) }()
@@ -419,6 +426,14 @@ type Policy struct {
 }
 
 func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
+	state := newASAuditState(request)
+	response := s.handleASReqCore(request, raw)
+	state.SuccessState(response)
+	s.auditAS(!isKRBErrorResponse(response), state)
+	return response
+}
+
+func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 	if request.PVNO != 5 || request.MsgType != 10 ||
 		request.ReqBody.CName == nil || request.ReqBody.SName == nil ||
 		request.ReqBody.Realm == "" || request.ReqBody.SName.NameString == nil {
@@ -1639,6 +1654,15 @@ func (s *Server) tgsErrorResponse(armor *fastContext, code int32, service *proto
 }
 
 func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
+	state := newTGSAuditState(request)
+	response := s.handleTGSReqCore(request, raw)
+	state.InputTicketID = auditID(raw)
+	state.OutputTicketID = auditID(response)
+	s.auditTGS(!isKRBErrorResponse(response), state)
+	return response
+}
+
+func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte) []byte {
 	if request.PVNO != 5 || request.MsgType != 12 || len(request.PAData) == 0 ||
 		request.ReqBody.SName == nil || request.ReqBody.Realm == "" {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)

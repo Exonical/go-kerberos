@@ -585,3 +585,27 @@ backend:
 
 - CVE-2014-5353 — no LDAP KDB implementation or LDAP ticket-policy path.
 - CVE-2018-5730 — no LDAP KDB implementation or LDAP suffix-matching path.
+
+## Pluggable password, administration, and audit hooks
+
+The kadm5 server exposes Go-native password-quality modules and principal
+mutation hooks. The built-in `empty`, `princ`, and optional dictionary modules
+follow MIT's policy ordering: policy minimum length/classes are checked first,
+then modules run in registration order. `empty` applies without a policy;
+`princ` and `dict` apply only when a policy is assigned. Password-quality
+codes and the built-in rejection messages use the MIT KADM5 values where the
+wire API exposes them. Kadm5 hooks receive precommit and postcommit events for
+create, modify, rename, remove, and password change. Precommit failures abort
+the mutation and short-circuit later hooks; postcommit failures are logged and
+do not roll back committed data.
+
+The KDC exposes ordered Go audit modules for start/stop, AS-REQ, TGS-REQ,
+S4U2Self, S4U2Proxy, and U2U events. Events carry request and ticket
+identifiers, principals, status, processing stage, and violation fields where
+the current Go request structures provide them. `JSONFileAuditModule` writes
+portable JSON-lines records similar in shape to MIT's simple audit module.
+Dynamic shared-object loading, libaudit sinks, localized error messages, and
+audit fields not represented by the Go protocol structures are not supported.
+The in-process tests cover ordering, lifecycle, policy interaction, hook
+short-circuiting, and JSON serialization; no live MIT plugin-loading gate is
+provided because the Go modules are statically registered.

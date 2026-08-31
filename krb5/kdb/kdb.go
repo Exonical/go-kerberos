@@ -272,6 +272,24 @@ func (db *Database) CreatePrincipal(name, password string) error {
 	return nil
 }
 
+// SetPrincipalPolicy assigns a password policy to an existing principal.
+func (db *Database) SetPrincipalPolicy(name principal.Principal, policy string) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	record, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	record.Policy = policy
+	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
+	return nil
+}
+
 func deriveRecord(name principal.Principal, password string, kvno uint32) (PrincipalRecord, error) {
 	keys := make(map[int32]Key, 4)
 	for _, enctype := range []int32{
