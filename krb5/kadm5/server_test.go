@@ -135,6 +135,25 @@ func TestGlobMatchWholePrincipal(t *testing.T) {
 	}
 }
 
+func TestApplyPolicyHonorsMask(t *testing.T) {
+	old := kdb.PolicyRecord{Name: "p", MinLength: 8, MinClasses: 2, MaxLife: 100}
+	updated := kdb.PolicyRecord{Name: "p", MinLength: 12, MinClasses: 5, MaxLife: 200}
+	applyPolicy(&old, updated, KADM5PWMinLength)
+	if old.MinLength != 12 || old.MinClasses != 2 || old.MaxLife != 100 {
+		t.Fatalf("masked policy update = %+v", old)
+	}
+}
+
+func TestReadKeySaltTuplesRejectsTruncatedArray(t *testing.T) {
+	w := xdrWriter{}
+	w.u32(1)
+	w.i32(crypto.EnctypeAES128SHA1)
+	_, err := readKeySaltTuples(&xdrReader{b: w.bytes()})
+	if err == nil {
+		t.Fatal("truncated key-salt tuple accepted")
+	}
+}
+
 func TestServerGoClientRoundTrip(t *testing.T) {
 	const realm = "TEST.REALM"
 	kt, creds := serverTestCredentials(t, realm)
@@ -237,6 +256,47 @@ func TestServerGoClientRoundTrip(t *testing.T) {
 	}
 	if err := c.DeletePrincipal(t.Context(), *p); err != nil {
 		t.Fatal(err)
+	}
+
+	extra, err := principal.Parse("tupled@" + realm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreatePrincipal3(t.Context(), PrincipalEntry{Principal: *extra},
+		0, []KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: 2}},
+		"tupled-password"); err != nil {
+		t.Fatal(err)
+	}
+	defer c.DeletePrincipal(t.Context(), *extra)
+	keyData, err := c.GetPrincipalKeys(t.Context(), *extra, 0)
+	if err != nil || len(keyData) != 1 || keyData[0].Enctype != crypto.EnctypeAES128SHA1 {
+		t.Fatalf("CreatePrincipal3 keys = %#v, %v", keyData, err)
+	}
+	if _, err := c.RandKey3(t.Context(), *extra, true,
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	rawKey := []Key{{Enctype: crypto.EnctypeAES128SHA1, Key: keyData[0].Key}}
+	if err := c.SetKeyPrincipalLegacy(t.Context(), *extra, rawKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetKey3(t.Context(), *extra, true,
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: 0}}, rawKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PurgeKeys(t.Context(), *extra, 0); err != nil {
+		t.Fatal(err)
+	}
+	alias, err := principal.Parse("tupled-alias@" + realm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateAlias(t.Context(), *alias, *extra); err != nil {
+		t.Fatal(err)
+	}
+	if resolved, ok, err := db.ResolveAlias(*alias); err != nil || !ok ||
+		resolved.String() != extra.String() {
+		t.Fatalf("alias resolution = %v, %v, %v", resolved, ok, err)
 	}
 }
 

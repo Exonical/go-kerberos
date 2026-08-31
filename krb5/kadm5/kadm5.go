@@ -55,6 +55,12 @@ const (
 	getPolicies      = 15
 	setkeyPrincipal4 = 25
 	extractKeys      = 26
+	createPrincipal3 = 18
+	chrandPrincipal3 = 20
+	setkeyPrincipal  = 16
+	setkeyPrincipal3 = 21
+	purgeKeys        = 22
+	createAlias      = 27
 	getStrings       = 23
 	setString        = 24
 )
@@ -136,6 +142,12 @@ type Key struct {
 	Key     []byte
 }
 
+// KeySaltTuple selects an enctype and salt type for key generation.
+type KeySaltTuple struct {
+	Enctype  int32
+	SaltType int32
+}
+
 // StringAttribute is a per-principal string attribute.
 type StringAttribute struct {
 	Key   string
@@ -165,6 +177,7 @@ type Policy struct {
 	Attributes           int32
 	MaxTicketLife        int32
 	MaxRenewableLife     int32
+	AllowedKeySalts      string
 }
 
 // Client is a pure-Go client for the MIT kadmind RPC service.

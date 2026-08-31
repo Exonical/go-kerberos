@@ -64,6 +64,29 @@ func TestChangePasswordPreservesAdministrativeFields(t *testing.T) {
 	}
 }
 
+func TestKeySaltTuplesAndPurgeKeys(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.CreatePrincipalWithKeySalts("alice", "password",
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeNoRealm}}); err != nil {
+		t.Fatal(err)
+	}
+	name, _ := principal.Parse("alice@TEST.REALM")
+	record, ok, err := db.Lookup(*name)
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", err, ok)
+	}
+	if len(record.Keys) != 1 || record.Keys[crypto.EnctypeAES128SHA1].Salt != "alice" {
+		t.Fatalf("tuple-derived keys = %#v", record.Keys)
+	}
+	if _, err := db.RandomizeKeysWithKeySalts(*name, true,
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeOnlyRealm}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PurgeKeys(*name, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrincipalUpdatesIncludeMITModifierTLData(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddPrincipal("alice", "password"); err != nil {

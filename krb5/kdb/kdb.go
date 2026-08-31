@@ -23,6 +23,18 @@ type Key struct {
 	Salt    string
 }
 
+// KeySaltTuple selects an enctype and salt type for generated keys.
+type KeySaltTuple struct {
+	Enctype  int32
+	SaltType int32
+}
+
+const (
+	SaltTypeNormal    int32 = 0
+	SaltTypeNoRealm   int32 = 2
+	SaltTypeOnlyRealm int32 = 3
+)
+
 // TLData is an opaque MIT KDB tagged-data element.
 type TLData struct {
 	Type int16
@@ -85,6 +97,7 @@ type PolicyRecord struct {
 	Attributes           int32
 	MaxTicketLife        int32
 	MaxRenewableLife     int32
+	AllowedKeySalts      string
 }
 
 var (
@@ -272,6 +285,32 @@ func (db *Database) CreatePrincipal(name, password string) error {
 	return nil
 }
 
+// CreatePrincipalWithKeySalts creates a principal with the requested key
+// and salt tuples. An empty tuple list uses the database's default enctypes.
+func (db *Database) CreatePrincipalWithKeySalts(name, password string,
+	tuples []KeySaltTuple) error {
+	if db == nil {
+		return fmt.Errorf("create principal: nil database")
+	}
+	parsedName, err := parseName(name, db.Realm)
+	if err != nil {
+		return fmt.Errorf("create principal: %w", err)
+	}
+	record, err := deriveRecordWithTuples(*parsedName, password, 1, tuples)
+	if err != nil {
+		return err
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(*parsedName)
+	if _, exists := db.principals[key]; exists {
+		return ErrPrincipalExists
+	}
+	db.principals[key] = record
+	db.recordUpdateLocked(record, false)
+	return nil
+}
+
 // SetPrincipalPolicy assigns a password policy to an existing principal.
 func (db *Database) SetPrincipalPolicy(name principal.Principal, policy string) error {
 	if db == nil {
@@ -291,25 +330,52 @@ func (db *Database) SetPrincipalPolicy(name principal.Principal, policy string) 
 }
 
 func deriveRecord(name principal.Principal, password string, kvno uint32) (PrincipalRecord, error) {
-	keys := make(map[int32]Key, 4)
-	for _, enctype := range []int32{
-		crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
-		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
-		crypto.EnctypeCamellia128, crypto.EnctypeCamellia256,
-	} {
-		etype, err := crypto.NewRegistry().Get(enctype)
-		if err != nil {
-			return PrincipalRecord{}, fmt.Errorf("principal enctype %d: %w", enctype, err)
+	return deriveRecordWithTuples(name, password, kvno, nil)
+}
+
+func deriveRecordWithTuples(name principal.Principal, password string, kvno uint32,
+	tuples []KeySaltTuple) (PrincipalRecord, error) {
+	if len(tuples) == 0 {
+		tuples = make([]KeySaltTuple, 0, 6)
+		for _, enctype := range []int32{
+			crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
+			crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
+			crypto.EnctypeCamellia128, crypto.EnctypeCamellia256,
+		} {
+			tuples = append(tuples, KeySaltTuple{Enctype: enctype, SaltType: SaltTypeNormal})
 		}
-		salt := []byte(name.Realm + strings.Join(name.Components, ""))
+	}
+	keys := make(map[int32]Key, 4)
+	for _, tuple := range tuples {
+		etype, err := crypto.NewRegistry().Get(tuple.Enctype)
+		if err != nil {
+			return PrincipalRecord{}, fmt.Errorf("principal enctype %d: %w", tuple.Enctype, err)
+		}
+		salt, err := saltForPrincipal(name, tuple.SaltType)
+		if err != nil {
+			return PrincipalRecord{}, err
+		}
 		derived, err := etype.StringToKey([]byte(password), salt, nil)
 		if err != nil {
-			return PrincipalRecord{}, fmt.Errorf("principal enctype %d: %w", enctype, err)
+			return PrincipalRecord{}, fmt.Errorf("principal enctype %d: %w", tuple.Enctype, err)
 		}
-		keys[enctype] = Key{Enctype: enctype, KVNO: kvno, Key: derived, Salt: string(salt)}
+		keys[tuple.Enctype] = Key{Enctype: tuple.Enctype, KVNO: kvno, Key: derived, Salt: string(salt)}
 	}
 	return PrincipalRecord{Name: name, Keys: keys, Strings: make(map[string]string),
 		KVNO: kvno, LastPasswordChange: time.Now().UTC()}, nil
+}
+
+func saltForPrincipal(name principal.Principal, saltType int32) ([]byte, error) {
+	switch saltType {
+	case SaltTypeNormal:
+		return []byte(name.Realm + strings.Join(name.Components, "")), nil
+	case SaltTypeNoRealm:
+		return []byte(strings.Join(name.Components, "")), nil
+	case SaltTypeOnlyRealm:
+		return []byte(name.Realm), nil
+	default:
+		return nil, fmt.Errorf("unsupported key salt type %d", saltType)
+	}
 }
 
 func deriveKeys(name principal.Principal, password string, current map[int32]Key,
@@ -651,6 +717,13 @@ func passwordMatchesKeys(candidate, stored map[int32]Key) bool {
 
 // RandomizeKeys generates fresh keys and increments the principal KVNO.
 func (db *Database) RandomizeKeys(name principal.Principal) ([]Key, error) {
+	return db.RandomizeKeysWithKeySalts(name, false, nil)
+}
+
+// RandomizeKeysWithKeySalts generates keys for explicit tuples and optionally
+// retains the existing key set.
+func (db *Database) RandomizeKeysWithKeySalts(name principal.Principal, keepOld bool,
+	tuples []KeySaltTuple) ([]Key, error) {
 	if db == nil {
 		return nil, ErrPrincipalNotFound
 	}
@@ -663,22 +736,78 @@ func (db *Database) RandomizeKeys(name principal.Principal) ([]Key, error) {
 	}
 	nextKVNO := current.KVNO + 1
 	keys := make(map[int32]Key, len(current.Keys))
-	for enctype, old := range current.Keys {
-		etype, err := crypto.NewRegistry().Get(enctype)
-		if err != nil {
-			return nil, err
+	if keepOld {
+		keys = copyKeys(current.Keys)
+	}
+	if len(tuples) == 0 {
+		for enctype, old := range current.Keys {
+			etype, err := crypto.NewRegistry().Get(enctype)
+			if err != nil {
+				return nil, err
+			}
+			value := make([]byte, etype.KeySize())
+			if _, err := rand.Read(value); err != nil {
+				return nil, err
+			}
+			keys[enctype] = Key{Enctype: enctype, KVNO: nextKVNO, Key: value, Salt: old.Salt}
 		}
-		value := make([]byte, etype.KeySize())
-		if _, err := rand.Read(value); err != nil {
-			return nil, err
+	} else {
+		for _, tuple := range tuples {
+			etype, err := crypto.NewRegistry().Get(tuple.Enctype)
+			if err != nil {
+				return nil, err
+			}
+			value := make([]byte, etype.KeySize())
+			if _, err := rand.Read(value); err != nil {
+				return nil, err
+			}
+			salt, err := saltForPrincipal(current.Name, tuple.SaltType)
+			if err != nil {
+				return nil, err
+			}
+			keys[tuple.Enctype] = Key{Enctype: tuple.Enctype, KVNO: nextKVNO, Key: value, Salt: string(salt)}
 		}
-		keys[enctype] = Key{Enctype: enctype, KVNO: nextKVNO, Key: value, Salt: old.Salt}
 	}
 	current.Keys = keys
 	current.KVNO = nextKVNO
 	db.principals[key] = current
 	db.recordUpdateLocked(current, false)
 	return keyList(keys), nil
+}
+
+// PurgeKeys removes all key versions except keepKVNO.
+func (db *Database) PurgeKeys(name principal.Principal, keepKVNO int32) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(name)
+	current, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	if keepKVNO <= 0 {
+		keepKVNO = 0
+		for _, value := range current.Keys {
+			if int32(value.KVNO) > keepKVNO {
+				keepKVNO = int32(value.KVNO)
+			}
+		}
+	}
+	next := make(map[int32]Key)
+	for enctype, value := range current.Keys {
+		if int32(value.KVNO) >= keepKVNO {
+			next[enctype] = value
+		}
+	}
+	if len(next) == 0 {
+		return fmt.Errorf("purge keys: KVNO %d not found", keepKVNO)
+	}
+	current.Keys = next
+	db.principals[key] = current
+	db.recordUpdateLocked(current, false)
+	return nil
 }
 
 // SetKeys replaces a principal's long-term keys and KVNO.

@@ -609,3 +609,13 @@ audit fields not represented by the Go protocol structures are not supported.
 The in-process tests cover ordering, lifecycle, policy interaction, hook
 short-circuiting, and JSON serialization; no live MIT plugin-loading gate is
 provided because the Go modules are statically registered.
+
+The remaining kadm5 RPC procedures are covered by the in-process Go client and
+server tests. `CREATE_PRINCIPAL3`, `CHRAND_PRINCIPAL3`, and `SETKEY_PRINCIPAL3`
+accept explicit key/salt tuples; the in-memory KDB supports normal,
+no-realm, and realm-only salt types. Historical key versions are not retained
+per enctype by this backend, so `keepold` can preserve only keys represented by
+the current record and `PURGEKEYS` removes versions represented there. The
+installed MIT client tooling does not expose every legacy RPC variant as a
+direct command; live gates cover only the operations exercised by the local
+MIT `kadmin` version.
