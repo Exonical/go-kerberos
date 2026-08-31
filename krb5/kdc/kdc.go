@@ -432,13 +432,16 @@ type Policy struct {
 
 func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
 	state := newASAuditState(request)
-	response := s.handleASReqCore(request, raw)
+	response := s.handleASReqCore(request, raw, &state)
 	state.SuccessState(response)
+	if !isKRBErrorResponse(response) {
+		state.Stage = AuditEncryptReply
+	}
 	s.auditAS(!isKRBErrorResponse(response), state)
 	return response
 }
 
-func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
+func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState *AuditState) []byte {
 	if request.PVNO != 5 || request.MsgType != 10 ||
 		request.ReqBody.CName == nil || request.ReqBody.SName == nil ||
 		request.ReqBody.Realm == "" || request.ReqBody.SName.NameString == nil {
@@ -494,8 +497,15 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 	if !ok {
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
+	if auditState != nil {
+		auditState.Service = serviceName
+		auditState.Stage = AuditServicePrincipal
+	}
 	if code := s.validateASAccount(clientRecord, serviceRecord, request.ReqBody.KDCOptions); code != 0 {
 		return s.errorResponse(code, request.ReqBody.SName)
+	}
+	if auditState != nil {
+		auditState.Stage = AuditValidatePolicy
 	}
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
@@ -584,6 +594,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
 		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
+		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, append([]string(nil), s.OTPIndicators...))
@@ -647,6 +660,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 		}
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
+		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
 		}
 		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
 			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
@@ -784,6 +800,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 				return response
 			}
+			if auditState != nil {
+				auditState.Stage = AuditIssueTicket
+			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
 				append([]string(nil), s.SPAKEPreauthIndicators...))
@@ -848,6 +867,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
 		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
+		}
 		selectedKDF := pkinit.PickKDFAlgorithm(verified.SupportedKDFs)
 		requestDER, err := asn1.Marshal(request)
 		if err != nil {
@@ -881,6 +903,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 			}
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 				return response
+			}
+			if auditState != nil {
+				auditState.Stage = AuditIssueTicket
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, false, nil, nil, nil)
@@ -958,6 +983,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte) []byte {
 	}
 	if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 		return response
+	}
+	if auditState != nil {
+		auditState.Stage = AuditIssueTicket
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)
@@ -1870,6 +1898,10 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 	if !ok {
 		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
 	}
+	if auditState != nil {
+		auditState.Service = serviceName
+		auditState.Stage = AuditServicePrincipal
+	}
 	if !serviceRecord.Expiration.IsZero() && s.now().After(serviceRecord.Expiration) {
 		return s.tgsErrorResponse(armor, kdcErrServiceExpired, request.ReqBody.SName)
 	}
@@ -2122,6 +2154,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		}
 		ticketPart.Flags |= types.TicketForwarded
 	}
+	if auditState != nil {
+		auditState.Stage = AuditValidatePolicy
+	}
 	etypeID, serviceKey, ok := selectServiceKey(request.ReqBody.EType, serviceRecord)
 	if options&types.KDCEncTktInSkey != 0 {
 		for _, requestedEType := range request.ReqBody.EType {
@@ -2141,6 +2176,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 	if authenticator.SubKey != nil {
 		replyKey = *authenticator.SubKey
 		replyUsage = 9
+	}
+	if auditState != nil {
+		auditState.Stage = AuditIssueTicket
 	}
 	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey)
 }
