@@ -81,6 +81,7 @@ func ResolveClientWithConfig(name string, cfg *config.Config) (*Keytab, error) {
 }
 
 func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, error) {
+	expand := false
 	if name == "" {
 		if client {
 			name = os.Getenv("KRB5_CLIENT_KTNAME")
@@ -94,19 +95,24 @@ func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, e
 		} else {
 			name = cfg.DefaultKeytabName
 		}
+		expand = name != ""
 	}
 	if name == "" {
 		if client {
 			name = "FILE:/var/kerberos/krb5/user/%{euid}/client.keytab"
+			expand = true
 		} else {
 			name = "/etc/krb5.keytab"
 		}
 	}
-	expanded, err := config.ExpandPathTokens(name)
-	if err != nil {
-		return nil, err
+	if expand {
+		var err error
+		name, err = config.ExpandPathTokens(name)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return Resolve(expanded)
+	return Resolve(name)
 }
 
 // AddEntry adds an entry to a keytab. MEMORY keytabs use this method to

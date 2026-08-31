@@ -72,6 +72,41 @@ func TestResolveClientWithConfigUsesMITNameChain(t *testing.T) {
 	}
 }
 
+func TestResolveWithConfigPreservesExplicitLiteralTokens(t *testing.T) {
+	dir := t.TempDir()
+	for _, token := range []string{"%{uid}", "%{unknown}"} {
+		path := filepath.Join(dir, "literal_"+token)
+		if err := os.WriteFile(path, []byte{0x05, 0x02}, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ResolveWithConfig("FILE:"+path, &config.Config{
+			DefaultKeytabName: "FILE:/must/not/use/%{unknown}",
+		}); err != nil {
+			t.Fatalf("ResolveWithConfig(%q): %v", path, err)
+		}
+	}
+	serverPath := filepath.Join(dir, "environment_%{unknown}")
+	if err := os.WriteFile(serverPath, []byte{0x05, 0x02}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_KTNAME", "FILE:"+serverPath)
+	if _, err := ResolveWithConfig("", &config.Config{
+		DefaultKeytabName: "FILE:/must/not/use/%{unknown}",
+	}); err != nil {
+		t.Fatalf("server environment keytab: %v", err)
+	}
+	clientPath := filepath.Join(dir, "client_environment_%{uid}")
+	if err := os.WriteFile(clientPath, []byte{0x05, 0x02}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_CLIENT_KTNAME", "FILE:"+clientPath)
+	if _, err := ResolveClientWithConfig("", &config.Config{
+		DefaultClientKeytabName: "FILE:/must/not/use/%{unknown}",
+	}); err != nil {
+		t.Fatalf("client environment keytab: %v", err)
+	}
+}
+
 func keytabRecord(p principal.Principal, timestamp uint32, kvno uint32, enctype uint16, key []byte) ([]byte, error) {
 	var record bytes.Buffer
 	if err := binary.Write(&record, binary.BigEndian, uint16(len(p.Components))); err != nil {

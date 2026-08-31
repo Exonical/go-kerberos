@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -27,17 +26,6 @@ func TestCachePathResolution(t *testing.T) {
 	}
 	if got := resolveCachePath("", func(string) string { return "" }, 42); got != "/tmp/krb5cc_42" {
 		t.Fatalf("default cache = %q", got)
-	}
-}
-
-func TestConfiguredCacheNameExpandsProfileDefault(t *testing.T) {
-	cfg := &config.Config{DefaultCCacheName: "FILE:/tmp/krb5cc_%{uid}"}
-	name, err := configuredCacheName("", func(string) string { return "" }, 42, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(name, "FILE:/tmp/krb5cc_") {
-		t.Fatalf("configured cache name = %q", name)
 	}
 }
 

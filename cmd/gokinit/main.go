@@ -122,31 +122,14 @@ func runInit(args []string, stdin io.Reader, _ io.Writer, stderr io.Writer, inte
 	if err != nil {
 		return err
 	}
-	cacheName, err := configuredCacheName(options.CachePath, os.Getenv, os.Getuid(), cfg)
-	if err != nil {
-		return err
-	}
 	cache := &ccache.Cache{
 		DefaultPrincipal: clientPrincipal,
 		Credentials:      []ccache.Credential{credentials.ToCCacheCredential()},
 	}
-	if err := ccache.WriteName(cacheName, cache); err != nil {
+	if err := ccache.WriteNameWithConfig(options.CachePath, cfg, cache); err != nil {
 		return fmt.Errorf("write cache: %w", err)
 	}
 	return nil
-}
-
-func configuredCacheName(explicit string, getenv func(string) string, uid int, cfg *config.Config) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	if value := getenv("KRB5CCNAME"); value != "" {
-		return value, nil
-	}
-	if cfg != nil && cfg.DefaultCCacheName != "" {
-		return config.ExpandPathTokens(cfg.DefaultCCacheName)
-	}
-	return fmt.Sprintf("/tmp/krb5cc_%d", uid), nil
 }
 
 func loadInitConfig(getenv func(string) string) (*config.Config, error) {
