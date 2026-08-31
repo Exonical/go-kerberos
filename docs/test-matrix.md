@@ -112,8 +112,13 @@ ticket and renewable lifetimes for requests with omitted maximum `till` or
 policy preserves permissive issuance, including proxiable tickets when
 requested; a non-nil policy clears disallowed flags, matching MIT's
 `get_ticket_flags` behavior. MIT normally configures preauthentication and
-flag restrictions per principal, while this implementation exposes
-server-level knobs. Renewable, postdated, and validation behavior is covered
+flag restrictions per principal; the Go KDC now also honors the KDB
+`DISALLOW_*` and `REQUIRES_*` attributes for AS and TGS requests. No hardware
+preauthentication mechanism is implemented, so a principal requiring hardware
+preauthentication receives `KDC_ERR_PREAUTH_FAILED` (24) when supplied
+non-hardware preauthentication; an absent mechanism receives
+`KDC_ERR_PREAUTH_REQUIRED` (25) with the available method hints. Renewable,
+postdated, and validation behavior is covered
 by unit and MIT integration tests. The optional `kdc.Server.Authorize` hook
 mirrors MIT's `kdcpolicy` plugin interface semantics for authenticated AS
 exchanges and validated TGS requests, preserving protocol-range KRB-ERROR

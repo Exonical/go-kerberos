@@ -4,13 +4,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestJSONFileAuditModule(t *testing.T) {
@@ -20,7 +24,8 @@ func TestJSONFileAuditModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := AuditState{RequestID: "request", InputTicketID: "in", OutputTicketID: "out",
-		Status: "success", Stage: AuditIssueTicket}
+		Status: "success", Stage: AuditIssueTicket, PreauthType: "enc-timestamp",
+		AuthIndicators: []string{"password"}, ErrorCode: 0, RemoteAddr: "127.0.0.1:88"}
 	if err := module.KDCStart(true); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +56,37 @@ func TestJSONFileAuditModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(events) != 3 || events[0]["event"] != "kdc_start" ||
-		events[1]["request_id"] != "request" || events[2]["success"] != false {
+		events[1]["request_id"] != "request" || events[1]["preauth_type"] != "enc-timestamp" ||
+		events[1]["remote_addr"] != "127.0.0.1:88" ||
+		events[2]["success"] != false {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestFuncAuditModule(t *testing.T) {
+	var events []string
+	var got AuditState
+	module := NewFuncAuditModule("func", func(event string, success bool, state AuditState) {
+		events = append(events, event)
+		if event == "as_req" {
+			got = state
+			if !success {
+				t.Errorf("AS event success = false")
+			}
+		}
+	})
+	state := AuditState{RequestID: "request", ErrorCode: 0}
+	if err := module.KDCStart(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := module.ASReq(true, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := module.KDCStop(true); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(events) != "[kdc_start as_req kdc_stop]" || got.RequestID != "request" {
+		t.Fatalf("events = %v, state = %#v", events, got)
 	}
 }
 
@@ -139,8 +173,12 @@ func TestAuditSuccessStateUsesTicketDER(t *testing.T) {
 		t.Fatalf("state = %#v", state)
 	}
 	var failure AuditState
-	failure.SuccessState([]byte{0x7e})
-	if failure.Status != "error" || failure.OutputTicketID != "" {
+	failure.SuccessState(mustMarshal(t, protocol.KRBError{
+		PVNO: 5, MsgType: 30, ErrorCode: 12, Realm: "EXAMPLE.COM",
+		SName: protocol.PrincipalName{NameType: 2, NameString: []string{"krbtgt", "EXAMPLE.COM"}},
+		STime: types.KerberosTime{Time: time.Unix(1, 0).UTC(), Present: true},
+	}))
+	if failure.Status != "error" || failure.ErrorCode != 12 || failure.OutputTicketID != "" {
 		t.Fatalf("error state = %#v", failure)
 	}
 }
@@ -167,5 +205,28 @@ func TestKDCListenAuditStopReportsListenerFailure(t *testing.T) {
 	if len(audit.starts) != 1 || !audit.starts[0] ||
 		len(audit.stops) != 1 || audit.stops[0] {
 		t.Fatalf("lifecycle events = starts %v stops %v", audit.starts, audit.stops)
+	}
+}
+
+func TestASAuditIncludesPreauthIndicatorsAndRemoteAddress(t *testing.T) {
+	now := time.Unix(2000000193, 0).UTC()
+	server, _ := testServer(t, now)
+	server.SPAKEPreauthIndicators = []string{"password", "spake"}
+	var got AuditState
+	server.AuditModules = []AuditModule{NewFuncAuditModule("capture",
+		func(event string, success bool, state AuditState) {
+			if event == "as_req" && success {
+				got = state
+			}
+		})}
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 193)
+	addPreauth(t, &request, now)
+	_ = server.handleMessage(mustMarshal(t, request), "127.0.0.1:12345")
+	if got.RemoteAddr != "127.0.0.1:12345" || got.PreauthType != "enc-timestamp" {
+		t.Fatalf("audit state = %#v", got)
 	}
 }

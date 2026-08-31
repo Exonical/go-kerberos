@@ -75,6 +75,7 @@ const (
 	DisallowTGTBased    uint32 = 0x00000004
 	DisallowRenewable   uint32 = 0x00000008
 	DisallowProxiable   uint32 = 0x00000010
+	DisallowDupSkey     uint32 = 0x00000020
 	DisallowAllTickets  uint32 = 0x00000040
 	RequiresPreAuth     uint32 = 0x00000080
 	RequiresHWAuth      uint32 = 0x00000100
@@ -168,6 +169,14 @@ func NewDatabase(realm string) *Database {
 		policies:   make(map[string]PolicyRecord),
 		UpdateLog:  NewUpdateLog(1024),
 	}
+}
+
+// GetRealm returns the database's default realm.
+func (db *Database) GetRealm() string {
+	if db == nil {
+		return ""
+	}
+	return db.Realm
 }
 
 // ConfigureUpdateLog replaces the database's incremental propagation log.
