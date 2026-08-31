@@ -607,17 +607,20 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
-		s.recordPreauthSuccess(clientName, &clientRecord)
-		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
-			return response
-		}
 		if requiresHWAuth {
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
 		if auditState != nil {
 			auditState.PreauthType = "otp"
 			auditState.AuthIndicators = append([]string(nil), s.OTPIndicators...)
+		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
 		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
@@ -675,7 +678,6 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				nil, request.ReqBody.Nonce, armor)
 		}
 		clientKey = matchedKey
-		s.recordPreauthSuccess(clientName, &clientRecord)
 		if s.passwordExpiredForService(clientRecord, serviceRecord) {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
@@ -687,11 +689,15 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
 		if auditState != nil {
 			auditState.PreauthType = "enc-challenge"
 			if s.EncryptedChallengeIndicator != "" {
 				auditState.AuthIndicators = []string{s.EncryptedChallengeIndicator}
 			}
+		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
 		}
 		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
 			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
@@ -822,7 +828,6 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if err != nil {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			s.recordPreauthSuccess(clientName, &clientRecord)
 			if s.passwordExpiredForService(clientRecord, serviceRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
@@ -832,9 +837,13 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if requiresHWAuth {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
+			s.recordPreauthSuccess(clientName, &clientRecord)
 			if auditState != nil {
 				auditState.PreauthType = "spake"
 				auditState.AuthIndicators = append([]string(nil), s.SPAKEPreauthIndicators...)
+			}
+			if auditState != nil {
+				auditState.Stage = AuditIssueTicket
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
@@ -905,7 +914,12 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		if auditState != nil {
 			auditState.PreauthType = "pkinit"
-			auditState.AuthIndicators = append(append([]string(nil), s.PKINITIndicators...), certIndicators...)
+			if !anonymousRequest {
+				auditState.AuthIndicators = append(append([]string(nil), s.PKINITIndicators...), certIndicators...)
+			}
+		}
+		if auditState != nil {
+			auditState.Stage = AuditIssueTicket
 		}
 		selectedKDF := pkinit.PickKDFAlgorithm(verified.SupportedKDFs)
 		requestDER, err := asn1.Marshal(request)
@@ -940,6 +954,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			}
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 				return response
+			}
+			if auditState != nil {
+				auditState.Stage = AuditIssueTicket
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, false, nil, nil, nil)
@@ -1008,7 +1025,6 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
-	s.recordPreauthSuccess(clientName, &clientRecord)
 	if s.passwordExpiredForService(clientRecord, serviceRecord) {
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
@@ -1025,8 +1041,12 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
+	s.recordPreauthSuccess(clientName, &clientRecord)
 	if auditState != nil {
 		auditState.PreauthType = "enc-timestamp"
+	}
+	if auditState != nil {
+		auditState.Stage = AuditIssueTicket
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)
@@ -2236,6 +2256,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 			return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 		}
 		ticketPart.Flags |= types.TicketForwarded
+	}
+	if auditState != nil {
+		auditState.Stage = AuditValidatePolicy
 	}
 	etypeID, serviceKey, ok := selectServiceKey(request.ReqBody.EType, serviceRecord)
 	if options&types.KDCEncTktInSkey != 0 {

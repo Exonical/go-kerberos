@@ -2473,6 +2473,9 @@ func TestServerPrincipalRequiresHardwarePreauthFails(t *testing.T) {
 		t.Fatalf("client lookup: %v, %v", err, ok)
 	}
 	record.Flags |= kdb.RequiresHWAuth
+	record.FailAuthCount = 3
+	record.LastSuccess = now.Add(-time.Hour)
+	lastSuccess := record.LastSuccess
 	if err := db.UpdatePrincipal(record); err != nil {
 		t.Fatal(err)
 	}
@@ -2495,6 +2498,13 @@ func TestServerPrincipalRequiresHardwarePreauthFails(t *testing.T) {
 	}
 	if failure.ErrorCode != kdcErrPreauthFailed {
 		t.Fatalf("error code = %d, want %d", failure.ErrorCode, kdcErrPreauthFailed)
+	}
+	record, ok, err = db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup after hardware rejection: %v, %v", err, ok)
+	}
+	if record.FailAuthCount != 3 || !record.LastSuccess.Equal(lastSuccess) {
+		t.Fatalf("hardware rejection changed authentication state: %#v", record)
 	}
 }
 

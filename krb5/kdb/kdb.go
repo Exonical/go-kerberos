@@ -111,6 +111,7 @@ var (
 	ErrPasswordClasses   = errors.New("password does not contain enough character classes")
 	ErrPasswordTooSoon   = errors.New("password minimum life has not expired")
 	ErrPasswordReuse     = errors.New("password reuse")
+	ErrBadKeySalts       = errors.New("invalid key/salt tuples")
 )
 
 // Store resolves principal records for the KDC. Lookup returns false with a
@@ -361,6 +362,11 @@ func deriveRecordAt(name principal.Principal, password string, kvno uint32, now 
 
 func deriveRecordWithTuplesAt(name principal.Principal, password string, kvno uint32,
 	tuples []KeySaltTuple, now time.Time) (PrincipalRecord, error) {
+	var err error
+	tuples, err = normalizeKeySaltTuples(tuples)
+	if err != nil {
+		return PrincipalRecord{}, err
+	}
 	if len(tuples) == 0 {
 		tuples = make([]KeySaltTuple, 0, 6)
 		for _, enctype := range []int32{
@@ -389,6 +395,25 @@ func deriveRecordWithTuplesAt(name principal.Principal, password string, kvno ui
 	}
 	return PrincipalRecord{Name: name, Keys: keys, Strings: make(map[string]string),
 		KVNO: kvno, LastPasswordChange: now}, nil
+}
+
+func normalizeKeySaltTuples(tuples []KeySaltTuple) ([]KeySaltTuple, error) {
+	if len(tuples) < 2 {
+		return tuples, nil
+	}
+	seen := make(map[int32]KeySaltTuple, len(tuples))
+	normalized := make([]KeySaltTuple, 0, len(tuples))
+	for _, tuple := range tuples {
+		if previous, ok := seen[tuple.Enctype]; ok {
+			if previous.SaltType != tuple.SaltType {
+				return nil, fmt.Errorf("enctype %d: %w", tuple.Enctype, ErrBadKeySalts)
+			}
+			continue
+		}
+		seen[tuple.Enctype] = tuple
+		normalized = append(normalized, tuple)
+	}
+	return normalized, nil
 }
 
 func saltForPrincipal(name principal.Principal, saltType int32) ([]byte, error) {
@@ -821,6 +846,10 @@ func (db *Database) RandomizeKeysWithKeySalts(name principal.Principal, keepOld 
 	if db == nil {
 		return nil, ErrPrincipalNotFound
 	}
+	normalized, err := normalizeKeySaltTuples(tuples)
+	if err != nil {
+		return nil, err
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	key := canonical(name)
@@ -830,10 +859,11 @@ func (db *Database) RandomizeKeysWithKeySalts(name principal.Principal, keepOld 
 	}
 	nextKVNO := current.KVNO + 1
 	keys := make(map[int32]Key, len(current.Keys))
+	generated := make(map[int32]Key, len(current.Keys))
 	if keepOld {
 		keys = copyKeys(current.Keys)
 	}
-	if len(tuples) == 0 {
+	if len(normalized) == 0 {
 		for enctype, old := range current.Keys {
 			etype, err := crypto.NewRegistry().Get(enctype)
 			if err != nil {
@@ -843,10 +873,11 @@ func (db *Database) RandomizeKeysWithKeySalts(name principal.Principal, keepOld 
 			if _, err := rand.Read(value); err != nil {
 				return nil, err
 			}
-			keys[enctype] = Key{Enctype: enctype, KVNO: nextKVNO, Key: value, Salt: old.Salt}
+			generated[enctype] = Key{Enctype: enctype, KVNO: nextKVNO, Key: value, Salt: old.Salt}
+			keys[enctype] = generated[enctype]
 		}
 	} else {
-		for _, tuple := range tuples {
+		for _, tuple := range normalized {
 			etype, err := crypto.NewRegistry().Get(tuple.Enctype)
 			if err != nil {
 				return nil, err
@@ -859,14 +890,15 @@ func (db *Database) RandomizeKeysWithKeySalts(name principal.Principal, keepOld 
 			if err != nil {
 				return nil, err
 			}
-			keys[tuple.Enctype] = Key{Enctype: tuple.Enctype, KVNO: nextKVNO, Key: value, Salt: string(salt)}
+			generated[tuple.Enctype] = Key{Enctype: tuple.Enctype, KVNO: nextKVNO, Key: value, Salt: string(salt)}
+			keys[tuple.Enctype] = generated[tuple.Enctype]
 		}
 	}
 	current.Keys = keys
 	current.KVNO = nextKVNO
 	db.principals[key] = current
 	db.recordUpdateLocked(current, false)
-	return keyList(keys), nil
+	return keyList(generated), nil
 }
 
 // PurgeKeys removes all key versions except keepKVNO.
@@ -924,9 +956,10 @@ func (db *Database) SetKeys(name principal.Principal, keys []Key, keepOld bool) 
 		next = copyKeys(current.Keys)
 	}
 	kvno := current.KVNO
+	defaultKVNO := current.KVNO + 1
 	for _, value := range keys {
 		if value.KVNO == 0 {
-			value.KVNO = kvno + 1
+			value.KVNO = defaultKVNO
 		}
 		if value.KVNO > kvno {
 			kvno = value.KVNO
@@ -1147,9 +1180,16 @@ func (db *Database) AddAlias(alias, target string) error {
 		return fmt.Errorf("add alias: target principal %q does not exist", parsedTarget)
 	}
 	if canonical(*parsedAlias) == canonical(*parsedTarget) {
-		return fmt.Errorf("add alias: alias and target are identical")
+		return ErrPrincipalExists
 	}
-	db.aliases[canonical(*parsedAlias)] = *parsedTarget
+	aliasKey := canonical(*parsedAlias)
+	if _, exists := db.principals[aliasKey]; exists {
+		return ErrPrincipalExists
+	}
+	if _, exists := db.aliases[aliasKey]; exists {
+		return ErrPrincipalExists
+	}
+	db.aliases[aliasKey] = *parsedTarget
 	return nil
 }
 
