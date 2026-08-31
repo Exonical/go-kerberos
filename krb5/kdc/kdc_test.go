@@ -2478,6 +2478,15 @@ func TestServerPrincipalRequiresHardwarePreauthFails(t *testing.T) {
 	}
 	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
 		Components: []string{"krbtgt", "TEST.REALM"}}
+	var required protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, asRequest(user, service, 192))),
+		&required); err != nil {
+		t.Fatal(err)
+	}
+	if required.ErrorCode != kdcErrPreauthRequired {
+		t.Fatalf("missing hardware preauth error = %d, want %d",
+			required.ErrorCode, kdcErrPreauthRequired)
+	}
 	request := asRequest(user, service, 192)
 	addPreauth(t, &request, now)
 	var failure protocol.KRBError

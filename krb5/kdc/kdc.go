@@ -521,8 +521,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	if auditState != nil {
 		auditState.Stage = AuditValidatePolicy
 	}
-	preauthRequired := !s.DisablePreauth || clientRecord.Flags&kdb.RequiresPreAuth != 0
 	requiresHWAuth := clientRecord.Flags&kdb.RequiresHWAuth != 0
+	preauthRequired := !s.DisablePreauth ||
+		clientRecord.Flags&(kdb.RequiresPreAuth|kdb.RequiresHWAuth) != 0
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
@@ -559,7 +560,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
-	if otpEnabled && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
+	if otpEnabled && !requiresHWAuth && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
 		spakePA == nil && otpPA == nil && preauthRequired {
 		if armor == nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -622,7 +623,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, append([]string(nil), s.OTPIndicators...))
 	}
-	if otpEnabled && armor == nil && !anonymousRequest {
+	if otpEnabled && !requiresHWAuth && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
 	encryptedChallengePA := findPA(request.PAData, paEncryptedChallenge)
@@ -702,7 +703,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA},
 			configuredIndicator(s.EncryptedChallengeIndicator))
 	}
-	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
+	if !anonymousRequest && !requiresHWAuth && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && preauthRequired {
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp},
@@ -719,7 +720,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
 	selectedSPAKEGroup := s.selectSPAKEGroup(spakePA)
-	if !anonymousRequest && selectedSPAKEGroup != 0 &&
+	if !anonymousRequest && !requiresHWAuth && selectedSPAKEGroup != 0 &&
 		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
 			{PADataType: paSPAKE, PADataValue: marshalDER(protocol.PASPAKE{
