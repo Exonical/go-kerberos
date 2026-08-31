@@ -446,6 +446,14 @@ func (s *Server) authorize(client principal.Principal, op string, target princip
 	return strings.EqualFold(a, b)
 }
 
+func (s *Server) authorizePair(client principal.Principal, op string,
+	first, second principal.Principal) bool {
+	if s.ACL != nil {
+		return s.ACL(client, op, first) && s.ACL(client, op, second)
+	}
+	return s.authorize(client, op, first)
+}
+
 func (s *Server) authorizeRename(client, source, destination principal.Principal) bool {
 	if s.ACL != nil {
 		return s.ACL(client, "delete", source) &&
@@ -740,6 +748,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "change-password", p) {
 			return status(authChangePass)
 		}
+		if code := s.checkSelfKeyChange(client, p); code != 0 {
+			return status(code)
+		}
 		keys, err := s.Database.RandomizeKeys(p)
 		if err != nil {
 			return status(kdbCode(err))
@@ -768,6 +779,10 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "change-password", p) {
 			return status(authChangePass)
 		}
+		if code := s.checkSelfKeyChange(client, p); code != 0 {
+			return status(code)
+		}
+		keepOld = clampSelfKeepOld(client, p, keepOld)
 		keys, err := s.Database.RandomizeKeysWithKeySalts(p, keepOld, toKDBKeySaltTuples(tuples))
 		if err != nil {
 			return status(kdbCode(err))
@@ -832,7 +847,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !strings.EqualFold(alias.Realm, target.Realm) {
 			return status(43787549)
 		}
-		if !s.authorize(client, "add-alias", alias) {
+		if !s.authorizePair(client, "add-alias", alias, target) {
 			return status(authAdd)
 		}
 		event := HookEvent{Operation: "alias", Principal: alias, NewPrincipal: target}
@@ -1051,6 +1066,35 @@ func (s *Server) now() time.Time {
 	return time.Now().UTC()
 }
 
+func (s *Server) checkSelfKeyChange(client, target principal.Principal) uint32 {
+	if !principalEqual(client, target) {
+		return 0
+	}
+	record, ok, err := s.Database.Lookup(target)
+	if err != nil || !ok || record.Policy == "" {
+		return 0
+	}
+	policy, err := s.Database.GetPolicy(record.Policy)
+	if err != nil {
+		return kdbCode(err)
+	}
+	if policy.MinLife > 0 && !record.LastPasswordChange.IsZero() &&
+		s.now().Before(record.LastPasswordChange.Add(time.Duration(policy.MinLife)*time.Second)) {
+		return passTooSoon
+	}
+	return 0
+}
+
+// The in-memory KDB represents keepold as retaining the prior key set, rather
+// than a count of key versions. Its retained set is bounded to one prior set,
+// which is within MIT's MAX_SELF_KEEPOLD limit of five for self changes.
+func clampSelfKeepOld(client, target principal.Principal, keepOld bool) bool {
+	if !keepOld {
+		return false
+	}
+	return true
+}
+
 func kdbCode(err error) uint32 {
 	if err == nil {
 		return 0
@@ -1076,6 +1120,8 @@ func kdbCode(err error) uint32 {
 		return passTooSoon
 	case qualityCode(err) != 0:
 		return qualityCode(err)
+	case errors.Is(err, kdb.ErrBadKeySalts):
+		return 43787578
 	default:
 		return 43787548
 	}

@@ -2,6 +2,7 @@ package kdb
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 	"time"
 
@@ -11,6 +12,15 @@ import (
 
 var _ Store = (*Database)(nil)
 var _ AliasResolver = (*Database)(nil)
+
+func mustPrincipal(t *testing.T, value string) principal.Principal {
+	t.Helper()
+	name, err := principal.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *name
+}
 
 func TestChangePasswordPreservesAdministrativeFields(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
@@ -389,5 +399,95 @@ func TestAddAliasRequiresCanonicalTarget(t *testing.T) {
 	db := NewDatabase("TEST.REALM")
 	if err := db.AddAlias("alice-alias", "alice"); err == nil {
 		t.Fatal("AddAlias accepted missing target")
+	}
+}
+
+func TestSetKeysVersionlessBlocksShareNextKVNO(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "old-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetKeys(mustPrincipal(t, "alice@TEST.REALM"), []Key{
+		{Enctype: crypto.EnctypeAES128SHA1, Key: []byte{1, 2, 3}},
+		{Enctype: crypto.EnctypeAES256SHA1, Key: []byte{4, 5, 6}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(mustPrincipal(t, "alice@TEST.REALM"))
+	if err != nil || !ok {
+		t.Fatalf("Lookup = %v, %v", ok, err)
+	}
+	if record.KVNO != 2 {
+		t.Fatalf("record KVNO = %d, want 2", record.KVNO)
+	}
+	for enctype, key := range record.Keys {
+		if key.KVNO != 2 {
+			t.Fatalf("enctype %d KVNO = %d, want 2", enctype, key.KVNO)
+		}
+	}
+}
+
+func TestKeySaltTuplesDeduplicateAndRejectConflicts(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	tuples := []KeySaltTuple{
+		{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeNormal},
+		{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeNormal},
+	}
+	if err := db.CreatePrincipalWithKeySalts("alice", "password", tuples); err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(mustPrincipal(t, "alice@TEST.REALM"))
+	if err != nil || !ok || len(record.Keys) != 1 {
+		t.Fatalf("deduplicated keys = %#v, %v, %v", record.Keys, ok, err)
+	}
+	conflicting := []KeySaltTuple{
+		{Enctype: crypto.EnctypeAES256SHA1, SaltType: SaltTypeNormal},
+		{Enctype: crypto.EnctypeAES256SHA1, SaltType: SaltTypeNoRealm},
+	}
+	if err := db.CreatePrincipalWithKeySalts("bob", "password", conflicting); !errors.Is(err, ErrBadKeySalts) {
+		t.Fatalf("conflicting tuples error = %v, want ErrBadKeySalts", err)
+	}
+}
+
+func TestRandomizeKeysWithKeySaltsReturnsOnlyGeneratedKeys(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.CreatePrincipalWithKeySalts("alice", "password",
+		[]KeySaltTuple{{Enctype: crypto.EnctypeAES128SHA1, SaltType: SaltTypeNormal}}); err != nil {
+		t.Fatal(err)
+	}
+	name := mustPrincipal(t, "alice@TEST.REALM")
+	keys, err := db.RandomizeKeysWithKeySalts(name, true,
+		[]KeySaltTuple{
+			{Enctype: crypto.EnctypeAES256SHA1, SaltType: SaltTypeNormal},
+			{Enctype: crypto.EnctypeAES256SHA1, SaltType: SaltTypeNormal},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0].Enctype != crypto.EnctypeAES256SHA1 {
+		t.Fatalf("generated keys = %#v, want only AES256", keys)
+	}
+	record, ok, err := db.Lookup(name)
+	if err != nil || !ok || len(record.Keys) != 2 {
+		t.Fatalf("retained record keys = %#v, %v, %v", record.Keys, ok, err)
+	}
+}
+
+func TestAddAliasRejectsRetargetAndCanonicalCollision(t *testing.T) {
+	db := NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddPrincipal("bob", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAlias("alias", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(db.AddAlias("alias", "bob"), ErrPrincipalExists) {
+		t.Fatal("retargeting existing alias was accepted")
+	}
+	if !errors.Is(db.AddAlias("alice", "bob"), ErrPrincipalExists) {
+		t.Fatal("alias colliding with canonical principal was accepted")
 	}
 }
