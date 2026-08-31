@@ -263,32 +263,31 @@ func (db *Database) AddPrincipal(name, password string, kvnos ...uint32) error {
 
 // CreatePrincipal adds a principal and fails if it already exists.
 func (db *Database) CreatePrincipal(name, password string) error {
-	if db == nil {
-		return fmt.Errorf("create principal: nil database")
-	}
-	parsedName, err := parseName(name, db.Realm)
-	if err != nil {
-		return fmt.Errorf("create principal: %w", err)
-	}
-	record, err := deriveRecord(*parsedName, password, 1)
-	if err != nil {
-		return err
-	}
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	key := canonical(*parsedName)
-	if _, exists := db.principals[key]; exists {
-		return ErrPrincipalExists
-	}
-	db.principals[key] = record
-	db.recordUpdateLocked(record, false)
-	return nil
+	return db.CreatePrincipalWithOptions(name, password, nil)
+}
+
+// CreatePrincipalWithOptions creates a principal and, when policy is
+// non-nil, assigns an existing policy atomically with the creation.
+func (db *Database) CreatePrincipalWithOptions(name, password string, policy *PolicyRecord) error {
+	return db.createPrincipalWithTuples(name, password, nil, policy)
 }
 
 // CreatePrincipalWithKeySalts creates a principal with the requested key
 // and salt tuples. An empty tuple list uses the database's default enctypes.
 func (db *Database) CreatePrincipalWithKeySalts(name, password string,
 	tuples []KeySaltTuple) error {
+	return db.createPrincipalWithTuples(name, password, tuples, nil)
+}
+
+// CreatePrincipalWithKeySaltsAndOptions atomically creates a principal with
+// explicit key/salt tuples and assigns an existing policy.
+func (db *Database) CreatePrincipalWithKeySaltsAndOptions(name, password string,
+	tuples []KeySaltTuple, policy *PolicyRecord) error {
+	return db.createPrincipalWithTuples(name, password, tuples, policy)
+}
+
+func (db *Database) createPrincipalWithTuples(name, password string,
+	tuples []KeySaltTuple, policy *PolicyRecord) error {
 	if db == nil {
 		return fmt.Errorf("create principal: nil database")
 	}
@@ -296,7 +295,7 @@ func (db *Database) CreatePrincipalWithKeySalts(name, password string,
 	if err != nil {
 		return fmt.Errorf("create principal: %w", err)
 	}
-	record, err := deriveRecordWithTuples(*parsedName, password, 1, tuples)
+	record, err := deriveRecordWithTuplesAt(*parsedName, password, 1, tuples, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -305,6 +304,20 @@ func (db *Database) CreatePrincipalWithKeySalts(name, password string,
 	key := canonical(*parsedName)
 	if _, exists := db.principals[key]; exists {
 		return ErrPrincipalExists
+	}
+	if policy != nil {
+		current, exists := db.policies[policy.Name]
+		if !exists {
+			return ErrPolicyNotFound
+		}
+		policy = &current
+		record.Policy = policy.Name
+		record.MaxLife = time.Duration(policy.MaxLife) * time.Second
+		record.MaxRenew = time.Duration(policy.MaxRenewableLife) * time.Second
+		created := record.LastPasswordChange
+		if policy.MaxLife > 0 {
+			record.PasswordExpiration = created.Add(time.Duration(policy.MaxLife) * time.Second)
+		}
 	}
 	db.principals[key] = record
 	db.recordUpdateLocked(record, false)
@@ -330,11 +343,15 @@ func (db *Database) SetPrincipalPolicy(name principal.Principal, policy string) 
 }
 
 func deriveRecord(name principal.Principal, password string, kvno uint32) (PrincipalRecord, error) {
-	return deriveRecordWithTuples(name, password, kvno, nil)
+	return deriveRecordAt(name, password, kvno, time.Now().UTC())
 }
 
-func deriveRecordWithTuples(name principal.Principal, password string, kvno uint32,
-	tuples []KeySaltTuple) (PrincipalRecord, error) {
+func deriveRecordAt(name principal.Principal, password string, kvno uint32, now time.Time) (PrincipalRecord, error) {
+	return deriveRecordWithTuplesAt(name, password, kvno, nil, now)
+}
+
+func deriveRecordWithTuplesAt(name principal.Principal, password string, kvno uint32,
+	tuples []KeySaltTuple, now time.Time) (PrincipalRecord, error) {
 	if len(tuples) == 0 {
 		tuples = make([]KeySaltTuple, 0, 6)
 		for _, enctype := range []int32{
@@ -362,7 +379,7 @@ func deriveRecordWithTuples(name principal.Principal, password string, kvno uint
 		keys[tuple.Enctype] = Key{Enctype: tuple.Enctype, KVNO: kvno, Key: derived, Salt: string(salt)}
 	}
 	return PrincipalRecord{Name: name, Keys: keys, Strings: make(map[string]string),
-		KVNO: kvno, LastPasswordChange: time.Now().UTC()}, nil
+		KVNO: kvno, LastPasswordChange: now}, nil
 }
 
 func saltForPrincipal(name principal.Principal, saltType int32) ([]byte, error) {
@@ -545,6 +562,13 @@ func (db *Database) ChangePassword(name principal.Principal, password string) er
 // checks. A nil policy performs an unrestricted password change.
 func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password string,
 	now time.Time, policy *PolicyRecord, bypassMinLife bool) error {
+	return db.ChangePasswordWithPolicyAndKeepOld(name, password, now, policy, bypassMinLife, false)
+}
+
+// ChangePasswordWithPolicyAndKeepOld changes a principal password and retains
+// the previous key set in PasswordHistory when keepOld is requested.
+func (db *Database) ChangePasswordWithPolicyAndKeepOld(name principal.Principal, password string,
+	now time.Time, policy *PolicyRecord, bypassMinLife, keepOld bool) error {
 	if db == nil {
 		return ErrPrincipalNotFound
 	}
@@ -565,6 +589,9 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 			return err
 		}
 	}
+	if keepOld && policy == nil {
+		current.PasswordHistory = append([]map[int32]Key{copyKeys(current.Keys)}, current.PasswordHistory...)
+	}
 	if policy != nil {
 		if policy.MinLength > 0 && int32(len(password)) < policy.MinLength {
 			return ErrPasswordTooShort
@@ -584,6 +611,9 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 				current.PasswordHistory = nil
 			}
 			historyLimit := int(policy.HistoryNum) - 1
+			if keepOld && historyLimit < 1 {
+				historyLimit = 1
+			}
 			limit := historyLimit
 			if passwordMatchesKeys(next.Keys, current.Keys) {
 				return ErrPasswordReuse
@@ -644,6 +674,61 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 	current.LastPasswordChange = now.UTC()
 	db.principals[key] = current
 	db.recordUpdateLocked(current, false)
+	return nil
+}
+
+// CheckPasswordPolicy validates the built-in policy checks without mutating
+// the principal. Password-quality modules are intentionally outside this API
+// so callers can run them after these mandatory checks.
+func (db *Database) CheckPasswordPolicy(name principal.Principal, password string,
+	now time.Time, policy *PolicyRecord, bypassMinLife bool) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	key := canonical(name)
+	current, ok := db.principals[key]
+	if !ok {
+		return ErrPrincipalNotFound
+	}
+	if policy == nil {
+		return nil
+	}
+	if policy.MinLength > 0 && int32(len(password)) < policy.MinLength {
+		return ErrPasswordTooShort
+	}
+	if policy.MinClasses > 0 && passwordClasses(password) < policy.MinClasses {
+		return ErrPasswordClasses
+	}
+	if !bypassMinLife && policy.MinLife > 0 && !current.LastPasswordChange.IsZero() &&
+		now.Before(current.LastPasswordChange.Add(time.Duration(policy.MinLife)*time.Second)) {
+		return ErrPasswordTooSoon
+	}
+	if policy.HistoryNum > 0 {
+		next, err := deriveRecord(current.Name, password, current.KVNO+1)
+		if err != nil {
+			return err
+		}
+		if len(current.Keys) > 0 && len(current.Keys) != len(next.Keys) {
+			next.Keys, err = deriveKeys(current.Name, password, current.Keys, current.KVNO+1)
+			if err != nil {
+				return err
+			}
+		}
+		if passwordMatchesKeys(next.Keys, current.Keys) {
+			return ErrPasswordReuse
+		}
+		limit := int(policy.HistoryNum) - 1
+		if limit > len(current.PasswordHistory) {
+			limit = len(current.PasswordHistory)
+		}
+		for _, historical := range current.PasswordHistory[:limit] {
+			if passwordMatchesKeys(next.Keys, historical) {
+				return ErrPasswordReuse
+			}
+		}
+	}
 	return nil
 }
 

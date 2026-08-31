@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -69,6 +70,19 @@ func (h stageHook) Handle(event HookEvent) error {
 	*h.events = append(*h.events, event)
 	if event.Stage == h.stage {
 		return h.err
+	}
+	return nil
+}
+
+type deletePolicyHook struct {
+	db   *kdb.Database
+	name string
+}
+
+func (h deletePolicyHook) Name() string { return "delete-policy" }
+func (h deletePolicyHook) Handle(event HookEvent) error {
+	if event.Stage == HookPreCommit {
+		return h.db.DeletePolicy(h.name)
 	}
 	return nil
 }
@@ -251,5 +265,93 @@ func TestKadm5CreateAppliesPasswordPolicy(t *testing.T) {
 	}
 	if record.Policy != "strong" {
 		t.Fatalf("policy = %q, want strong", record.Policy)
+	}
+}
+
+func TestKadm5CreateRejectsPolicyDeletedBetweenValidationAndCommit(t *testing.T) {
+	const realm = "EXAMPLE.COM"
+	db := kdb.NewDatabase(realm)
+	client, _ := principal.Parse("admin/admin@" + realm)
+	target, _ := principal.Parse("alice@" + realm)
+	if err := db.AddPrincipal("admin/admin@"+realm, "admin-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "ephemeral", MinLength: 8}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Database:       db,
+		API:            APIv4,
+		AdminPrincipal: *client,
+		Hooks:          []Kadm5Hook{deletePolicyHook{db: db, name: "ephemeral"}},
+	}
+	body := xdrWriter{}
+	body.u32(APIv4)
+	writeEntry(&body, PrincipalEntry{Principal: *target, Policy: "ephemeral"}, KADM5Policy)
+	body.i32(KADM5Policy)
+	body.nullString("valid-password")
+	if code := dispatchStatus(t, server, *client, createPrincipal, body.bytes()); code == 0 {
+		t.Fatal("create succeeded after policy was deleted during commit")
+	}
+	if _, ok, err := db.Lookup(*target); err != nil || ok {
+		t.Fatalf("lookup after rejected create = ok %v, err %v", ok, err)
+	}
+}
+
+func TestDictionaryPasswordQualityIsCached(t *testing.T) {
+	const realm = "EXAMPLE.COM"
+	db := kdb.NewDatabase(realm)
+	name, _ := principal.Parse("alice@" + realm)
+	path := filepath.Join(t.TempDir(), "dict")
+	if err := os.WriteFile(path, []byte("first\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Database: db, DictionaryFile: path}
+	if err := server.checkPasswordQuality("first", "policy", *name); err == nil {
+		t.Fatal("first dictionary word was accepted")
+	}
+	if err := os.WriteFile(path, []byte("second\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.checkPasswordQuality("first", "policy", *name); err == nil {
+		t.Fatal("cached dictionary word was accepted")
+	}
+	if err := server.checkPasswordQuality("second", "policy", *name); err != nil {
+		t.Fatalf("new dictionary word unexpectedly loaded: %v", err)
+	}
+}
+
+func TestChpassPrincipal3KeepOldRetainsKVNO(t *testing.T) {
+	const realm = "EXAMPLE.COM"
+	db := kdb.NewDatabase(realm)
+	admin, _ := principal.Parse("admin/admin@" + realm)
+	target, _ := principal.Parse("alice@" + realm)
+	if err := db.AddPrincipal("admin/admin@"+realm, "admin-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddPrincipal("alice@"+realm, "old-password", 1); err != nil {
+		t.Fatal(err)
+	}
+	before, ok, err := db.Lookup(*target)
+	if err != nil || !ok {
+		t.Fatalf("lookup before = %v, %v", err, ok)
+	}
+	old := before.Keys[crypto.EnctypeAES256SHA1]
+	server := &Server{Database: db, API: APIv4, AdminPrincipal: *admin}
+	body := xdrWriter{}
+	body.u32(APIv4)
+	body.principal(*target)
+	body.boolean(true)
+	body.u32(0)
+	body.nullString("new-password")
+	if code := dispatchStatus(t, server, *admin, chpassPrincipal3, body.bytes()); code != 0 {
+		t.Fatalf("chpass status = %d", code)
+	}
+	after, ok, err := db.Lookup(*target)
+	if err != nil || !ok {
+		t.Fatalf("lookup after = %v, %v", err, ok)
+	}
+	if len(after.PasswordHistory) == 0 || after.PasswordHistory[0][crypto.EnctypeAES256SHA1].KVNO != old.KVNO {
+		t.Fatalf("old key history = %#v", after.PasswordHistory)
 	}
 }
