@@ -1986,11 +1986,11 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 	}
 	if serviceRecord.Flags&kdb.RequiresHWAuth != 0 &&
 		ticketPart.Flags&types.TicketHWAuthent == 0 {
-		return s.tgsErrorResponse(armor, 60, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	if serviceRecord.Flags&kdb.RequiresPreAuth != 0 &&
 		ticketPart.Flags&types.TicketPreAuthent == 0 {
-		return s.tgsErrorResponse(armor, 60, request.ReqBody.SName)
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	if auditState != nil {
 		auditState.Stage = AuditValidatePolicy

@@ -63,7 +63,6 @@ type Server struct {
 	dictionaryKey string
 }
 
-// NewServer creates a v4 kadm5 server.
 // Backend is the mutable principal and policy store used by the kadm5 server.
 type Backend interface {
 	Lookup(principal.Principal) (kdb.PrincipalRecord, bool, error)
@@ -92,6 +91,7 @@ type Backend interface {
 
 var _ Backend = (*kdb.Database)(nil)
 
+// NewServer creates a v4 kadm5 server.
 func NewServer(database Backend, serviceKeytab *keytab.Keytab) *Server {
 	return &Server{Database: database, Keytab: serviceKeytab, API: APIv4}
 }
