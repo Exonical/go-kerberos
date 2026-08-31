@@ -2409,6 +2409,151 @@ func TestServerPolicyClearsDisallowedFlags(t *testing.T) {
 	}
 }
 
+func TestServerPrincipalFlagsClearASOptions(t *testing.T) {
+	now := time.Unix(2000000190, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	record, ok, err := db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup: %v, %v", err, ok)
+	}
+	record.Flags |= kdb.DisallowForwardable | kdb.DisallowProxiable | kdb.DisallowRenewable
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	request := asRequest(user, service, 190)
+	request.ReqBody.KDCOptions |= types.KDCForwardable | types.KDCProxiable | types.KDCRenewable
+	addPreauth(t, &request, now)
+	part := asReplyPart(t, server.HandleMessage(mustMarshal(t, request)))
+	if part.Flags&(types.TicketForwardable|types.TicketProxiable|types.TicketRenewable) != 0 {
+		t.Fatalf("principal restrictions not applied: flags %#x", part.Flags)
+	}
+	if part.RenewTill != nil {
+		t.Fatalf("principal renewable restriction left renew-till: %v", part.RenewTill)
+	}
+}
+
+func TestServerPrincipalRequiresPreauthWhenDisabled(t *testing.T) {
+	now := time.Unix(2000000191, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	server.DisablePreauth = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	record, ok, err := db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup: %v, %v", err, ok)
+	}
+	record.Flags |= kdb.RequiresPreAuth
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, asRequest(user, service, 191))),
+		&failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != kdcErrPreauthRequired {
+		t.Fatalf("error code = %d, want %d", failure.ErrorCode, kdcErrPreauthRequired)
+	}
+}
+
+func TestServerPrincipalRequiresHardwarePreauthFails(t *testing.T) {
+	now := time.Unix(2000000192, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	server.DisablePreauth = true
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	record, ok, err := db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup: %v, %v", err, ok)
+	}
+	record.Flags |= kdb.RequiresHWAuth
+	record.FailAuthCount = 3
+	record.LastSuccess = now.Add(-time.Hour)
+	lastSuccess := record.LastSuccess
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	service := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	var required protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, asRequest(user, service, 192))),
+		&required); err != nil {
+		t.Fatal(err)
+	}
+	if required.ErrorCode != kdcErrPreauthRequired {
+		t.Fatalf("missing hardware preauth error = %d, want %d",
+			required.ErrorCode, kdcErrPreauthRequired)
+	}
+	request := asRequest(user, service, 192)
+	addPreauth(t, &request, now)
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != kdcErrPreauthFailed {
+		t.Fatalf("error code = %d, want %d", failure.ErrorCode, kdcErrPreauthFailed)
+	}
+	record, ok, err = db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatalf("client lookup after hardware rejection: %v, %v", err, ok)
+	}
+	if record.FailAuthCount != 3 || !record.LastSuccess.Equal(lastSuccess) {
+		t.Fatalf("hardware rejection changed authentication state: %#v", record)
+	}
+}
+
+func TestTGSPrincipalFlagDenialsUseMITCodes(t *testing.T) {
+	now := time.Unix(2000000193, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal,
+		Components: []string{"alice"}}
+	host := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "service.test"}}
+	record, ok, err := db.Lookup(host)
+	if err != nil || !ok {
+		t.Fatalf("service lookup: %v, %v", err, ok)
+	}
+	record.Flags |= kdb.DisallowPostdated
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	tgt := issueASTicket(t, server, user, now, types.KDCAllowPostdate, now.Add(time.Hour))
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(rawTGSRequest(t, tgt, host, now,
+		types.KDCAllowPostdate)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != kdcErrCannotPostdate {
+		t.Fatalf("postdate error = %d, want %d", failure.ErrorCode, kdcErrCannotPostdate)
+	}
+
+	krbtgt := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", "TEST.REALM"}}
+	record, ok, err = db.Lookup(krbtgt)
+	if err != nil || !ok {
+		t.Fatalf("TGT lookup: %v, %v", err, ok)
+	}
+	record.Flags |= kdb.DisallowRenewable
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	tgt = issueASTicket(t, server, user, now, types.KDCRenewable, now.Add(time.Hour))
+	if err := asn1.Unmarshal(server.HandleMessage(rawTGSRequest(t, tgt, krbtgt, now,
+		types.KDCRenewable)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != kdcErrPolicy {
+		t.Fatalf("renew error = %d, want %d", failure.ErrorCode, kdcErrPolicy)
+	}
+}
+
 func TestASAndTGSIssueAndPropagateProxiable(t *testing.T) {
 	now := time.Unix(2000000190, 0).UTC()
 	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}

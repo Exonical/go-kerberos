@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -42,7 +43,7 @@ const (
 // the mutable in-memory implementation.  ACL, when non-nil, is consulted for
 // every operation; otherwise only AdminPrincipal is authorized.
 type Server struct {
-	Database       *kdb.Database
+	Database       Backend
 	Keytab         *keytab.Keytab
 	AdminPrincipal principal.Principal
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
@@ -63,14 +64,60 @@ type Server struct {
 	dictionaryKey string
 }
 
+// Backend is the mutable principal and policy store used by the kadm5 server.
+// Implementations should return the kdb sentinel errors used by the RPC
+// mapping, such as ErrPrincipalExists, ErrPrincipalNotFound, and
+// ErrBadKeySalts, so callers receive the correct kadm5 status. Each method
+// should apply its operation atomically.
+type Backend interface {
+	Lookup(principal.Principal) (kdb.PrincipalRecord, bool, error)
+	CreatePrincipalWithOptions(string, string, *kdb.PolicyRecord) error
+	CreatePrincipalWithKeySaltsAndOptions(string, string, []kdb.KeySaltTuple, *kdb.PolicyRecord) error
+	DeletePrincipal(principal.Principal) error
+	UpdatePrincipal(kdb.PrincipalRecord) error
+	RenamePrincipal(principal.Principal, principal.Principal) error
+	ChangePasswordWithPolicyAndKeepOld(principal.Principal, string, time.Time, *kdb.PolicyRecord, bool, bool) error
+	RandomizeKeys(principal.Principal) ([]kdb.Key, error)
+	RandomizeKeysWithKeySalts(principal.Principal, bool, []kdb.KeySaltTuple) ([]kdb.Key, error)
+	SetKeys(principal.Principal, []kdb.Key, bool) error
+	PurgeKeys(principal.Principal, int32) error
+	AddAlias(string, string) error
+	GetPolicy(string) (kdb.PolicyRecord, error)
+	CreatePolicy(kdb.PolicyRecord) error
+	UpdatePolicy(kdb.PolicyRecord) error
+	DeletePolicy(string) error
+	ListPolicies() []string
+	GetStrings(principal.Principal) (map[string]string, error)
+	SetString(principal.Principal, string, *string) error
+	ListPrincipals() []string
+	CheckPasswordPolicy(principal.Principal, string, time.Time, *kdb.PolicyRecord, bool) error
+	GetRealm() string
+}
+
+var _ Backend = (*kdb.Database)(nil)
+
+func backendIsNil(backend Backend) bool {
+	if backend == nil {
+		return true
+	}
+	value := reflect.ValueOf(backend)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // NewServer creates a v4 kadm5 server.
-func NewServer(database *kdb.Database, serviceKeytab *keytab.Keytab) *Server {
+func NewServer(database Backend, serviceKeytab *keytab.Keytab) *Server {
 	return &Server{Database: database, Keytab: serviceKeytab, API: APIv4}
 }
 
 // Serve accepts kadm5 RPC connections until the listener fails.
 func (s *Server) Serve(listener net.Listener) error {
-	if s == nil || s.Database == nil || s.Keytab == nil {
+	if s == nil || backendIsNil(s.Database) || s.Keytab == nil {
 		return errors.New("kadm5: incomplete server configuration")
 	}
 	if s.API < APIv2 || s.API > APIv4 {
@@ -1291,7 +1338,7 @@ func validateModifiedPolicy(policy kdb.PolicyRecord, mask int32) bool {
 func (s *Server) listPrincipals(expr string) []string {
 	var out []string
 	if expr != "" && !strings.Contains(expr, "@") {
-		expr += "@" + s.Database.Realm
+		expr += "@" + s.Database.GetRealm()
 	}
 	for _, name := range s.Database.ListPrincipals() {
 		if expr == "" || globMatch(expr, name) {

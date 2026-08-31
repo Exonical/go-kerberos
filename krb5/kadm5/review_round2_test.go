@@ -7,6 +7,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -123,5 +124,13 @@ func TestSelfRandKeyMinimumLifeAndKeepOldClamp(t *testing.T) {
 	}
 	if clampSelfKeepOld(p, p, false) {
 		t.Fatal("false keepOld was changed by clamp")
+	}
+}
+
+func TestServeRejectsTypedNilBackend(t *testing.T) {
+	var db *kdb.Database
+	server := NewServer(db, &keytab.Keytab{})
+	if err := server.Serve(nil); err == nil {
+		t.Fatal("Serve accepted typed nil backend")
 	}
 }

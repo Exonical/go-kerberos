@@ -205,6 +205,10 @@ type tcpConnection struct {
 
 // HandleMessage handles one DER-encoded AS-REQ or TGS-REQ.
 func (s *Server) HandleMessage(data []byte) []byte {
+	return s.handleMessage(data, "")
+}
+
+func (s *Server) handleMessage(data []byte, remoteAddr string) []byte {
 	if s == nil || s.DB == nil || s.Realm == "" {
 		return s.errorResponse(kdcErrGeneric, nil)
 	}
@@ -217,13 +221,13 @@ func (s *Server) HandleMessage(data []byte) []byte {
 		if err := asn1.Unmarshal(data, &request); err != nil {
 			return s.errorResponse(kdcErrGeneric, nil)
 		}
-		return s.handleASReq(request, data)
+		return s.handleASReq(request, data, remoteAddr)
 	case 0x6c:
 		var request protocol.TGSReq
 		if err := asn1.Unmarshal(data, &request); err != nil {
 			return s.errorResponse(kdcErrGeneric, nil)
 		}
-		return s.handleTGSReq(request, data)
+		return s.handleTGSReq(request, data, remoteAddr)
 	default:
 		return s.errorResponse(kdcErrGeneric, nil)
 	}
@@ -288,7 +292,7 @@ func (s *Server) serveUDP(conn net.PacketConn) error {
 }
 
 func (s *Server) handleUDP(conn net.PacketConn, address net.Addr, request []byte) {
-	response := s.dispatch(request, false)
+	response := s.dispatchWithRemote(request, false, address.String())
 	if len(response) == 0 {
 		return
 	}
@@ -371,7 +375,11 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
-	response := s.dispatch(request, true)
+	remoteAddr := ""
+	if conn.RemoteAddr() != nil {
+		remoteAddr = conn.RemoteAddr().String()
+	}
+	response := s.dispatchWithRemote(request, true, remoteAddr)
 	if len(response) == 0 {
 		return
 	}
@@ -379,6 +387,10 @@ func (s *Server) handleTCPConn(conn net.Conn) {
 }
 
 func (s *Server) dispatch(request []byte, isTCP bool) []byte {
+	return s.dispatchWithRemote(request, isTCP, "")
+}
+
+func (s *Server) dispatchWithRemote(request []byte, isTCP bool, remoteAddr string) []byte {
 	cache := s.getLookaside()
 	if cached, hit := cache.begin(request, s.now()); hit {
 		if len(cached) == 0 {
@@ -386,7 +398,7 @@ func (s *Server) dispatch(request []byte, isTCP bool) []byte {
 		}
 		return s.limitDatagramReply(cached, isTCP)
 	}
-	response := s.HandleMessage(request)
+	response := s.handleMessage(request, remoteAddr)
 	cache.complete(request, response, s.now())
 	return s.limitDatagramReply(response, isTCP)
 }
@@ -430,8 +442,9 @@ type Policy struct {
 	AllowProxiable   bool
 }
 
-func (s *Server) handleASReq(request protocol.ASReq, raw []byte) []byte {
+func (s *Server) handleASReq(request protocol.ASReq, raw []byte, remoteAddr string) []byte {
 	state := newASAuditState(request)
+	state.RemoteAddr = remoteAddr
 	response := s.handleASReqCore(request, raw, &state)
 	state.SuccessState(response)
 	if !isKRBErrorResponse(response) {
@@ -498,6 +511,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.errorResponse(kdcErrSPrincipal, request.ReqBody.SName)
 	}
 	if auditState != nil {
+		auditState.Client = clientName
 		auditState.Service = serviceName
 		auditState.Stage = AuditServicePrincipal
 	}
@@ -507,6 +521,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	if auditState != nil {
 		auditState.Stage = AuditValidatePolicy
 	}
+	requiresHWAuth := clientRecord.Flags&kdb.RequiresHWAuth != 0
+	preauthRequired := !s.DisablePreauth ||
+		clientRecord.Flags&(kdb.RequiresPreAuth|kdb.RequiresHWAuth) != 0
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
@@ -543,8 +560,8 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
-	if otpEnabled && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
-		spakePA == nil && otpPA == nil && !s.DisablePreauth {
+	if otpEnabled && !requiresHWAuth && !anonymousRequest && pkinitPA == nil && timestampPA == nil &&
+		spakePA == nil && otpPA == nil && preauthRequired {
 		if armor == nil {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
@@ -590,9 +607,17 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
+		if requiresHWAuth {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
 		s.recordPreauthSuccess(clientName, &clientRecord)
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
+		}
+		if auditState != nil {
+			auditState.PreauthType = "otp"
+			auditState.AuthIndicators = append([]string(nil), s.OTPIndicators...)
 		}
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
@@ -601,7 +626,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, append([]string(nil), s.OTPIndicators...))
 	}
-	if otpEnabled && armor == nil && !anonymousRequest {
+	if otpEnabled && !requiresHWAuth && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
 	encryptedChallengePA := findPA(request.PAData, paEncryptedChallenge)
@@ -653,13 +678,23 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				nil, request.ReqBody.Nonce, armor)
 		}
 		clientKey = matchedKey
-		s.recordPreauthSuccess(clientName, &clientRecord)
 		if s.passwordExpiredForService(clientRecord, serviceRecord) {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
+		}
+		if requiresHWAuth {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if auditState != nil {
+			auditState.PreauthType = "enc-challenge"
+			if s.EncryptedChallengeIndicator != "" {
+				auditState.AuthIndicators = []string{s.EncryptedChallengeIndicator}
+			}
 		}
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
@@ -674,8 +709,8 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA},
 			configuredIndicator(s.EncryptedChallengeIndicator))
 	}
-	if !anonymousRequest && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
-		pkinitPA == nil && !s.DisablePreauth {
+	if !anonymousRequest && !requiresHWAuth && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
+		pkinitPA == nil && preauthRequired {
 		methodData := protocol.MethodData{
 			{PADataType: paEncTimestamp},
 			{PADataType: paSPAKE},
@@ -691,7 +726,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.errorResponseWithData(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData))
 	}
 	selectedSPAKEGroup := s.selectSPAKEGroup(spakePA)
-	if !anonymousRequest && selectedSPAKEGroup != 0 &&
+	if !anonymousRequest && !requiresHWAuth && selectedSPAKEGroup != 0 &&
 		timestampPA == nil && pkinitPA == nil && !s.DisablePreauth {
 		methodData := protocol.MethodData{
 			{PADataType: paSPAKE, PADataValue: marshalDER(protocol.PASPAKE{
@@ -793,12 +828,19 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if err != nil {
 				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 			}
-			s.recordPreauthSuccess(clientName, &clientRecord)
 			if s.passwordExpiredForService(clientRecord, serviceRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
 			if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 				return response
+			}
+			if requiresHWAuth {
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			s.recordPreauthSuccess(clientName, &clientRecord)
+			if auditState != nil {
+				auditState.PreauthType = "spake"
+				auditState.AuthIndicators = append([]string(nil), s.SPAKEPreauthIndicators...)
 			}
 			if auditState != nil {
 				auditState.Stage = AuditIssueTicket
@@ -860,12 +902,21 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				return s.errorResponse(kdcErrClientNotTrusted, request.ReqBody.SName)
 			}
 		}
+		if requiresHWAuth && !hwauth {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
 		if s.passwordExpiredForService(clientRecord, serviceRecord) {
 			return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 		}
 		s.recordPreauthSuccess(clientName, &clientRecord)
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
+		}
+		if auditState != nil {
+			auditState.PreauthType = "pkinit"
+			if !anonymousRequest {
+				auditState.AuthIndicators = append(append([]string(nil), s.PKINITIndicators...), certIndicators...)
+			}
 		}
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
@@ -897,7 +948,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			}(), hwauth)
 	}
 	if timestampPA == nil {
-		if s.DisablePreauth {
+		if !preauthRequired {
 			if s.passwordExpiredForService(clientRecord, serviceRecord) {
 				return s.errorResponse(kdcErrKeyExpired, request.ReqBody.SName)
 			}
@@ -974,7 +1025,6 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponse(krbAPErrSkew, request.ReqBody.SName)
 	}
-	s.recordPreauthSuccess(clientName, &clientRecord)
 	if s.passwordExpiredForService(clientRecord, serviceRecord) {
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrKeyExpired, request.ReqBody.SName, nil, request.ReqBody.Nonce, armor)
@@ -983,6 +1033,17 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	}
 	if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 		return response
+	}
+	if requiresHWAuth {
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+	}
+	s.recordPreauthSuccess(clientName, &clientRecord)
+	if auditState != nil {
+		auditState.PreauthType = "enc-timestamp"
 	}
 	if auditState != nil {
 		auditState.Stage = AuditIssueTicket
@@ -1410,6 +1471,7 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 		flags |= types.TicketProxiable
 	}
 	s.applyFlagPolicy(&flags)
+	applyPrincipalFlagPolicy(&flags, &clientRecord, &serviceRecord)
 	if request.ReqBody.KDCOptions&types.KDCAllowPostdate != 0 {
 		flags |= types.TicketMayPostdate
 	}
@@ -1428,6 +1490,11 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 	renewTill := s.renewTillRecords(request.ReqBody.KDCOptions, request.ReqBody.RTime,
 		request.ReqBody.Till, startTime.Time, endTime.Time, &clientRecord, &serviceRecord)
 	if s.Policy != nil && !s.Policy.AllowRenewable {
+		renewTill = nil
+	}
+	if clientRecord.Flags&kdb.DisallowRenewable != 0 ||
+		serviceRecord.Flags&kdb.DisallowRenewable != 0 {
+		flags &^= types.TicketRenewable
 		renewTill = nil
 	}
 	if renewTill != nil {
@@ -1686,10 +1753,14 @@ func (s *Server) tgsErrorResponse(armor *fastContext, code int32, service *proto
 	return s.fastErrorResponse(code, service, nil, armor.nonce, armor)
 }
 
-func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte) []byte {
+func (s *Server) handleTGSReq(request protocol.TGSReq, raw []byte, remoteAddr string) []byte {
 	state := newTGSAuditState(request)
+	state.RemoteAddr = remoteAddr
 	response := s.handleTGSReqCore(request, raw, &state)
 	state.SuccessState(response)
+	if !isKRBErrorResponse(response) {
+		state.Stage = AuditEncryptReply
+	}
 	s.auditTGS(!isKRBErrorResponse(response), state)
 	return response
 }
@@ -1872,6 +1943,14 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		ticketPart.Flags&types.TicketMayPostdate == 0 {
 		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
 	}
+	if options&types.KDCForwarded != 0 &&
+		ticketPart.Flags&types.TicketForwardable == 0 {
+		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+	}
+	if options&types.KDCProxy != 0 &&
+		ticketPart.Flags&types.TicketProxiable == 0 {
+		return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+	}
 	serviceName := requestedServiceName
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
 		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
@@ -1899,7 +1978,6 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		return s.tgsErrorResponse(armor, kdcErrSPrincipal, request.ReqBody.SName)
 	}
 	if auditState != nil {
-		auditState.Service = serviceName
 		auditState.Stage = AuditServicePrincipal
 	}
 	if !serviceRecord.Expiration.IsZero() && s.now().After(serviceRecord.Expiration) {
@@ -1911,6 +1989,31 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 	if serviceRecord.Flags&kdb.DisallowServer != 0 &&
 		options&types.KDCEncTktInSkey == 0 {
 		return s.tgsErrorResponse(armor, kdcErrMustUseUser2User, request.ReqBody.SName)
+	}
+	if options&types.KDCRenewable != 0 && serviceRecord.Flags&kdb.DisallowRenewable != 0 {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+	}
+	if options&types.KDCAllowPostdate != 0 && serviceRecord.Flags&kdb.DisallowPostdated != 0 {
+		return s.tgsErrorResponse(armor, kdcErrCannotPostdate, request.ReqBody.SName)
+	}
+	if options&types.KDCEncTktInSkey != 0 && serviceRecord.Flags&kdb.DisallowDupSkey != 0 {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+	}
+	if serviceRecord.Flags&kdb.DisallowTGTBased != 0 &&
+		len(apRequest.Ticket.SName.NameString) > 0 &&
+		apRequest.Ticket.SName.NameString[0] == "krbtgt" {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+	}
+	if serviceRecord.Flags&kdb.RequiresHWAuth != 0 &&
+		ticketPart.Flags&types.TicketHWAuthent == 0 {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if serviceRecord.Flags&kdb.RequiresPreAuth != 0 &&
+		ticketPart.Flags&types.TicketPreAuthent == 0 {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if auditState != nil {
+		auditState.Stage = AuditValidatePolicy
 	}
 	requester := principalFromProtocol(ticketPart.CName, ticketPart.CRealm)
 	var s4uUser *protocol.S4UUserID
@@ -2178,6 +2281,9 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		replyUsage = 9
 	}
 	if auditState != nil {
+		if indicators, err := authIndicatorsFromElements(verifiedCAMMACElements); err == nil {
+			auditState.AuthIndicators = append([]string(nil), indicators...)
+		}
 		auditState.Stage = AuditIssueTicket
 	}
 	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey)
@@ -2402,6 +2508,12 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		renewTill = nil
 	}
 	s.applyFlagPolicy(&flags)
+	applyPrincipalFlagPolicy(&flags, clientRecord, &serviceRecord)
+	if (clientRecord != nil && clientRecord.Flags&kdb.DisallowRenewable != 0) ||
+		serviceRecord.Flags&kdb.DisallowRenewable != 0 {
+		flags &^= types.TicketRenewable
+		renewTill = nil
+	}
 	addresses := append(protocol.HostAddresses(nil), ticketPart.CAddr...)
 	if request.ReqBody.KDCOptions&(types.KDCForwarded|types.KDCProxy) != 0 {
 		addresses = append(protocol.HostAddresses(nil), request.ReqBody.Addresses...)
@@ -3063,6 +3175,27 @@ func (s *Server) applyFlagPolicy(flags *types.TicketFlags) {
 		*flags &^= types.TicketProxiable
 	}
 	if !s.Policy.AllowRenewable {
+		*flags &^= types.TicketRenewable
+	}
+}
+
+func applyPrincipalFlagPolicy(flags *types.TicketFlags, client, service *kdb.PrincipalRecord) {
+	if client != nil && client.Flags&kdb.DisallowForwardable != 0 {
+		*flags &^= types.TicketForwardable
+	}
+	if service != nil && service.Flags&kdb.DisallowForwardable != 0 {
+		*flags &^= types.TicketForwardable
+	}
+	if client != nil && client.Flags&kdb.DisallowProxiable != 0 {
+		*flags &^= types.TicketProxiable
+	}
+	if service != nil && service.Flags&kdb.DisallowProxiable != 0 {
+		*flags &^= types.TicketProxiable
+	}
+	if client != nil && client.Flags&kdb.DisallowRenewable != 0 {
+		*flags &^= types.TicketRenewable
+	}
+	if service != nil && service.Flags&kdb.DisallowRenewable != 0 {
 		*flags &^= types.TicketRenewable
 	}
 }

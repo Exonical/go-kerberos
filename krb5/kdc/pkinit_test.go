@@ -275,6 +275,14 @@ func TestServerAnonymousPKINITASExchange(t *testing.T) {
 	roots.AddCert(ca)
 	server.PKINITCertificate = kdcCert
 	server.PKINITSigner = kdcKey
+	server.PKINITIndicators = []string{"pkinit"}
+	var audit AuditState
+	server.AuditModules = []AuditModule{NewFuncAuditModule("capture",
+		func(event string, success bool, state AuditState) {
+			if event == "as_req" && success {
+				audit = state
+			}
+		})}
 	credentials, err := kclient.AnonymousASExchange(context.Background(), "TEST.REALM", roots)
 	if err != nil {
 		t.Fatalf("anonymous client exchange: %v", err)
@@ -284,6 +292,12 @@ func TestServerAnonymousPKINITASExchange(t *testing.T) {
 		t.Fatalf("anonymous credentials = %+v", credentials)
 	}
 	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM")
+	if audit.PreauthType != "pkinit" {
+		t.Fatalf("anonymous audit preauth type = %q, want pkinit", audit.PreauthType)
+	}
+	if len(audit.AuthIndicators) != 0 {
+		t.Fatalf("anonymous audit indicators = %v, want none", audit.AuthIndicators)
+	}
 	service := principal.Principal{
 		Realm: "TEST.REALM", NameType: principal.NTSrvInstance,
 		Components: []string{"host", "service.test"},

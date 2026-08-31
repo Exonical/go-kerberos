@@ -49,6 +49,48 @@ type AuditState struct {
 	Stage            AuditStage
 	Violation        AuditViolation
 	S4U2SelfUser     *principal.Principal
+	PreauthType      string
+	AuthIndicators   []string
+	ErrorCode        int32
+	RemoteAddr       string
+}
+
+// AuditFunc adapts a single callback to the KDC audit module interface.
+type AuditFunc func(event string, success bool, state AuditState)
+
+type auditFuncModule struct {
+	name string
+	fn   AuditFunc
+}
+
+// NewFuncAuditModule creates an audit module backed by fn.
+func NewFuncAuditModule(name string, fn AuditFunc) AuditModule {
+	return auditFuncModule{name: name, fn: fn}
+}
+
+func (m auditFuncModule) Name() string { return m.name }
+func (m auditFuncModule) call(event string, success bool, state AuditState) error {
+	if m.fn != nil {
+		m.fn(event, success, state)
+	}
+	return nil
+}
+func (m auditFuncModule) KDCStart(ok bool) error { return m.call("kdc_start", ok, AuditState{}) }
+func (m auditFuncModule) KDCStop(ok bool) error  { return m.call("kdc_stop", ok, AuditState{}) }
+func (m auditFuncModule) ASReq(ok bool, state AuditState) error {
+	return m.call("as_req", ok, state)
+}
+func (m auditFuncModule) TGSReq(ok bool, state AuditState) error {
+	return m.call("tgs_req", ok, state)
+}
+func (m auditFuncModule) S4U2Self(ok bool, state AuditState) error {
+	return m.call("s4u2self", ok, state)
+}
+func (m auditFuncModule) S4U2Proxy(ok bool, state AuditState) error {
+	return m.call("s4u2proxy", ok, state)
+}
+func (m auditFuncModule) U2U(ok bool, state AuditState) error {
+	return m.call("u2u", ok, state)
 }
 
 // AuditModule receives KDC lifecycle and request events in registration
@@ -108,6 +150,10 @@ type auditRecord struct {
 	Stage            AuditStage     `json:"stage,omitempty"`
 	Violation        AuditViolation `json:"violation,omitempty"`
 	S4U2SelfUser     string         `json:"s4u2self_user,omitempty"`
+	PreauthType      string         `json:"preauth_type,omitempty"`
+	AuthIndicators   []string       `json:"auth_indicators,omitempty"`
+	ErrorCode        int32          `json:"error_code,omitempty"`
+	RemoteAddr       string         `json:"remote_addr,omitempty"`
 }
 
 func auditPrincipal(p principal.Principal) string {
@@ -130,6 +176,8 @@ func (m *JSONFileAuditModule) write(event string, success bool, state AuditState
 		EvidenceTicketID: state.EvidenceTicketID, Client: auditPrincipal(state.Client),
 		Service: auditPrincipal(state.Service), RequestType: state.RequestType,
 		Status: state.Status, Stage: state.Stage, Violation: state.Violation,
+		PreauthType: state.PreauthType, AuthIndicators: state.AuthIndicators,
+		ErrorCode: state.ErrorCode, RemoteAddr: state.RemoteAddr,
 	}
 	if state.S4U2SelfUser != nil {
 		record.S4U2SelfUser = auditPrincipal(*state.S4U2SelfUser)
@@ -172,8 +220,14 @@ func isKRBErrorResponse(response []byte) bool {
 }
 
 func (s *AuditState) SuccessState(response []byte) {
+	s.OutputTicketID = ""
+	s.ErrorCode = 0
 	if isKRBErrorResponse(response) {
 		s.Status = "error"
+		var failure protocol.KRBError
+		if err := asn1.Unmarshal(response, &failure); err == nil {
+			s.ErrorCode = failure.ErrorCode
+		}
 		return
 	}
 	s.Status = "success"
