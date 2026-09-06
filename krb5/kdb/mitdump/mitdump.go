@@ -39,8 +39,24 @@ type StashKey struct {
 // FileStore is a read-only principal store loaded from an MIT dump. Use Dump
 // or Write to export an in-memory KDB in the same format.
 type FileStore struct {
-	Realm   string
-	records map[string]kdb.PrincipalRecord
+	Realm         string
+	records       map[string]kdb.PrincipalRecord
+	policies      map[string]kdb.PolicyRecord
+	MasterEnctype int32
+	MasterKey     []byte
+}
+
+// Policies returns a copy of the standalone policy records in the dump.
+func (s *FileStore) Policies() []kdb.PolicyRecord {
+	if s == nil {
+		return nil
+	}
+	out := make([]kdb.PolicyRecord, 0, len(s.policies))
+	for _, policy := range s.policies {
+		out = append(out, policy)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Dump serializes db in MIT kdb5_util load_dump version 7 format.  Principal
@@ -189,6 +205,15 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 	var out bytes.Buffer
 	out.WriteString(headerVersion7)
 	out.WriteByte('\n')
+	for _, policyName := range db.ListPolicies() {
+		policy, err := db.GetPolicy(policyName)
+		if err != nil {
+			return nil, fmt.Errorf("MIT dump policy %q: %w", policyName, err)
+		}
+		if err := writePolicyRecord(&out, policy); err != nil {
+			return nil, err
+		}
+	}
 	var historyKey *kdb.Key
 	historyName, err := principal.Parse("kadmin/history@" + db.Realm)
 	if err == nil {
@@ -234,9 +259,6 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 	}
 	if len(name) > int(^uint32(0)>>1) {
 		return fmt.Errorf("MIT dump principal name is too long")
-	}
-	if len(record.Keys) == 0 {
-		return fmt.Errorf("MIT dump principal %q has no keys", name)
 	}
 	if len(record.Keys) > int(^uint16(0)) {
 		return fmt.Errorf("MIT dump principal %q has too many keys", name)
@@ -332,6 +354,22 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 	line.WriteString("\t-1;\n")
 	if _, err := io.WriteString(out, line.String()); err != nil {
 		return fmt.Errorf("write MIT dump principal: %w", err)
+	}
+	return nil
+}
+
+func writePolicyRecord(out io.Writer, policy kdb.PolicyRecord) error {
+	allowed := policy.AllowedKeySalts
+	if allowed == "" {
+		allowed = "-"
+	}
+	_, err := fmt.Fprintf(out, "policy\t%s\t%d\t%d\t%d\t%d\t%d\t0\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t0\n",
+		policy.Name, policy.MinLife, policy.MaxLife, policy.MinLength,
+		policy.MinClasses, policy.HistoryNum, policy.MaxFailure,
+		policy.FailureCountInterval, policy.LockoutDuration, policy.Attributes,
+		policy.MaxTicketLife, policy.MaxRenewableLife, allowed)
+	if err != nil {
+		return fmt.Errorf("write MIT dump policy: %w", err)
 	}
 	return nil
 }
@@ -577,7 +615,10 @@ func Parse(data []byte) (*FileStore, error) {
 	if header != headerVersion6 && header != headerVersion7 {
 		return nil, fmt.Errorf("unsupported MIT dump header %q", header)
 	}
-	store := &FileStore{records: make(map[string]kdb.PrincipalRecord)}
+	store := &FileStore{
+		records:  make(map[string]kdb.PrincipalRecord),
+		policies: make(map[string]kdb.PolicyRecord),
+	}
 	lineNo := 1
 	for scanner.Scan() {
 		lineNo++
@@ -588,6 +629,11 @@ func Parse(data []byte) (*FileStore, error) {
 		// Version 6/7 dumps may include standalone password-policy records.
 		// Policy references are carried by each principal's KADM_DATA.
 		if strings.HasPrefix(line, "policy\t") {
+			policy, err := parsePolicyRecord(line)
+			if err != nil {
+				return nil, fmt.Errorf("MIT dump line %d: %w", lineNo, err)
+			}
+			store.policies[policy.Name] = policy
 			continue
 		}
 		record, err := parseRecord(line)
@@ -707,6 +753,8 @@ func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte)
 	}
 	decodeKADMRecords(records, store.Realm)
 	store.records = records
+	store.MasterEnctype = masterEnctype
+	store.MasterKey = append([]byte(nil), masterKey...)
 	return store, nil
 }
 
@@ -1118,6 +1166,49 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 		KADMAuxAttributes: kadmAuxAttributes, AdminHistoryNext: adminHistoryNext,
 		AdminHistoryKVNO: adminHistoryKVNO,
 	}, nil
+}
+
+func parsePolicyRecord(line string) (kdb.PolicyRecord, error) {
+	fields := strings.Split(line, "\t")
+	if len(fields) < 8 || fields[0] != "policy" {
+		return kdb.PolicyRecord{}, fmt.Errorf("malformed policy record")
+	}
+	parse := func(index int) (int64, error) {
+		return parseInt(fields[index], "policy field")
+	}
+	values := make([]int64, 0, 11)
+	for i := 2; i <= 13 && i < len(fields); i++ {
+		value, err := parse(i)
+		if err != nil {
+			return kdb.PolicyRecord{}, err
+		}
+		values = append(values, value)
+	}
+	if len(values) < 6 {
+		return kdb.PolicyRecord{}, fmt.Errorf("truncated policy record")
+	}
+	policy := kdb.PolicyRecord{
+		Name: fields[1], MinLife: int32(values[0]), MaxLife: int32(values[1]),
+		MinLength: int32(values[2]), MinClasses: int32(values[3]),
+		HistoryNum: int32(values[4]),
+	}
+	if len(values) >= 9 {
+		policy.MaxFailure = uint32(values[6])
+		policy.FailureCountInterval = int32(values[7])
+		policy.LockoutDuration = int32(values[8])
+	}
+	if len(values) >= 12 {
+		policy.Attributes = int32(values[9])
+		policy.MaxTicketLife = int32(values[10])
+		policy.MaxRenewableLife = int32(values[11])
+	}
+	if len(fields) >= 15 {
+		policy.AllowedKeySalts = fields[14]
+		if policy.AllowedKeySalts == "-" {
+			policy.AllowedKeySalts = ""
+		}
+	}
+	return policy, nil
 }
 
 func decodeKADMPolicy(data []byte) (string, bool) {

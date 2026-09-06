@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/kadm5"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"golang.org/x/term"
 )
 
 const (
@@ -62,6 +64,7 @@ type PrincipalEntry struct {
 	MKVNO            uint32
 	Attributes       uint32
 	Policy           string
+	PolicyClear      bool
 	Keys             []Key
 	Strings          map[string]string
 }
@@ -107,16 +110,18 @@ type Operations interface {
 
 // Config controls an Engine.
 type Config struct {
-	Ops      Operations
-	Local    bool
-	Realm    string
-	Now      func() time.Time
-	Location *time.Location
-	Stdin    io.Reader
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Password string
-	Script   bool
+	Ops             Operations
+	Local           bool
+	Realm           string
+	DefaultKeySalts string
+	Now             func() time.Time
+	Location        *time.Location
+	Stdin           io.Reader
+	Stdout          io.Writer
+	Stderr          io.Writer
+	Password        string
+	Script          bool
+	AfterMutation   func() error
 }
 
 // Engine executes kadmin commands.
@@ -158,6 +163,14 @@ func (e *Engine) Execute(line string) (bool, error) {
 	if len(args) == 0 {
 		return false, nil
 	}
+	exit, err := e.executeArgs(args)
+	if err == nil && e.cfg.AfterMutation != nil && isMutatingCommand(args[0]) {
+		err = e.cfg.AfterMutation()
+	}
+	return exit, err
+}
+
+func (e *Engine) executeArgs(args []string) (bool, error) {
 	switch strings.ToLower(args[0]) {
 	case "quit", "exit", "q":
 		return true, nil
@@ -213,6 +226,20 @@ func (e *Engine) Execute(line string) (bool, error) {
 	}
 }
 
+func isMutatingCommand(name string) bool {
+	switch strings.ToLower(name) {
+	case "add_principal", "addprinc", "ank", "modify_principal", "modprinc",
+		"delete_principal", "delprinc", "rename_principal", "renprinc",
+		"add_alias", "alias", "change_password", "cpw", "add_policy", "addpol",
+		"modify_policy", "modpol", "delete_policy", "delpol", "purgekeys",
+		"set_string", "setstr", "del_string", "delstr", "lock", "unlock",
+		"ktadd", "xst", "ktremove", "ktrem":
+		return true
+	default:
+		return false
+	}
+}
+
 // RunInteractive executes query, script, or interactive mode.
 func (e *Engine) RunInteractive(query string, args []string, prompt string) error {
 	if query != "" {
@@ -225,21 +252,27 @@ func (e *Engine) RunInteractive(query string, args []string, prompt string) erro
 		_, err := e.Execute(strings.Join(args, " "))
 		return err
 	}
-	scanner := bufio.NewScanner(e.cfg.Stdin)
 	for {
 		fmt.Fprint(e.cfg.Stdout, prompt)
-		if !scanner.Scan() {
+		line, err := e.in.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if len(line) == 0 {
 			break
 		}
-		exit, err := e.Execute(scanner.Text())
+		exit, err := e.Execute(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"))
 		if err != nil {
 			fmt.Fprintln(e.cfg.Stderr, err)
 		}
 		if exit {
 			break
 		}
+		if err == io.EOF {
+			break
+		}
 	}
-	return scanner.Err()
+	return nil
 }
 
 func splitCommand(line string) ([]string, error) {
@@ -379,13 +412,14 @@ func parseInt(value string) (int32, error) {
 }
 
 type principalOptions struct {
-	entry    PrincipalEntry
-	mask     int32
-	password string
-	randkey  bool
-	nokey    bool
-	keepOld  bool
-	keySalts []kadm5.KeySaltTuple
+	entry                PrincipalEntry
+	mask                 int32
+	password             string
+	randkey              bool
+	nokey                bool
+	keepOld              bool
+	keySalts             []kadm5.KeySaltTuple
+	attrsSet, attrsClear uint32
 }
 
 func (e *Engine) parsePrincipalOptions(args []string, mod bool) (principalOptions, error) {
@@ -464,6 +498,7 @@ func (e *Engine) parsePrincipalOptions(args []string, mod bool) (principalOption
 			out.mask |= kadm5.KADM5Policy
 		case "-clearpolicy":
 			out.entry.Policy = ""
+			out.entry.PolicyClear = true
 			out.mask |= kadm5.KADM5PolicyClear
 		case "-pw":
 			if mod {
@@ -510,13 +545,22 @@ func (e *Engine) parsePrincipalOptions(args []string, mod bool) (principalOption
 				}
 				if set {
 					out.entry.Attributes |= flag
+					out.attrsSet |= flag
 				} else {
 					out.entry.Attributes &^= flag
+					out.attrsClear |= flag
 				}
 				out.mask |= kadm5.KADM5Attributes
 			} else {
 				return out, fmt.Errorf("unexpected argument %q", arg)
 			}
+		}
+	}
+	if len(out.keySalts) == 0 && !mod && e.cfg.DefaultKeySalts != "" {
+		var err error
+		out.keySalts, err = parseKeySalts(e.cfg.DefaultKeySalts)
+		if err != nil {
+			return out, err
 		}
 	}
 	out.entry.Principal, _ = e.parsePrincipal(args[len(args)-1])
@@ -573,6 +617,14 @@ func parseFlagSpec(value string) (uint32, bool, error) {
 
 func (e *Engine) prompt(prompt string) (string, error) {
 	fmt.Fprint(e.cfg.Stderr, prompt)
+	if file, ok := e.cfg.Stdin.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		value, err := term.ReadPassword(int(file.Fd()))
+		fmt.Fprintln(e.cfg.Stderr)
+		if err != nil {
+			return "", err
+		}
+		return string(value), nil
+	}
 	value, err := e.in.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err

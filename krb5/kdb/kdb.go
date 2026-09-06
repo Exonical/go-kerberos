@@ -618,6 +618,18 @@ func (db *Database) ChangePasswordWithPolicy(name principal.Principal, password 
 // the previous key set in PasswordHistory when keepOld is requested.
 func (db *Database) ChangePasswordWithPolicyAndKeepOld(name principal.Principal, password string,
 	now time.Time, policy *PolicyRecord, bypassMinLife, keepOld bool) error {
+	return db.changePasswordWithTuples(name, password, now, policy, bypassMinLife, keepOld, nil)
+}
+
+// ChangePasswordWithKeySaltsAndPolicy changes a password using explicit
+// enctype and salt tuples.
+func (db *Database) ChangePasswordWithKeySaltsAndPolicy(name principal.Principal, password string,
+	now time.Time, policy *PolicyRecord, bypassMinLife, keepOld bool, tuples []KeySaltTuple) error {
+	return db.changePasswordWithTuples(name, password, now, policy, bypassMinLife, keepOld, tuples)
+}
+
+func (db *Database) changePasswordWithTuples(name principal.Principal, password string,
+	now time.Time, policy *PolicyRecord, bypassMinLife, keepOld bool, tuples []KeySaltTuple) error {
 	if db == nil {
 		return ErrPrincipalNotFound
 	}
@@ -628,11 +640,11 @@ func (db *Database) ChangePasswordWithPolicyAndKeepOld(name principal.Principal,
 	if !ok {
 		return ErrPrincipalNotFound
 	}
-	next, err := deriveRecord(current.Name, password, current.KVNO+1)
+	next, err := deriveRecordWithTuplesAt(current.Name, password, current.KVNO+1, tuples, now)
 	if err != nil {
 		return err
 	}
-	if len(current.Keys) > 0 && len(current.Keys) != len(next.Keys) {
+	if len(tuples) == 0 && len(current.Keys) > 0 && len(current.Keys) != len(next.Keys) {
 		next.Keys, err = deriveKeys(current.Name, password, current.Keys, current.KVNO+1)
 		if err != nil {
 			return err
@@ -962,9 +974,6 @@ func (db *Database) SetKeys(name principal.Principal, keys []Key, keepOld bool) 
 	current, ok := db.principals[key]
 	if !ok {
 		return ErrPrincipalNotFound
-	}
-	if len(keys) == 0 {
-		return fmt.Errorf("set keys: empty key set")
 	}
 	next := make(map[int32]Key, len(keys))
 	if keepOld {

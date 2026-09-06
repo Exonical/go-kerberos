@@ -57,6 +57,9 @@ func (r *Remote) CreatePrincipal(ctx context.Context, e PrincipalEntry, password
 	if e.Policy != "" {
 		mask |= kadm5.KADM5Policy
 	}
+	if e.PolicyClear {
+		mask |= kadm5.KADM5Policy | kadm5.KADM5PolicyClear
+	}
 	if e.Attributes != 0 {
 		mask |= kadm5.KADM5Attributes
 	}
@@ -83,6 +86,9 @@ func (r *Remote) CreatePrincipal(ctx context.Context, e PrincipalEntry, password
 	}
 	if err := r.Client.CreatePrincipal3(ctx, remoteKadmEntry(e), mask, tuples, password); err != nil {
 		return err
+	}
+	if nokey {
+		return r.Client.SetKey3(ctx, e.Principal, false, nil, nil)
 	}
 	if randkey {
 		if len(tuples) > 0 {
@@ -111,7 +117,10 @@ func (r *Remote) ChangePassword(ctx context.Context, p principal.Principal, pass
 		return r.RandomizeKeys(ctx, p, keepold, t)
 	}
 	if len(t) > 0 {
-		return nil, fmt.Errorf("password changes with explicit key/salt types are not supported by the remote client API")
+		if err := r.Client.ChangePassword3(ctx, p, password, keepold, t); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 	if err := r.Client.ChangePassword(ctx, p, password); err != nil {
 		return nil, err
@@ -259,10 +268,8 @@ func (l *Local) CreatePrincipal(_ context.Context, e PrincipalEntry, password st
 		}
 	}
 	if nokey {
-		r, ok, _ := l.Backend.Lookup(e.Principal)
-		if ok {
-			r.Keys = nil
-			_ = l.Backend.UpdatePrincipal(r)
+		if err := l.Backend.SetKeys(e.Principal, nil, false); err != nil {
+			return err
 		}
 	}
 	if randkey {
@@ -294,7 +301,11 @@ func (l *Local) ModifyPrincipal(_ context.Context, e PrincipalEntry, m int32) er
 		r.KVNO = e.KVNO
 	}
 	if m&kadm5.KADM5Policy != 0 {
-		r.Policy = e.Policy
+		if m&kadm5.KADM5PolicyClear != 0 {
+			r.Policy = ""
+		} else {
+			r.Policy = e.Policy
+		}
 	}
 	if m&kadm5.KADM5Attributes != 0 {
 		r.Flags = e.Attributes
@@ -320,7 +331,22 @@ func (l *Local) ChangePassword(ctx context.Context, p principal.Principal, passw
 	if len(t) > 0 {
 		return nil, fmt.Errorf("password changes with explicit key/salt types are not supported by the local backend")
 	}
-	if err := l.Backend.ChangePasswordWithPolicyAndKeepOld(p, password, time.Now(), nil, keepold, false); err != nil {
+	record, ok, err := l.Backend.Lookup(p)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, kdb.ErrPrincipalNotFound
+	}
+	var policy *kdb.PolicyRecord
+	if record.Policy != "" {
+		value, err := l.Backend.GetPolicy(record.Policy)
+		if err != nil {
+			return nil, err
+		}
+		policy = &value
+	}
+	if err := l.Backend.ChangePasswordWithPolicyAndKeepOld(p, password, time.Now(), policy, false, keepold); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -354,8 +380,41 @@ func (l *Local) ListPrincipals(context.Context, string) ([]string, error) {
 func (l *Local) CreatePolicy(_ context.Context, p Policy) error {
 	return l.Backend.CreatePolicy(kdbPolicy(p))
 }
-func (l *Local) ModifyPolicy(_ context.Context, p Policy, _ int32) error {
-	return l.Backend.UpdatePolicy(kdbPolicy(p))
+func (l *Local) ModifyPolicy(_ context.Context, p Policy, mask int32) error {
+	current, err := l.Backend.GetPolicy(p.Name)
+	if err != nil {
+		return err
+	}
+	next := current
+	value := kdbPolicy(p)
+	if mask&kadm5.KADM5PWMinLife != 0 {
+		next.MinLife = value.MinLife
+	}
+	if mask&kadm5.KADM5PWMaxLife != 0 {
+		next.MaxLife = value.MaxLife
+	}
+	if mask&kadm5.KADM5PWMinLength != 0 {
+		next.MinLength = value.MinLength
+	}
+	if mask&kadm5.KADM5PWMinClasses != 0 {
+		next.MinClasses = value.MinClasses
+	}
+	if mask&kadm5.KADM5PWHistoryNum != 0 {
+		next.HistoryNum = value.HistoryNum
+	}
+	if mask&kadm5.KADM5PWMaxFailure != 0 {
+		next.MaxFailure = value.MaxFailure
+	}
+	if mask&kadm5.KADM5PWFailureCountInterval != 0 {
+		next.FailureCountInterval = value.FailureCountInterval
+	}
+	if mask&kadm5.KADM5PWLockoutDuration != 0 {
+		next.LockoutDuration = value.LockoutDuration
+	}
+	if mask&kadm5.KADM5PolicyAllowedKeysalts != 0 {
+		next.AllowedKeySalts = value.AllowedKeySalts
+	}
+	return l.Backend.UpdatePolicy(next)
 }
 func (l *Local) DeletePolicy(_ context.Context, n string) error { return l.Backend.DeletePolicy(n) }
 func (l *Local) GetPolicy(_ context.Context, n string) (Policy, error) {

@@ -1,13 +1,14 @@
 package kadmin
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -75,10 +76,15 @@ func ParseStartup(args []string, local bool) (StartupOptions, error) {
 
 // LoadLocalDatabase loads a MIT dump into a mutable database.
 func LoadLocalDatabase(path, realm, password string) (*kdb.Database, error) {
+	db, _, err := loadLocalDatabase(path, realm, password)
+	return db, err
+}
+
+func loadLocalDatabase(path, realm, password string) (*kdb.Database, *mitdump.FileStore, error) {
 	var store *mitdump.FileStore
 	var err error
 	if path == "" {
-		return kdb.NewDatabase(realm), nil
+		return kdb.NewDatabase(realm), nil, nil
 	}
 	if password != "" {
 		store, err = mitdump.LoadWithMasterPassword(path, password)
@@ -92,18 +98,23 @@ func LoadLocalDatabase(path, realm, password string) (*kdb.Database, error) {
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if realm == "" {
 		realm = store.Realm
 	}
 	db := kdb.NewDatabase(realm)
-	for _, record := range store.Records() {
-		if err := db.ImportPrincipal(record); err != nil {
-			return nil, err
+	for _, policy := range store.Policies() {
+		if err := db.CreatePolicy(policy); err != nil {
+			return nil, nil, err
 		}
 	}
-	return db, nil
+	for _, record := range store.Records() {
+		if err := db.ImportPrincipal(record); err != nil {
+			return nil, nil, err
+		}
+	}
+	return db, store, nil
 }
 
 func resolveStashFile(realm string) (string, error) {
@@ -132,16 +143,26 @@ func resolveStashFile(realm string) (string, error) {
 }
 
 // RunLocal starts a local command engine using the supplied startup options.
-func RunLocal(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, errOut *os.File) error {
+func RunLocal(ctx context.Context, opts StartupOptions, in io.Reader, out, errOut *os.File) error {
 	realm := opts.Realm
-	db, err := LoadLocalDatabase(opts.Dump, realm, opts.Password)
+	db, store, err := loadLocalDatabase(opts.Dump, realm, opts.Password)
 	if err != nil {
 		return err
 	}
 	if realm == "" {
 		realm = db.GetRealm()
 	}
-	engine := New(Config{Ops: NewLocal(db), Local: true, Realm: realm, Stdin: in, Stdout: out, Stderr: errOut})
+	cfg := Config{Ops: NewLocal(db), Local: true, Realm: realm, DefaultKeySalts: opts.KeySalts,
+		Stdin: in, Stdout: out, Stderr: errOut}
+	if opts.Dump != "" {
+		cfg.AfterMutation = func() error {
+			if store == nil || store.MasterEnctype == 0 || len(store.MasterKey) == 0 {
+				return errors.New("cannot persist MIT dump without a master key")
+			}
+			return rewriteLocalDump(opts.Dump, db, store.MasterEnctype, store.MasterKey)
+		}
+	}
+	engine := New(cfg)
 	if opts.Query != "" {
 		_, err = engine.Execute(opts.Query)
 		return err
@@ -149,8 +170,38 @@ func RunLocal(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, e
 	return engine.RunInteractive("", opts.Command, "gokadmin.local:  ")
 }
 
+func rewriteLocalDump(path string, db *kdb.Database, enctype int32, key []byte) error {
+	dir := filepath.Dir(path)
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := mitdump.WriteWithMasterKey(tmp, db, enctype, key); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 // RunRemote obtains administrative credentials and starts a remote engine.
-func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, errOut *os.File) error {
+func RunRemote(ctx context.Context, opts StartupOptions, in io.Reader, out, errOut *os.File) error {
 	realm := opts.Realm
 	var cache *ccache.Cache
 	var err error
@@ -291,7 +342,8 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 		return err
 	}
 	defer rpc.Close()
-	engine := New(Config{Ops: NewRemote(rpc, realm), Realm: realm, Stdin: in, Stdout: out, Stderr: errOut, Password: opts.Password})
+	engine := New(Config{Ops: NewRemote(rpc, realm), Realm: realm, DefaultKeySalts: opts.KeySalts,
+		Stdin: in, Stdout: out, Stderr: errOut, Password: opts.Password})
 	return engine.RunInteractive(opts.Query, opts.Command, "gokadmin:  ")
 }
 

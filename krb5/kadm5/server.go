@@ -94,6 +94,11 @@ type Backend interface {
 	GetRealm() string
 }
 
+type passwordKeySaltBackend interface {
+	ChangePasswordWithKeySaltsAndPolicy(principal.Principal, string, time.Time,
+		*kdb.PolicyRecord, bool, bool, []kdb.KeySaltTuple) error
+}
+
 var _ Backend = (*kdb.Database)(nil)
 
 func backendIsNil(backend Backend) bool {
@@ -733,6 +738,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 			return status(43787548)
 		}
 		var keepOld bool
+		var tuples []kdb.KeySaltTuple
 		if proc == chpassPrincipal3 {
 			keepOld, err = r.boolean()
 			if err != nil {
@@ -742,13 +748,17 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 			if err != nil || count > 1024 {
 				return status(43787548)
 			}
+			tuples = make([]kdb.KeySaltTuple, count)
 			for i := uint32(0); i < count; i++ {
-				if _, err := r.i32(); err != nil {
+				enctype, err := r.i32()
+				if err != nil {
 					return status(43787548)
 				}
-				if _, err := r.i32(); err != nil {
+				salt, err := r.i32()
+				if err != nil {
 					return status(43787548)
 				}
+				tuples[i] = kdb.KeySaltTuple{Enctype: enctype, SaltType: salt}
 			}
 		}
 		password, err := r.nullString()
@@ -782,7 +792,15 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
 			return status(kdbCode(hookErr))
 		}
-		err = s.Database.ChangePasswordWithPolicyAndKeepOld(p, password, s.now(), policy, bypassMinLife, keepOld)
+		if proc == chpassPrincipal3 {
+			if backend, ok := s.Database.(passwordKeySaltBackend); ok {
+				err = backend.ChangePasswordWithKeySaltsAndPolicy(p, password, s.now(), policy, bypassMinLife, keepOld, tuples)
+			} else {
+				err = s.Database.ChangePasswordWithPolicyAndKeepOld(p, password, s.now(), policy, bypassMinLife, keepOld)
+			}
+		} else {
+			err = s.Database.ChangePasswordWithPolicyAndKeepOld(p, password, s.now(), policy, bypassMinLife, keepOld)
+		}
 		if err == nil {
 			_ = s.runHooks(HookPostCommit, event)
 		}

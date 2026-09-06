@@ -1,12 +1,16 @@
 package kadmin
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -31,6 +35,60 @@ func TestParseCommandAndDates(t *testing.T) {
 	if got, err := ParseDate("never", now, loc); err != nil || !got.IsZero() {
 		t.Fatalf("never = %v, err = %v", got, err)
 	}
+}
+
+func TestRunLocalPersistsDumpMutation(t *testing.T) {
+	db := kdb.NewDatabase("EXAMPLE.COM")
+	if err := db.AddPrincipal("admin", "admin-password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreatePolicy(kdb.PolicyRecord{Name: "default", MinLength: 8}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := mitdump.DumpWithMasterPassword(db, "master-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/principal.dump"
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	outFile, err := os.CreateTemp(t.TempDir(), "out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+	errFile, err := os.CreateTemp(t.TempDir(), "err")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errFile.Close()
+	if err := RunLocal(context.Background(), StartupOptions{
+		Realm: "EXAMPLE.COM", Dump: path, Password: "master-password",
+		Query: "addprinc -pw user-password user",
+	}, bufio.NewReader(strings.NewReader("")), outFile, errFile); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := mitdump.LoadWithMasterPassword(path, "master-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, ok, err := loaded.Lookup(*mustPrincipal(t, "user@EXAMPLE.COM"))
+	if err != nil || !ok || len(user.Keys) == 0 {
+		t.Fatalf("persisted user = %#v, ok=%v, err=%v", user, ok, err)
+	}
+	if len(loaded.Policies()) != 1 || loaded.Policies()[0].Name != "default" {
+		t.Fatalf("persisted policies = %#v", loaded.Policies())
+	}
+}
+
+func mustPrincipal(t *testing.T, value string) *principal.Principal {
+	t.Helper()
+	p, err := principal.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestFlagspecAndDefaultPolicy(t *testing.T) {

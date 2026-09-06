@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +48,6 @@ func (e *Engine) addPrincipal(args []string) error {
 			fmt.Fprintf(e.cfg.Stderr, "WARNING: policy \"%s\" does not exist\n", opts.entry.Policy)
 		}
 	}
-	opts.mask &^= kadm5.KADM5PolicyClear
 	if opts.nokey {
 		opts.password = ""
 	}
@@ -83,7 +83,7 @@ func (e *Engine) modifyPrincipal(args []string) error {
 	if err != nil {
 		return err
 	}
-	opts.entry = mergeEntry(old, opts.entry, opts.mask)
+	opts.entry = mergeEntry(old, opts.entry, opts.mask, opts.attrsSet, opts.attrsClear)
 	if err := e.cfg.Ops.ModifyPrincipal(context.Background(), opts.entry, opts.mask); err != nil {
 		return err
 	}
@@ -91,7 +91,7 @@ func (e *Engine) modifyPrincipal(args []string) error {
 	return nil
 }
 
-func mergeEntry(old, next PrincipalEntry, mask int32) PrincipalEntry {
+func mergeEntry(old, next PrincipalEntry, mask int32, attrsSet, attrsClear uint32) PrincipalEntry {
 	out := old
 	out.Principal = next.Principal
 	if mask&kadm5.KADM5PrincExpireTime != 0 {
@@ -112,8 +112,12 @@ func mergeEntry(old, next PrincipalEntry, mask int32) PrincipalEntry {
 	if mask&kadm5.KADM5Policy != 0 {
 		out.Policy = next.Policy
 	}
+	if mask&kadm5.KADM5PolicyClear != 0 {
+		out.Policy = ""
+		out.PolicyClear = true
+	}
 	if mask&kadm5.KADM5Attributes != 0 {
-		out.Attributes = next.Attributes
+		out.Attributes = (old.Attributes | attrsSet) &^ attrsClear
 	}
 	if mask&kadm5.KADM5FailAuthCount != 0 {
 		out.FailAuthCount = next.FailAuthCount
@@ -238,6 +242,13 @@ func (e *Engine) changePassword(args []string) error {
 	if len(rest) != 1 {
 		return errors.New("usage: change_password [-randkey] [-keepold] principal")
 	}
+	if len(keySalts) == 0 && e.cfg.DefaultKeySalts != "" {
+		var err error
+		keySalts, err = parseKeySalts(e.cfg.DefaultKeySalts)
+		if err != nil {
+			return err
+		}
+	}
 	p, err := e.parsePrincipal(rest[0])
 	if err != nil {
 		return err
@@ -338,7 +349,7 @@ func unix(value time.Time) int64 {
 }
 func choosePolicy(value string) string {
 	if value == "" {
-		return "[none]"
+		return "-"
 	}
 	return value
 }
@@ -660,6 +671,12 @@ func (e *Engine) ktadd(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(keySalts) == 0 && e.cfg.DefaultKeySalts != "" {
+		keySalts, err = parseKeySalts(e.cfg.DefaultKeySalts)
+		if err != nil {
+			return err
+		}
+	}
 	if name == "" {
 		name = os.Getenv("KRB5_KTNAME")
 	}
@@ -705,12 +722,7 @@ func (e *Engine) ktadd(args []string) error {
 		}
 	}
 	if !strings.HasPrefix(name, "MEMORY:") {
-		file, err := os.OpenFile(strings.TrimPrefix(name, "FILE:"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		if err := keytab.Write(file, kt); err != nil {
+		if err := writeKeytabAtomic(name, kt); err != nil {
 			return err
 		}
 	}
@@ -772,16 +784,41 @@ func (e *Engine) ktremove(args []string) error {
 		}
 	}
 	if !strings.HasPrefix(name, "MEMORY:") {
-		file, err := os.OpenFile(strings.TrimPrefix(name, "FILE:"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		if err := keytab.Write(file, kt); err != nil {
+		if err := writeKeytabAtomic(name, kt); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func writeKeytabAtomic(name string, kt *keytab.Keytab) error {
+	path := strings.TrimPrefix(name, "FILE:")
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := keytab.Write(tmp, kt); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func loadKeytab(name string) (*keytab.Keytab, error) {

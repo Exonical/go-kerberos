@@ -641,7 +641,13 @@ command aliases, principal and policy mutation commands, listings, string
 attributes, key purging, keytab operations, privilege display, confirmations,
 script mode, terse output, and injectable date formatting are covered by
 `krb5/kadmin` tests. The local adapter is exercised against an in-memory
-database; remote adapter tests may use an in-process kadmind.
+database and MIT dump fixtures, including standalone policy records. When
+`gokadmin.local -d` is used, successful mutations are atomically written back
+to the dump with its loaded master key; without `-d`, the database is
+intentionally in-memory only. `-nokey` creates principals with an explicit
+empty key set. Remote adapter tests may use an in-process kadmind.
+Plaintext dump loads that do not provide reusable master-key material reject
+mutations rather than rewriting the dump with a different key.
 
 The startup options `-n`, `-O`, `-N`, and `-x` are intentionally reported as
 not supported. Natural-language date expressions from MIT's `getdate.y` are
@@ -651,5 +657,6 @@ not implemented; ISO date, RFC3339, and interval forms are supported.
 `KRB5_TL_LAST_ADMIN_UNLOCK` TL-data when the backend surface does not expose
 that record.
 Local non-randkey `cpw -e` returns an explicit unsupported error because the
-current backend password-change API cannot accept key/salt tuples; remote
-password changes support explicit key/salt selection.
+local adapter cannot accept key/salt tuples; remote password changes support
+explicit key/salt selection through CHPASS_PRINCIPAL3. Password prompts use
+terminal no-echo input when attached to a terminal.

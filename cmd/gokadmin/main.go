@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -15,7 +14,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if err := kadmin.RunRemote(context.Background(), opts, bufio.NewReader(os.Stdin), os.Stdout, os.Stderr); err != nil {
+	if err := kadmin.RunRemote(context.Background(), opts, os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

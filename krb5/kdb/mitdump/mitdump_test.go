@@ -106,6 +106,20 @@ func TestRecordsPreservesStringAttributes(t *testing.T) {
 	}
 }
 
+func TestParsePreservesStandalonePolicy(t *testing.T) {
+	data := fixtureBytes(t)
+	data = bytes.Replace(data, []byte("\nprinc\t"), []byte("\npolicy\tdefault\t60\t3600\t12\t2\t3\t0\t5\t60\t120\t0\t86400\t172800\t-\t0\nprinc\t"), 1)
+	store, err := ParseWithMasterPassword(data, "synthetic-master-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := store.Policies()
+	if len(policies) != 1 || policies[0].Name != "default" ||
+		policies[0].MinLength != 12 || policies[0].MaxFailure != 5 {
+		t.Fatalf("policies = %#v", policies)
+	}
+}
+
 func TestParseMITDumpRejectsWrongMasterPassword(t *testing.T) {
 	if _, err := ParseWithMasterPassword(fixtureBytes(t), "wrong-password"); err == nil {
 		t.Fatal("ParseWithMasterPassword unexpectedly succeeded")
