@@ -198,6 +198,18 @@ func ParseDHParameters(data []byte) ([]DHGroup, error) {
 			return nil, err
 		}
 		if oid.Equal(idDHPublicNumber) {
+			parameters, err := sequenceFields(parts[1])
+			if err != nil || len(parameters) < 2 {
+				continue
+			}
+			p, err := parseInteger(parameters[0])
+			if err != nil {
+				continue
+			}
+			g, err := parseInteger(parameters[1])
+			if err != nil || p.Cmp(group14P) != 0 || g.Cmp(group14G) != 0 {
+				continue
+			}
 			groups = append(groups, GroupMODP2048)
 			continue
 		}

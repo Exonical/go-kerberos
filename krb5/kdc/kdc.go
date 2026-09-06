@@ -55,6 +55,7 @@ const (
 	kdcErrServiceExpired   = 2
 	kdcErrPreauthFailed    = 24
 	kdcErrPreauthRequired  = 25
+	kdcErrDHKeyParameters  = 65
 	kdcErrMorePreauth      = 91
 	kdcErrGeneric          = 60
 	kdcErrBadOption        = 13
@@ -965,9 +966,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if stderrors.As(err, &policyErr) {
 				td, tdErr := pkinit.MarshalDHParameters(policyErr.Supported)
 				if tdErr == nil {
-					methodData := protocol.MethodData{{PADataType: pkinit.PADataTDHParameters, PADataValue: td}}
-					return s.errorResponseWithData(kdcErrPreauthFailed, request.ReqBody.SName,
-						marshalDER(methodData))
+					typedData := protocol.TypedData{{DataType: pkinit.PADataTDHParameters, DataValue: td}}
+					return s.errorResponseWithData(kdcErrDHKeyParameters, request.ReqBody.SName,
+						marshalDER(typedData))
 				}
 			}
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)

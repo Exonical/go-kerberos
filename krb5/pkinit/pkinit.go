@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
-	"strings"
 	"time"
 
 	krbcrypto "github.com/Exonical/go-kerberos/krb5/crypto"
@@ -135,21 +134,26 @@ func NewClientWithDHMinBits(cert *x509.Certificate, signer crypto.Signer, minBit
 			return nil, errors.New("pkinit: signer must use RSA or ECDSA")
 		}
 	}
-	group := GroupMODP2048
-	switch strings.ToUpper(strings.TrimSpace(minBits)) {
-	case "P-256":
-		group = GroupP256
-	case "P-384":
-		group = GroupP384
-	case "P-521":
-		group = GroupP521
-	}
+	group := groupForMinimum(ParseDHMinBits(minBits))
 	client, err := newClientForGroup(cert, signer, group)
 	if err != nil {
 		return nil, err
 	}
 	client.MinBits = ParseDHMinBits(minBits)
 	return client, nil
+}
+
+func groupForMinimum(minBits int) DHGroup {
+	switch {
+	case minBits <= groupStrength(GroupMODP2048):
+		return GroupMODP2048
+	case minBits <= groupStrength(GroupP256):
+		return GroupP256
+	case minBits <= groupStrength(GroupP384):
+		return GroupP384
+	default:
+		return GroupP521
+	}
 }
 
 func newClientForGroup(cert *x509.Certificate, signer crypto.Signer, group DHGroup) (*Client, error) {
@@ -1363,21 +1367,34 @@ func verifyCMSStatusWithCertificates(data []byte, anchors *x509.CertPool) (
 	}
 	validSignature := false
 	switch {
-	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}),
-		sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}):
+	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}):
+		if hashID != crypto.SHA1 {
+			return nil, nil, false, nil, errors.New("pkinit: RSA signature/digest mismatch")
+		}
+		if ecdsaKey, ok := cert.PublicKey.(*ecdsa.PublicKey); ok {
+			// Legacy MIT emits this identifier for EC certificates.
+			validSignature = ecdsa.VerifyASN1(ecdsaKey, sigHash, sig)
+			break
+		}
 		rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
 		if !ok {
-			if ecdsaKey, ecdsaOK := cert.PublicKey.(*ecdsa.PublicKey); ecdsaOK {
-				validSignature = ecdsa.VerifyASN1(ecdsaKey, sigHash, sig)
-			}
-		} else {
-			if sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}) && hashID != crypto.SHA1 {
-				return nil, nil, false, nil, errors.New("pkinit: RSA signature/digest mismatch")
-			}
-			validSignature = rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) == nil
+			return nil, nil, false, nil, errors.New("pkinit: CMS signature key type mismatch")
 		}
+		validSignature = rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) == nil
+	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}):
+		rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, nil, false, nil, errors.New("pkinit: CMS signature key type mismatch")
+		}
+		if hashID != crypto.SHA256 {
+			return nil, nil, false, nil, errors.New("pkinit: RSA signature/digest mismatch")
+		}
+		validSignature = rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) == nil
 	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}):
 		ecdsaKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok || hashID != crypto.SHA256 {
+			return nil, nil, false, nil, errors.New("pkinit: ECDSA signature/digest mismatch")
+		}
 		validSignature = ok && ecdsa.VerifyASN1(ecdsaKey, sigHash, sig)
 	}
 	if !validSignature {

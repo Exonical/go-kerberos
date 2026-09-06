@@ -2,6 +2,7 @@ package pkinit
 
 import (
 	"bytes"
+	stdcrypto "crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -372,6 +373,133 @@ func TestECDSACMSRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCMSAcceptsLegacyMITECDSASignatureOID(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := certificateForPublicKey(t, &key.PublicKey, key)
+	cms, err := signLegacyECDSACMS([]byte{0x30, 0x00}, cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyCMS(cms, nil); err != nil {
+		t.Fatalf("verify legacy MIT ECDSA CMS: %v", err)
+	}
+}
+
+func signLegacyECDSACMS(content []byte, cert *x509.Certificate, signer stdcrypto.Signer) ([]byte, error) {
+	contentDigest := sha1.Sum(content)
+	attrs := derSet(
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}), derSet(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}))),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 4}), derSet(derOctet(contentDigest[:]))),
+	)
+	sigHash := sha1.Sum(attrs)
+	sig, err := signer.Sign(rand.Reader, sigHash[:], stdcrypto.SHA1)
+	if err != nil {
+		return nil, err
+	}
+	issuerSerial := derSeq(cert.RawIssuer, derIntBig(cert.SerialNumber))
+	signerInfo := derSeq(
+		derInt(1), issuerSerial,
+		derSeq(derOID(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}), derNull()),
+		derExplicitImplicit(0, attrs[2:]),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}), derNull()),
+		derOctet(sig),
+	)
+	signed := derSeq(
+		derInt(3),
+		derSet(derSeq(derOID(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}), derNull())),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}), derExplicit(0, derOctet(content))),
+		derExplicitImplicit(0, cert.Raw),
+		derSet(signerInfo),
+	)
+	return derSeq(
+		derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}),
+		derExplicit(0, signed),
+	), nil
+}
+
+func TestCMSRejectsSignatureKeyTypeConfusion(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecCert := certificateForPublicKey(t, &ecKey.PublicKey, ecKey)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaCert := certificateForPublicKey(t, &rsaKey.PublicKey, rsaKey)
+	tests := []struct {
+		name string
+		cert *x509.Certificate
+		key  stdcrypto.Signer
+		oid  asn1.ObjectIdentifier
+	}{
+		{
+			name: "ECDSA certificate with RSA signature OID",
+			cert: ecCert, key: ecKey,
+			oid: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11},
+		},
+		{
+			name: "RSA certificate with ECDSA signature OID",
+			cert: rsaCert, key: rsaKey,
+			oid: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cms, err := signCMS([]byte{0x30, 0x00}, test.cert, test.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			confused := replaceCMSSignatureAlgorithm(t, cms, test.oid)
+			if _, _, err := verifyCMS(confused, nil); err == nil {
+				t.Fatal("accepted CMS signature with mismatched key type")
+			}
+		})
+	}
+}
+
+func certificateForPublicKey(t *testing.T, public any, signer stdcrypto.Signer) *x509.Certificate {
+	t.Helper()
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7),
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, public, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func replaceCMSSignatureAlgorithm(t *testing.T, cms []byte, oid asn1.ObjectIdentifier) []byte {
+	t.Helper()
+	outer, err := sequenceFields(cms)
+	if err != nil || len(outer) != 2 {
+		t.Fatalf("CMS outer fields: %v", err)
+	}
+	signedData, err := sequenceFields(mustContent(outer[1]))
+	if err != nil || len(signedData) < 5 {
+		t.Fatalf("CMS SignedData fields: %v", err)
+	}
+	signerInfos, err := collectionFields(signedData[4])
+	if err != nil || len(signerInfos) != 1 {
+		t.Fatalf("CMS signer infos: %v", err)
+	}
+	signer, err := sequenceFields(signerInfos[0])
+	if err != nil || len(signer) < 6 {
+		t.Fatalf("CMS signer fields: %v", err)
+	}
+	signer[4] = derSeq(derOID(oid), derNull())
+	signedData[4] = derSet(derSeq(signer...))
+	return derSeq(outer[0], derExplicit(0, derSeq(signedData...)))
+}
+
 func TestECSPKIAndExchangeRoundTrip(t *testing.T) {
 	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
 		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
@@ -414,6 +542,31 @@ func TestDHParameterNormalization(t *testing.T) {
 	}
 }
 
+func TestNewClientSelectsWeakestSupportedGroup(t *testing.T) {
+	cert, signer := testCertificate(t)
+	tests := []struct {
+		minimum string
+		group   DHGroup
+	}{
+		{"", GroupMODP2048},
+		{"1024", GroupMODP2048},
+		{"2048", GroupMODP2048},
+		{"2049", GroupP384},
+		{"3072", GroupP384},
+		{"4096", GroupP384},
+		{"P-521", GroupP521},
+	}
+	for _, test := range tests {
+		client, err := NewClientWithDHMinBits(cert, signer, test.minimum)
+		if err != nil {
+			t.Fatalf("minimum %q: %v", test.minimum, err)
+		}
+		if client.Group != test.group {
+			t.Errorf("minimum %q selected %v, want %v", test.minimum, client.Group, test.group)
+		}
+	}
+}
+
 func TestTDHParametersRoundTrip(t *testing.T) {
 	want := []DHGroup{GroupP256, GroupP384, GroupP521, GroupMODP2048}
 	data, err := MarshalDHParameters(want)
@@ -431,6 +584,15 @@ func TestTDHParametersRoundTrip(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("group %d = %v, want %v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestTDHParametersSkipsForeignMODP(t *testing.T) {
+	foreign := derSeq(derOID(idDHPublicNumber),
+		derSeq(derInt(23), derInt(5), derInt(11)))
+	data := der(0x30, foreign)
+	if _, err := ParseDHParameters(data); err == nil {
+		t.Fatal("foreign MODP parameters accepted")
 	}
 }
 
