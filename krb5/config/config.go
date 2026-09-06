@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -570,64 +569,6 @@ func ParseDuration(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("parse MIT duration: invalid value")
 	}
 	return time.Duration(seconds * float64(time.Second)), nil
-}
-
-// ExpandPathTokens expands the POSIX profile path tokens supported by MIT
-// Kerberos. Windows registry and shell-specific tokens are intentionally not
-// supported.
-func ExpandPathTokens(path string) (string, error) {
-	var expanded strings.Builder
-	for len(path) > 0 {
-		start := strings.Index(path, "%{")
-		if start < 0 {
-			expanded.WriteString(path)
-			break
-		}
-		expanded.WriteString(path[:start])
-		end := strings.IndexByte(path[start+2:], '}')
-		if end < 0 {
-			return "", fmt.Errorf("expand path: variable missing }")
-		}
-		end += start + 2
-		token := path[start+2 : end]
-		value, err := expandPathToken(token)
-		if err != nil {
-			return "", err
-		}
-		expanded.WriteString(value)
-		path = path[end+1:]
-	}
-	return expanded.String(), nil
-}
-
-func expandPathToken(token string) (string, error) {
-	switch token {
-	case "TEMP":
-		if value := os.Getenv("TMPDIR"); value != "" {
-			return value, nil
-		}
-		return os.TempDir(), nil
-	case "uid", "USERID":
-		return strconv.FormatUint(uint64(os.Getuid()), 10), nil
-	case "euid":
-		return strconv.FormatUint(uint64(os.Geteuid()), 10), nil
-	case "username":
-		current, err := user.Current()
-		if err != nil {
-			return "", fmt.Errorf("expand path: resolve username: %w", err)
-		}
-		return current.Username, nil
-	case "LIBDIR":
-		return "/usr/lib", nil
-	case "BINDIR":
-		return "/usr/bin", nil
-	case "SBINDIR":
-		return "/usr/sbin", nil
-	case "null":
-		return "", nil
-	default:
-		return "", fmt.Errorf("expand path: invalid token %%{%s}", token)
-	}
 }
 
 func stripComment(line string) string {

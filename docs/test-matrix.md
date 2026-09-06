@@ -63,8 +63,10 @@ and `t_std_conf.c`, plus the malformed-request regressions from
 `t_cve-2013-1417.py`, `t_cve-2021-36222.py`, and `t_bogus_kdc_req.py`.
 The exact MIT enctype-expression parser from `t_etypes.c`, the standalone
 `k5_parse_host_string()` API from `t_parse_host_string.c`, the obsolete
-4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c`, and
-`t_expand_path.c` are not implemented as equivalent Go APIs and are skipped.
+4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c`, and the
+standalone test-helper API from `t_expand_path.c` are not implemented as
+equivalent Go APIs. The deterministic path-token cases are covered through
+`ExpandPathTokens` tests on POSIX and Windows.
 
 The live-KDC Python-suite adaptations cover the implemented portions of
 `t_ccache.py`, `t_alias.py`, `t_crossrealm.py`, `t_authdata.py`, and
@@ -411,10 +413,16 @@ The shared path-token expander supports the POSIX MIT tokens `%{TEMP}`,
 `/tmp`; UID and username values come from the POSIX process/user APIs.
 Installation-directory tokens use the conventional Go/Linux paths
 `/usr/lib`, `/usr/bin`, and `/usr/sbin`, since this project does not have
-MIT's compile-time installation macros. Unknown and malformed tokens are
-errors. Windows registry tokens and MIT profile `module` loading are not
-implemented; those features require platform-specific/plugin loader
-infrastructure not present in this Go profile package.
+MIT's compile-time installation macros. On Windows, the shell-folder and SID
+tokens `%{APPDATA}`, `%{COMMON_APPDATA}`, `%{LOCAL_APPDATA}`, `%{SYSTEM}`,
+`%{WINDOWS}`, `%{USERCONFIG}`, `%{COMMONCONFIG}`, `%{LIBDIR}`, `%{BINDIR}`,
+`%{SBINDIR}`, `%{euid}`, `%{USERID}`, `%{uid}`, and `%{TEMP}` resolve through
+the corresponding Windows known folders, executable directory, current-user
+SID, and temporary-directory APIs. Windows expansion converts `/` to `\`,
+matching MIT's `expand_path.c`; Windows registry tokens remain out of scope.
+Unknown and malformed tokens are errors. MIT profile `module` loading is also
+not implemented; it requires plugin-loader infrastructure not present in this
+Go profile package.
 
 Unit coverage exercises MIT profile `[domain_realm]` matching (exact host,
 case-insensitive parent walking, leading-dot suffixes, and numeric-address
