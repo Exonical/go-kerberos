@@ -203,7 +203,7 @@ func New(values []string, program string) (*Logger, error) {
 			} else {
 				flags |= os.O_TRUNC
 			}
-			f, err := os.OpenFile(spec.Path, flags, 0o640)
+			f, err := os.OpenFile(spec.Path, flags, 0o640) // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0640 log file is intentionally restrictive
 			if err != nil {
 				l.Close()
 				return nil, err

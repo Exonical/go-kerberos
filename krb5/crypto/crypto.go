@@ -690,7 +690,7 @@ func PRF(etype EType, key, input []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	digest := sha1.Sum(input)
+	digest := sha1.Sum(input) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-sha1 -- RFC 3961 AES PRF mandates SHA-1
 	block := digest[:16]
 	return aescts.Encrypt(dkey, make([]byte, 16), block)
 }

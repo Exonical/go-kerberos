@@ -232,7 +232,7 @@ func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
 	if len(bodyDER) == 0 {
 		return protocol.PAData{}, errors.New("pkinit: empty AS-REQ body")
 	}
-	sum := sha1.Sum(bodyDER)
+	sum := sha1.Sum(bodyDER) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-sha1 -- RFC 4556 paChecksum mandates SHA-1
 	var token []byte
 	if len(freshnessToken) > 0 {
 		token = append([]byte(nil), freshnessToken[0]...)
@@ -359,7 +359,7 @@ func VerifyPAASReqForKDC(data, bodyDER []byte) (VerifiedPAASReq, error) {
 	if err != nil {
 		return VerifiedPAASReq{}, err
 	}
-	sum := sha1.Sum(bodyDER)
+	sum := sha1.Sum(bodyDER) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-sha1 -- RFC 4556 paChecksum mandates SHA-1
 	if len(auth.PAChecksum) != len(sum) || subtle.ConstantTimeCompare(auth.PAChecksum, sum[:]) != 1 {
 		return VerifiedPAASReq{}, errors.New("pkinit: PA-PK-AS-REQ checksum mismatch")
 	}
@@ -1066,7 +1066,7 @@ func octetString2Key(z []byte, enctype int32) ([]byte, error) {
 	need := profile.KeySize()
 	out := make([]byte, 0, need)
 	for i := byte(0); len(out) < need; i++ {
-		h := sha1.New()
+		h := sha1.New() // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-sha1 -- RFC 4556 octetstring2key KDF mandates SHA-1
 		h.Write([]byte{i})
 		h.Write(z)
 		out = append(out, h.Sum(nil)...)
@@ -1451,7 +1451,7 @@ func hashBytes(hash crypto.Hash, data []byte) []byte {
 	var sum []byte
 	switch hash {
 	case crypto.SHA1:
-		v := sha1.Sum(data)
+		v := sha1.Sum(data) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-sha1 -- legacy CMS digest support (RFC 4556 interop)
 		sum = v[:]
 	case crypto.SHA256:
 		v := sha256.Sum256(data)

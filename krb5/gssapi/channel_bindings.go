@@ -55,7 +55,7 @@ func ChecksumChannelBindings(bindings *ChannelBindings) [16]byte {
 	appendField(bindings.AcceptorAddrType)
 	appendBytes(bindings.AcceptorAddress)
 	appendBytes(bindings.ApplicationData)
-	return md5.Sum(encoded)
+	return md5.Sum(encoded) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-md5 -- RFC 4121 channel bindings mandate MD5
 }
 
 func channelBindingsEqual(checksum []byte, bindings *ChannelBindings) bool {

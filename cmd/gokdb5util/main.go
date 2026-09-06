@@ -209,7 +209,7 @@ func writeDump(path string, db *kdb.Database, password string) error {
 }
 
 func writeDumpAtomic(path string, db *kdb.Database, password string, replace bool) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
@@ -326,14 +326,14 @@ func loadDB(opts options, rest []string) error {
 	if _, err := mitdump.Parse(data); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(opts.db), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(opts.db), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return err
 	}
 	return writeFileAtomic(opts.db, data)
 }
 
 func writeFileAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")

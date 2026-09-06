@@ -52,7 +52,7 @@ func tokenOwner(token windows.Token) (*windows.SID, error) {
 	if err := windows.GetTokenInformation(token, windows.TokenOwner, &info[0], uint32(len(info)), &size); err != nil {
 		return nil, err
 	}
-	owner := (*tokenOwnerInfo)(unsafe.Pointer(&info[0])).Owner
+	owner := (*tokenOwnerInfo)(unsafe.Pointer(&info[0])).Owner // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 GetTokenInformation(TokenOwner)
 	if owner == nil {
 		return nil, fmt.Errorf("empty owner SID")
 	}

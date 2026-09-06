@@ -245,7 +245,7 @@ func encodeUserPassword(secret string, auth [16]byte, value []byte) []byte {
 	prev := auth[:]
 	for offset := 0; offset < length; offset += 16 {
 		input := append([]byte(secret), prev...)
-		hash := md5.Sum(input)
+		hash := md5.Sum(input) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-md5 -- RFC 2865 User-Password obfuscation mandates MD5
 		for i := 0; i < 16; i++ {
 			out[offset+i] ^= hash[i]
 		}
@@ -262,7 +262,7 @@ func decodeUserPassword(secret string, auth [16]byte, value []byte) ([]byte, err
 	prev := auth[:]
 	for offset := 0; offset < len(value); offset += 16 {
 		input := append([]byte(secret), prev...)
-		hash := md5.Sum(input)
+		hash := md5.Sum(input) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-md5 -- RFC 2865 User-Password obfuscation mandates MD5
 		for i := 0; i < 16; i++ {
 			out[offset+i] = value[offset+i] ^ hash[i]
 		}

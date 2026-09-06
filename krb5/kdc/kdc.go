@@ -2346,7 +2346,7 @@ func verifyPAForUserChecksum(key []byte, usage uint32, data, expected []byte) bo
 	var usageBytes [4]byte
 	binary.LittleEndian.PutUint32(usageBytes[:], usage)
 	hashInput := append(append([]byte(nil), usageBytes[:]...), data...)
-	digest := md5.Sum(hashInput)
+	digest := md5.Sum(hashInput) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-md5 -- MS-PAC KERB_CHECKSUM_HMAC_MD5 mandates MD5
 	signingKey := hmac.New(md5.New, key)
 	_, _ = signingKey.Write([]byte("signaturekey\x00"))
 	mac := hmac.New(md5.New, signingKey.Sum(nil))

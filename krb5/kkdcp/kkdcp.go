@@ -166,7 +166,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", ContentType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(responseDER)
+	_, _ = w.Write(responseDER) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.xss.no-direct-write-to-responsewriter -- binary Kerberos DER response, not HTML
 }
 
 // Client sends Kerberos requests to an HTTPS KDC proxy.
