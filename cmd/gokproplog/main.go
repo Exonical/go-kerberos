@@ -57,7 +57,7 @@ func run(args []string, out, errOut io.Writer) error {
 		fmt.Fprintln(out, "Reinitialized the ulog.")
 		return nil
 	}
-	log, err := iprop.Open(path)
+	log, err := iprop.OpenReadOnly(path)
 	if err != nil {
 		return err
 	}
@@ -173,9 +173,18 @@ func resolveLogPath() (string, error) {
 		realm = os.Getenv("KRB5_DEFAULT_REALM")
 	}
 	if realm == "" {
-		for name := range cfg.Realms {
-			realm = name
-			break
+		realm = profile.DefaultRealm
+	}
+	if realm == "" {
+		switch len(cfg.Realms) {
+		case 0:
+			realm = ""
+		case 1:
+			for name := range cfg.Realms {
+				realm = name
+			}
+		default:
+			return "", fmt.Errorf("multiple realms configured; set default_realm in krb5.conf")
 		}
 	}
 	var values map[string][]string

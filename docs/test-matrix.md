@@ -671,12 +671,18 @@ destination defaults to `SYSLOG` with the `AUTH` facility. KDC and kadm5
 servers accept an optional logger without changing nil-logger behavior.
 
 `gokdb5util` supports the scoped `create`, `destroy`, `stash`, `dump`, and
-`load` commands with MIT dump and stash files. The key-management commands
+`load` commands with MIT dump and stash files. `create` refuses to replace an
+existing database, while `load` atomically replaces the destination with mode
+0600. `create -s` uses the realm's `key_stash_file` from `kdc.conf` when set,
+otherwise `/var/lib/krb5kdc/.k5.<realm>`. The key-management commands
 `add_mkey`, `use_mkey`, `list_mkeys`, `purge_mkeys`, and
 `update_princ_encryption`, plus `ark` and `tabdump`, are out of scope.
 
 `krb5/iprop` and `gokproplog` support little-endian representations of the
 MIT native-endian ulog header and fixed-size entry blocks on current
 platforms. Summary, verbose entry, entry-limit, and reset operations are
-covered by tests. The Go iprop master remains in-memory; ulogs can be
-inspected when produced by MIT or explicitly created with the Go API.
+covered by tests. `gokproplog` opens logs read-only unless `-R` is requested,
+and follows MIT default-realm selection, rejecting ambiguous multi-realm
+profiles without an explicit default. The Go iprop master remains in-memory;
+ulogs can be inspected when produced by MIT or explicitly created with the Go
+API.

@@ -40,3 +40,17 @@ func TestSummaryAndVerboseOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveLogPathRejectsAmbiguousRealms(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "kdc.conf")
+	if err := os.WriteFile(conf, []byte("[realms]\n A = {\n  iprop_logfile = /tmp/a.ulog\n }\n B = {\n  iprop_logfile = /tmp/b.ulog\n }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_KDC_PROFILE", conf)
+	t.Setenv("KRB5_REALM", "")
+	t.Setenv("KRB5_DEFAULT_REALM", "")
+	if _, err := resolveLogPath(); err == nil || !strings.Contains(err.Error(), "multiple realms configured") {
+		t.Fatalf("resolveLogPath error = %v", err)
+	}
+}

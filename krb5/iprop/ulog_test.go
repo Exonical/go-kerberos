@@ -65,3 +65,49 @@ func TestUlogHeaderBytes(t *testing.T) {
 		t.Fatalf("header = %s, want %s", got, want)
 	}
 }
+
+func TestUlogEntryCountAndReadOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "principal.ulog")
+	log, err := Create(path, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for serial := uint32(1); serial <= 5; serial++ {
+		if err := log.AddUpdate(Update{
+			PrincipalName: "user",
+			EntrySno:      serial,
+			Time:          Time{Seconds: serial},
+			Commit:        true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		want := serial
+		if want > 3 {
+			want = 3
+		}
+		if got := log.Header().NumEntries; got != want {
+			t.Fatalf("serial %d: NumEntries = %d, want %d", serial, got, want)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	if err := readOnly.AddUpdate(Update{PrincipalName: "blocked"}); err == nil {
+		t.Fatal("read-only AddUpdate unexpectedly succeeded")
+	}
+	if err := readOnly.Reset(); err == nil {
+		t.Fatal("read-only Reset unexpectedly succeeded")
+	}
+	entries, err := readOnly.GetEntries(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3 after wraparound", len(entries))
+	}
+}

@@ -40,6 +40,62 @@ func TestCreateAndStash(t *testing.T) {
 	}
 }
 
+func TestCreateDoesNotReplaceExistingDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	original := []byte("existing")
+	if err := os.WriteFile(dbPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "password", "create"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	data, readErr := os.ReadFile(dbPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != string(original) {
+		t.Fatalf("database changed to %q", data)
+	}
+}
+
+func TestLoadReplacesWith0600Atomically(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source")
+	target := filepath.Join(dir, "target")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", source, "-P", "password", "create"}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", target, "load", source}, strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("target mode = %o, want 600", got)
+	}
+	if _, err := mitdump.LoadWithMasterPassword(target, "password"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPasswordPromptPreservesSpaces(t *testing.T) {
+	value, err := readPassword(strings.NewReader(" leading and trailing \r\n"), &bytes.Buffer{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != " leading and trailing " {
+		t.Fatalf("password = %q", value)
+	}
+}
+
 func TestCreatePipePasswordPromptsShareReader(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "principal")

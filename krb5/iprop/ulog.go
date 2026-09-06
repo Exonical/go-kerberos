@@ -51,6 +51,7 @@ type Ulog struct {
 	path     string
 	hdr      UlogHeader
 	capacity uint32
+	readOnly bool
 }
 
 func Create(path string, entries ...uint32) (*Ulog, error) {
@@ -85,11 +86,21 @@ func Create(path string, entries ...uint32) (*Ulog, error) {
 }
 
 func Open(path string) (*Ulog, error) {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	return open(path, os.O_RDWR, false)
+}
+
+// OpenReadOnly opens an update log for inspection without permitting
+// mutations.
+func OpenReadOnly(path string) (*Ulog, error) {
+	return open(path, os.O_RDONLY, true)
+}
+
+func open(path string, flags int, readOnly bool) (*Ulog, error) {
+	file, err := os.OpenFile(path, flags, 0)
 	if err != nil {
 		return nil, err
 	}
-	u := &Ulog{file: file, path: path}
+	u := &Ulog{file: file, path: path, readOnly: readOnly}
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -134,6 +145,9 @@ func (u *Ulog) AddUpdate(update Update) error {
 	if u.file == nil {
 		return errors.New("iprop: closed ulog")
 	}
+	if u.readOnly {
+		return errors.New("iprop: read-only ulog")
+	}
 	serial := update.EntrySno
 	if serial == 0 {
 		serial = u.hdr.LastSno + 1
@@ -158,6 +172,8 @@ func (u *Ulog) AddUpdate(update Update) error {
 		return err
 	}
 	if u.hdr.LastSno == 0 || serial >= u.hdr.LastSno {
+		existing := u.hdr.NumEntries > 0 &&
+			serial >= u.hdr.FirstSno && serial <= u.hdr.LastSno
 		if u.hdr.FirstSno == 0 {
 			u.hdr.FirstSno = serial
 			u.hdr.FirstTime = update.Time
@@ -171,7 +187,9 @@ func (u *Ulog) AddUpdate(update Update) error {
 		}
 		u.hdr.LastSno = serial
 		u.hdr.LastTime = update.Time
-		if !(serial == u.hdr.LastSno && u.hdr.NumEntries == 1) && u.hdr.NumEntries < u.capacity {
+		if !existing && u.hdr.NumEntries == 0 {
+			u.hdr.NumEntries = 1
+		} else if !existing && u.hdr.NumEntries < u.capacity {
 			u.hdr.NumEntries++
 		}
 	}
@@ -218,6 +236,9 @@ func (u *Ulog) Reset() error {
 	defer u.mu.Unlock()
 	if u.file == nil {
 		return errors.New("iprop: closed ulog")
+	}
+	if u.readOnly {
+		return errors.New("iprop: read-only ulog")
 	}
 	u.hdr = UlogHeader{
 		Version: ulogVersion, NumEntries: 1, FirstSno: 1, LastSno: 1,

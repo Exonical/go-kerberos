@@ -80,9 +80,15 @@ type Logger struct {
 }
 
 type destination struct {
-	spec  Destination
-	file  io.Writer
-	close func() error
+	spec   Destination
+	file   io.Writer
+	syslog syslogSink
+	close  func() error
+}
+
+type syslogSink interface {
+	write(Severity, string) error
+	Close() error
 }
 
 var facilities = map[string]Facility{
@@ -204,7 +210,7 @@ func New(values []string, program string) (*Logger, error) {
 			}
 			d.file, d.close = f, f.Close
 		case Device:
-			f, err := os.OpenFile(spec.Path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+			f, err := os.OpenFile(spec.Path, os.O_WRONLY|os.O_APPEND, 0)
 			if err != nil {
 				l.Close()
 				return nil, err
@@ -225,7 +231,7 @@ func New(values []string, program string) (*Logger, error) {
 				l.Close()
 				return nil, err
 			}
-			d.file, d.close = writer, writer.Close
+			d.syslog, d.close = writer, writer.Close
 		}
 		l.destinations = append(l.destinations, d)
 	}
@@ -270,8 +276,8 @@ func (l *Logger) Log(level Severity, format string, args ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, d := range l.destinations {
-		if d.spec.Kind == Syslog {
-			_, _ = io.WriteString(d.file, message)
+		if d.syslog != nil {
+			_ = d.syslog.write(level, message)
 			continue
 		}
 		_, _ = io.WriteString(d.file, line)

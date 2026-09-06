@@ -4,9 +4,16 @@ package klog
 
 import (
 	"errors"
-	"io"
 )
 
-func openSyslog(Facility, string) (io.WriteCloser, error) {
+type unavailableSyslog struct{}
+
+func openSyslog(Facility, string) (*unavailableSyslog, error) {
 	return nil, errors.New("klog: syslog unavailable on this platform")
 }
+
+func (*unavailableSyslog) write(Severity, string) error {
+	return errors.New("klog: syslog unavailable on this platform")
+}
+
+func (*unavailableSyslog) Close() error { return nil }

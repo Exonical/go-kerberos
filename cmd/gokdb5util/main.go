@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"golang.org/x/term"
@@ -52,7 +53,7 @@ func run(args []string, in io.Reader, out, errOut io.Writer) error {
 			}
 		}
 		if opts.stashCreate && opts.stash == "" {
-			opts.stash = opts.db + ".stash"
+			opts.stash = defaultStashPath(opts.realm)
 		}
 		return createDB(opts, in, out, errOut)
 	case "destroy":
@@ -141,7 +142,9 @@ func readPassword(in io.Reader, out io.Writer, prompt string) (string, error) {
 	if err != nil && err != io.EOF {
 		return "", err
 	}
-	return strings.TrimSpace(value), nil
+	value = strings.TrimSuffix(value, "\n")
+	value = strings.TrimSuffix(value, "\r")
+	return value, nil
 }
 
 func masterPassword(opts options, in io.Reader, out io.Writer, confirm bool) (string, error) {
@@ -202,6 +205,10 @@ func createDB(opts options, in io.Reader, out, errOut io.Writer) error {
 }
 
 func writeDump(path string, db *kdb.Database, password string) error {
+	return writeDumpAtomic(path, db, password, false)
+}
+
+func writeDumpAtomic(path string, db *kdb.Database, password string, replace bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -211,6 +218,10 @@ func writeDump(path string, db *kdb.Database, password string) error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := mitdump.WriteWithMasterPassword(tmp, db, password); err != nil {
 		_ = tmp.Close()
 		return err
@@ -222,7 +233,36 @@ func writeDump(path string, db *kdb.Database, password string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if replace {
+		return os.Rename(name, path)
+	}
+	if err := os.Link(name, path); err != nil {
+		return fmt.Errorf("database %q already exists: %w", path, err)
+	}
+	return os.Remove(name)
+}
+
+func defaultStashPath(realm string) string {
+	const defaultKeyFileStub = "/var/lib/krb5kdc/.k5."
+	path := os.Getenv("KRB5_KDC_PROFILE")
+	if path == "" {
+		path = "/etc/krb5kdc/kdc.conf"
+	}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if profile, parseErr := config.ParseKDCConf(data); parseErr == nil {
+			if settings, ok := profile.Realm(realm); ok {
+				for key, values := range settings.Values {
+					if strings.EqualFold(key, "key_stash_file") && len(values) > 0 {
+						if value := strings.TrimSpace(values[0]); value != "" {
+							return value
+						}
+					}
+				}
+			}
+		}
+	}
+	return defaultKeyFileStub + realm
 }
 
 func destroyDB(opts options, in io.Reader, out io.Writer) error {
@@ -272,7 +312,7 @@ func dumpDB(opts options, rest []string, out io.Writer) error {
 		_, err = io.Copy(out, bytes.NewReader(data))
 		return err
 	}
-	return os.WriteFile(rest[0], data, 0o600)
+	return writeFileAtomic(rest[0], data)
 }
 
 func loadDB(opts options, rest []string) error {
@@ -289,5 +329,33 @@ func loadDB(opts options, rest []string) error {
 	if err := os.MkdirAll(filepath.Dir(opts.db), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(opts.db, data, 0o600)
+	return writeFileAtomic(opts.db, data)
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
