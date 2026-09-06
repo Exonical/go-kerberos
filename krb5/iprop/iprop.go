@@ -131,6 +131,23 @@ type Update struct {
 	Futures       []byte
 }
 
+// MarshalXDR encodes an incremental update using the MIT iprop XDR layout.
+func (v Update) MarshalXDR() []byte {
+	var w writer
+	w.update(v)
+	return w.bytes()
+}
+
+// UnmarshalUpdate decodes one incremental update from XDR.
+func UnmarshalUpdate(data []byte) (Update, error) {
+	r := reader{data: data}
+	v, err := r.update()
+	if err == nil {
+		err = r.done()
+	}
+	return v, err
+}
+
 type IncrementalResult struct {
 	LastEntry Last
 	Updates   []Update
