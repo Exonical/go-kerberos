@@ -1670,6 +1670,38 @@ func TestServerOTPFASTASExchange(t *testing.T) {
 	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "otp")
 }
 
+type testOTPVerifier struct {
+	indicators []string
+	value      string
+}
+
+func (v testOTPVerifier) VerifyOTP(_ principal.Principal, value []byte) ([]string, error) {
+	if string(value) != v.value {
+		return nil, errors.New("invalid OTP")
+	}
+	return append([]string(nil), v.indicators...), nil
+}
+
+func TestServerOTPVerifierFASTASExchange(t *testing.T) {
+	now := time.Unix(2000000060, 0).UTC()
+	server, kclient := testServer(t, now)
+	user := principal.Principal{Realm: "TEST.REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	armorTGT, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatalf("armor ASExchange: %v", err)
+	}
+	server.OTPValidator = func(principal.Principal, string) error {
+		return errors.New("legacy validator should not run")
+	}
+	server.OTPVerifier = testOTPVerifier{value: "123456", indicators: []string{"radius", "otp"}}
+	credentials, err := kclient.ASExchangeFASTOTP(context.Background(), user, armorTGT,
+		func(otp.Challenge) (string, string, error) { return "123456", "", nil })
+	if err != nil {
+		t.Fatalf("OTP verifier FAST ASExchange: %v", err)
+	}
+	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM", "radius", "otp")
+}
+
 func TestServerASPasswordExpirationAndPasswordChangeService(t *testing.T) {
 	now := time.Unix(2000000063, 0).UTC()
 	server, _ := testServer(t, now)
