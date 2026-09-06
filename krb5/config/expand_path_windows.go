@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -16,16 +17,46 @@ func expandPathTemp() (string, error) {
 }
 
 func expandPathUserID() (string, error) {
-	token := windows.GetCurrentProcessToken()
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return "", fmt.Errorf("expand path: resolve user SID: %w", err)
+	var token windows.Token
+	err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, false, &token)
+	if err == windows.ERROR_NO_TOKEN {
+		token = windows.GetCurrentProcessToken()
+	} else if err != nil {
+		return "", fmt.Errorf("expand path: open thread token: %w", err)
+	} else {
+		defer token.Close()
 	}
-	sid := user.User.Sid.String()
+
+	owner, err := tokenOwner(token)
+	if err != nil {
+		return "", fmt.Errorf("expand path: resolve owner SID: %w", err)
+	}
+	sid := owner.String()
 	if sid == "" {
-		return "", fmt.Errorf("expand path: resolve user SID: empty SID")
+		return "", fmt.Errorf("expand path: resolve owner SID: empty SID")
 	}
 	return sid, nil
+}
+
+type tokenOwnerInfo struct {
+	Owner *windows.SID
+}
+
+func tokenOwner(token windows.Token) (*windows.SID, error) {
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenOwner, nil, 0, &size)
+	if err != windows.ERROR_INSUFFICIENT_BUFFER {
+		return nil, err
+	}
+	info := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenOwner, &info[0], uint32(len(info)), &size); err != nil {
+		return nil, err
+	}
+	owner := (*tokenOwnerInfo)(unsafe.Pointer(&info[0])).Owner
+	if owner == nil {
+		return nil, fmt.Errorf("empty owner SID")
+	}
+	return owner, nil
 }
 
 func expandPlatformPathToken(token string) (string, error) {
