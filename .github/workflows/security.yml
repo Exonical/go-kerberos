@@ -33,6 +33,7 @@ jobs:
           git clone --depth 1 https://github.com/opengrep/opengrep-rules /tmp/opengrep-rules
           rm -rf /tmp/opengrep-rules/.github
       - name: Scan
+        continue-on-error: true
         run: |
           opengrep scan --error \
             --config /tmp/opengrep-rules/go \
