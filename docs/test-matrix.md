@@ -378,6 +378,14 @@ token value through a callback; `Server.OTPValidator` validates it and
 encrypted directly with the FAST armor key using key usage 45, matching
 MIT krb5 1.22.2; no additional CF2/KDF is used for this request path.
 
+The pure-Go `krb5/krad` package provides MIT `libkrad`-compatible RADIUS
+packet, attribute, authentication, and UDP/TCP/Unix transport support.
+`otp.RADIUSVerifier` consumes token types and per-principal JSON
+configuration, and `Server.OTPVerifier` propagates successful indicators into
+audit state and issued tickets. Unit tests cover the MIT packet/password
+vectors and an in-process RADIUS server covers the transport paths. A live
+FreeRADIUS gate is not currently required.
+
 The in-process Go KDC/client OTP exchange is covered by
 `TestServerOTPFASTASExchange`. Live interoperability is covered in both
 directions: `TestGoClientOTPAgainstMITKDC` uses the MIT OTP module with an

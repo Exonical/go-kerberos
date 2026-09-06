@@ -59,6 +59,9 @@ type Config struct {
 	// Options retains profile relations which are not interpreted by the
 	// client-side configuration parser, including kdc.conf defaults.
 	Options map[string]map[string][]string
+	// SubsectionOptions retains relations in named subsections of profile
+	// sections that are not interpreted by the client-side parser.
+	SubsectionOptions map[string]map[string]map[string][]string
 }
 
 // RealmPath returns the configured direct authentication path from client to
@@ -342,6 +345,7 @@ func newConfig() *Config {
 		RealmAuthToLocal:        make(map[string][]string),
 		RealmAuthToLocalNames:   make(map[string]map[string][]string),
 		Options:                 make(map[string]map[string][]string),
+		SubsectionOptions:       make(map[string]map[string]map[string][]string),
 		DNSURILookup:            true,
 		RDNS:                    true,
 		DNSCanonicalizeHostname: "fallback",
@@ -384,6 +388,7 @@ func parseLegacy(data []byte) (*Config, error) {
 		RealmAuthToLocal:        make(map[string][]string),
 		RealmAuthToLocalNames:   make(map[string]map[string][]string),
 		Options:                 make(map[string]map[string][]string),
+		SubsectionOptions:       make(map[string]map[string]map[string][]string),
 		DNSURILookup:            true,
 		RDNS:                    true,
 		DNSCanonicalizeHostname: "fallback",
@@ -756,6 +761,16 @@ func addSubsection(cfg *Config, section, subsection, key string, values []string
 		target = cfg.CapathOptions
 	} else if section == "libdefaults" {
 		target = cfg.RealmLibDefaults
+	} else if section != "realms" {
+		if cfg.SubsectionOptions[section] == nil {
+			cfg.SubsectionOptions[section] = make(map[string]map[string][]string)
+		}
+		if cfg.SubsectionOptions[section][subsection] == nil {
+			cfg.SubsectionOptions[section][subsection] = make(map[string][]string)
+		}
+		cfg.SubsectionOptions[section][subsection][key] =
+			append(cfg.SubsectionOptions[section][subsection][key], values...)
+		return
 	}
 	if target[subsection] == nil {
 		target[subsection] = make(map[string][]string)

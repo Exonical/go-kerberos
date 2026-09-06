@@ -1,6 +1,6 @@
 module github.com/Exonical/go-kerberos
 
-go 1.27.0
+go 1.27.1
 
 require (
 	filippo.io/edwards25519 v1.1.0

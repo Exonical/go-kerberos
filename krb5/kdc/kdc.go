@@ -74,6 +74,12 @@ const (
 	keyUsagePAPKINITKX     = 44
 )
 
+// OTPVerifier validates raw RFC 6560 OTP values and returns ticket
+// authentication indicators.
+type OTPVerifier interface {
+	VerifyOTP(client principal.Principal, otpValue []byte) ([]string, error)
+}
+
 // Server is a Kerberos KDC backed by a pluggable principal store.
 type Server struct {
 	Realm         string
@@ -122,6 +128,9 @@ type Server struct {
 	// OTPValidator enables RFC 6560 preauthentication for the named
 	// principals. OTP is accepted only inside FAST.
 	OTPValidator func(principal.Principal, string) error
+	// OTPVerifier validates raw RFC 6560 OTP values, typically through an
+	// external backend. It takes precedence over OTPValidator when set.
+	OTPVerifier OTPVerifier
 	// OTPTokenInfo supplies the token metadata advertised in the challenge.
 	// A nil hook uses an unspecified token format.
 	OTPTokenInfo func(principal.Principal) []otp.TokenInfo
@@ -528,7 +537,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	spakePA := findPA(request.PAData, paSPAKE)
 	pkinitPA := findPA(request.PAData, protocol.PADataPKASReq)
 	otpPA := findPA(request.PAData, otp.PADataRequest)
-	otpEnabled := s.OTPValidator != nil
+	otpEnabled := s.OTPValidator != nil || s.OTPVerifier != nil
 	var etypeID int32
 	var clientKey, serviceKey kdb.Key
 	if pkinitPA != nil || anonymousRequest || otpEnabled {
@@ -589,7 +598,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			marshalDER(methodData), request.ReqBody.Nonce, armor)
 	}
 	if otpPA != nil {
-		if armor == nil || s.OTPValidator == nil {
+		if armor == nil || (s.OTPValidator == nil && s.OTPVerifier == nil) {
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		otpRequest, err := otp.DecodeRequest(otpPA.PADataValue)
@@ -602,7 +611,15 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
 		}
-		if err := s.OTPValidator(clientName, string(otpRequest.OTPValue)); err != nil {
+		var indicators []string
+		var verifyErr error
+		if s.OTPVerifier != nil {
+			indicators, verifyErr = s.OTPVerifier.VerifyOTP(clientName, otpRequest.OTPValue)
+		} else {
+			verifyErr = s.OTPValidator(clientName, string(otpRequest.OTPValue))
+			indicators = append([]string(nil), s.OTPIndicators...)
+		}
+		if verifyErr != nil {
 			s.recordPreauthFailure(clientName, &clientRecord)
 			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
 				nil, request.ReqBody.Nonce, armor)
@@ -617,14 +634,14 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		if auditState != nil {
 			auditState.PreauthType = "otp"
-			auditState.AuthIndicators = append([]string(nil), s.OTPIndicators...)
+			auditState.AuthIndicators = append([]string(nil), indicators...)
 		}
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
 		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, append([]string(nil), s.OTPIndicators...))
+			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, indicators)
 	}
 	if otpEnabled && !requiresHWAuth && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)

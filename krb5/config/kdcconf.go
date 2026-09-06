@@ -13,6 +13,7 @@ import (
 type KDCConfig struct {
 	Defaults map[string][]string
 	Realms   map[string]KDCRealmConfig
+	OTP      map[string]map[string][]string
 }
 
 // KDCRealmConfig contains one [realms] subsection from kdc.conf.
@@ -40,6 +41,7 @@ func ParseKDCConf(data []byte) (*KDCConfig, error) {
 	result := &KDCConfig{
 		Defaults: cloneOptions(profile.Options["kdcdefaults"]),
 		Realms:   make(map[string]KDCRealmConfig, len(profile.RealmOptions)),
+		OTP:      cloneSubsectionOptions(profile.SubsectionOptions["otp"]),
 	}
 	defaults := cloneOptions(result.Defaults)
 	for realm, values := range profile.RealmOptions {
@@ -55,6 +57,14 @@ func ParseKDCConf(data []byte) (*KDCConfig, error) {
 		result.Realms[realm] = settings
 	}
 	return result, nil
+}
+
+func cloneSubsectionOptions(values map[string]map[string][]string) map[string]map[string][]string {
+	result := make(map[string]map[string][]string, len(values))
+	for subsection, options := range values {
+		result[subsection] = cloneOptions(options)
+	}
+	return result
 }
 
 func (c *KDCConfig) Realm(realm string) (KDCRealmConfig, bool) {
