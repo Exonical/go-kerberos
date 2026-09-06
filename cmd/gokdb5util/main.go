@@ -43,9 +43,7 @@ func run(args []string, in io.Reader, out, errOut io.Writer) error {
 	if opts.db == "" {
 		opts.db = filepath.Join("/var/lib/krb5kdc", "principal")
 	}
-	if _, ok := in.(*os.File); !ok {
-		in = bufio.NewReader(in)
-	}
+	in = newInputReader(in)
 	switch command {
 	case "create":
 		for _, arg := range rest {
@@ -114,18 +112,31 @@ func parseOptions(args []string) (options, string, []string, error) {
 	return opts, fs.Arg(0), fs.Args()[1:], nil
 }
 
+type inputReader struct {
+	*bufio.Reader
+	file *os.File
+}
+
+func newInputReader(in io.Reader) *inputReader {
+	if reader, ok := in.(*inputReader); ok {
+		return reader
+	}
+	reader := &inputReader{Reader: bufio.NewReader(in)}
+	if file, ok := in.(*os.File); ok {
+		reader.file = file
+	}
+	return reader
+}
+
 func readPassword(in io.Reader, out io.Writer, prompt string) (string, error) {
-	if file, ok := in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+	reader := newInputReader(in)
+	if reader.file != nil && term.IsTerminal(int(reader.file.Fd())) {
 		fmt.Fprint(out, prompt)
-		value, err := term.ReadPassword(int(file.Fd()))
+		value, err := term.ReadPassword(int(reader.file.Fd()))
 		fmt.Fprintln(out)
 		return string(value), err
 	}
 	fmt.Fprint(out, prompt)
-	reader, ok := in.(*bufio.Reader)
-	if !ok {
-		reader = bufio.NewReader(in)
-	}
 	value, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", err
@@ -217,10 +228,7 @@ func writeDump(path string, db *kdb.Database, password string) error {
 func destroyDB(opts options, in io.Reader, out io.Writer) error {
 	if !opts.force {
 		fmt.Fprintf(out, "Deleting KDC database stored in '%s', are you sure? ", opts.db)
-		reader, ok := in.(*bufio.Reader)
-		if !ok {
-			reader = bufio.NewReader(in)
-		}
+		reader := newInputReader(in)
 		var answer string
 		if _, err := fmt.Fscanln(reader, &answer); err != nil {
 			return err

@@ -1,7 +1,6 @@
 package klog
 
 import (
-	"log/syslog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +16,7 @@ func TestParseSpecs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(specs) != 4 || specs[0].Kind != File || specs[1].Kind != File ||
-		specs[2].Facility != syslog.LOG_LOCAL3 || specs[3].Kind != Stderr {
+		specs[2].Facility != FacilityLocal3 || specs[3].Kind != Stderr {
 		t.Fatalf("specs = %#v", specs)
 	}
 }

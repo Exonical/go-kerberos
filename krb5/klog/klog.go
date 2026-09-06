@@ -4,7 +4,6 @@ package klog
 import (
 	"fmt"
 	"io"
-	"log/syslog"
 	"os"
 	"strings"
 	"sync"
@@ -23,10 +22,51 @@ const (
 	Device
 )
 
+// Facility identifies a syslog facility using the values shared by Unix
+// syslog implementations.
+type Facility int
+
+const (
+	FacilityKern     Facility = 0
+	FacilityUser     Facility = 1
+	FacilityMail     Facility = 2
+	FacilityDaemon   Facility = 3
+	FacilityAuth     Facility = 4
+	FacilitySyslog   Facility = 5
+	FacilityLPR      Facility = 6
+	FacilityNews     Facility = 7
+	FacilityUUCP     Facility = 8
+	FacilityCron     Facility = 9
+	FacilityAuthPriv Facility = 10
+	FacilityFTP      Facility = 11
+	FacilityLocal0   Facility = 16
+	FacilityLocal1   Facility = 17
+	FacilityLocal2   Facility = 18
+	FacilityLocal3   Facility = 19
+	FacilityLocal4   Facility = 20
+	FacilityLocal5   Facility = 21
+	FacilityLocal6   Facility = 22
+	FacilityLocal7   Facility = 23
+)
+
+// Severity identifies a syslog severity.
+type Severity int
+
+const (
+	SeverityEmerg Severity = iota
+	SeverityAlert
+	SeverityCrit
+	SeverityError
+	SeverityWarning
+	SeverityNotice
+	SeverityInfo
+	SeverityDebug
+)
+
 type Destination struct {
 	Kind     Kind
 	Path     string
-	Facility syslog.Priority
+	Facility Facility
 	Append   bool
 }
 
@@ -45,26 +85,26 @@ type destination struct {
 	close func() error
 }
 
-var facilities = map[string]syslog.Priority{
-	"AUTH":     syslog.LOG_AUTH,
-	"AUTHPRIV": syslog.LOG_AUTHPRIV,
-	"KERN":     syslog.LOG_KERN,
-	"USER":     syslog.LOG_USER,
-	"MAIL":     syslog.LOG_MAIL,
-	"DAEMON":   syslog.LOG_DAEMON,
-	"FTP":      syslog.LOG_FTP,
-	"LPR":      syslog.LOG_LPR,
-	"NEWS":     syslog.LOG_NEWS,
-	"UUCP":     syslog.LOG_UUCP,
-	"CRON":     syslog.LOG_CRON,
-	"LOCAL0":   syslog.LOG_LOCAL0,
-	"LOCAL1":   syslog.LOG_LOCAL1,
-	"LOCAL2":   syslog.LOG_LOCAL2,
-	"LOCAL3":   syslog.LOG_LOCAL3,
-	"LOCAL4":   syslog.LOG_LOCAL4,
-	"LOCAL5":   syslog.LOG_LOCAL5,
-	"LOCAL6":   syslog.LOG_LOCAL6,
-	"LOCAL7":   syslog.LOG_LOCAL7,
+var facilities = map[string]Facility{
+	"AUTH":     FacilityAuth,
+	"AUTHPRIV": FacilityAuthPriv,
+	"KERN":     FacilityKern,
+	"USER":     FacilityUser,
+	"MAIL":     FacilityMail,
+	"DAEMON":   FacilityDaemon,
+	"FTP":      FacilityFTP,
+	"LPR":      FacilityLPR,
+	"NEWS":     FacilityNews,
+	"UUCP":     FacilityUUCP,
+	"CRON":     FacilityCron,
+	"LOCAL0":   FacilityLocal0,
+	"LOCAL1":   FacilityLocal1,
+	"LOCAL2":   FacilityLocal2,
+	"LOCAL3":   FacilityLocal3,
+	"LOCAL4":   FacilityLocal4,
+	"LOCAL5":   FacilityLocal5,
+	"LOCAL6":   FacilityLocal6,
+	"LOCAL7":   FacilityLocal7,
 }
 
 // ParseSpecs parses FILE, SYSLOG, STDERR, CONSOLE, and DEVICE destinations.
@@ -105,7 +145,7 @@ func parseSpec(raw string) (Destination, error) {
 		}
 		return Destination{Kind: Device, Path: raw[7:]}, nil
 	case upper == "SYSLOG" || strings.HasPrefix(upper, "SYSLOG:"):
-		spec := Destination{Kind: Syslog, Facility: syslog.LOG_AUTH}
+		spec := Destination{Kind: Syslog, Facility: FacilityAuth}
 		if len(raw) == len("SYSLOG") {
 			return spec, nil
 		}
@@ -129,12 +169,10 @@ func parseSpec(raw string) (Destination, error) {
 // NewFromConfig selects entity and default relations from a parsed profile.
 func NewFromConfig(cfg *config.Config, entity, program string) (*Logger, error) {
 	var values []string
-	if cfg != nil {
-		if cfg.Options != nil {
-			values = cfg.Options["logging"][entity]
-			if len(values) == 0 {
-				values = cfg.Options["logging"]["default"]
-			}
+	if cfg != nil && cfg.Options != nil {
+		values = cfg.Options["logging"][entity]
+		if len(values) == 0 {
+			values = cfg.Options["logging"]["default"]
 		}
 	}
 	return New(values, program)
@@ -146,7 +184,7 @@ func New(values []string, program string) (*Logger, error) {
 		return nil, err
 	}
 	if len(specs) == 0 {
-		specs = []Destination{{Kind: Syslog, Facility: syslog.LOG_AUTH}}
+		specs = []Destination{{Kind: Syslog, Facility: FacilityAuth}}
 	}
 	l := &Logger{Program: program, Hostname: hostname(), Now: time.Now, PID: os.Getpid()}
 	for _, spec := range specs {
@@ -182,13 +220,12 @@ func New(values []string, program string) (*Logger, error) {
 			}
 			d.file, d.close = f, f.Close
 		case Syslog:
-			writer, err := syslog.New(spec.Facility, program)
+			writer, err := openSyslog(spec.Facility, program)
 			if err != nil {
 				l.Close()
 				return nil, err
 			}
-			d.file = writer
-			d.close = writer.Close
+			d.file, d.close = writer, writer.Close
 		}
 		l.destinations = append(l.destinations, d)
 	}
@@ -218,7 +255,7 @@ func (l *Logger) Close() error {
 	return first
 }
 
-func (l *Logger) Log(level syslog.Priority, format string, args ...any) {
+func (l *Logger) Log(level Severity, format string, args ...any) {
 	if l == nil {
 		return
 	}
@@ -229,40 +266,48 @@ func (l *Logger) Log(level syslog.Priority, format string, args ...any) {
 	}
 	line := fmt.Sprintf("%s %s %s[%d](%s): %s\n",
 		now().Local().Format("Jan 02 15:04:05"), l.Hostname, l.Program, l.PID,
-		severity(level), message)
+		severityName(level), message)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, d := range l.destinations {
-		if writer, ok := d.file.(*syslog.Writer); ok {
-			_, _ = writer.Write([]byte(message))
+		if d.spec.Kind == Syslog {
+			_, _ = io.WriteString(d.file, message)
 			continue
 		}
 		_, _ = io.WriteString(d.file, line)
 	}
 }
 
-func (l *Logger) Info(format string, args ...any)    { l.Log(syslog.LOG_INFO, format, args...) }
-func (l *Logger) Error(format string, args ...any)   { l.Log(syslog.LOG_ERR, format, args...) }
-func (l *Logger) Warning(format string, args ...any) { l.Log(syslog.LOG_WARNING, format, args...) }
-func (l *Logger) Debug(format string, args ...any)   { l.Log(syslog.LOG_DEBUG, format, args...) }
+func (l *Logger) Info(format string, args ...any) {
+	l.Log(SeverityInfo, format, args...)
+}
+func (l *Logger) Error(format string, args ...any) {
+	l.Log(SeverityError, format, args...)
+}
+func (l *Logger) Warning(format string, args ...any) {
+	l.Log(SeverityWarning, format, args...)
+}
+func (l *Logger) Debug(format string, args ...any) {
+	l.Log(SeverityDebug, format, args...)
+}
 
-func severity(level syslog.Priority) string {
-	switch level & 7 {
-	case syslog.LOG_EMERG:
+func severityName(level Severity) string {
+	switch level {
+	case SeverityEmerg:
 		return "emergency"
-	case syslog.LOG_ALERT:
+	case SeverityAlert:
 		return "alert"
-	case syslog.LOG_CRIT:
+	case SeverityCrit:
 		return "critical"
-	case syslog.LOG_ERR:
+	case SeverityError:
 		return "error"
-	case syslog.LOG_WARNING:
+	case SeverityWarning:
 		return "warning"
-	case syslog.LOG_NOTICE:
+	case SeverityNotice:
 		return "notice"
-	case syslog.LOG_INFO:
+	case SeverityInfo:
 		return "info"
-	case syslog.LOG_DEBUG:
+	case SeverityDebug:
 		return "debug"
 	default:
 		return "unknown"

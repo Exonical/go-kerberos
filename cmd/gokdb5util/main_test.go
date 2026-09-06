@@ -40,6 +40,31 @@ func TestCreateAndStash(t *testing.T) {
 	}
 }
 
+func TestCreatePipePasswordPromptsShareReader(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString("password\npassword\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "create"}, reader, &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mitdump.LoadWithMasterPassword(dbPath, "password"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDestroyConfirmation(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "principal")
