@@ -4,6 +4,8 @@ package pkinit
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdh"
+	"crypto/ecdsa"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -106,25 +108,72 @@ type VerifiedPAASReq struct {
 type Client struct {
 	Certificate *x509.Certificate
 	Signer      crypto.Signer
+	Group       DHGroup
+	MinBits     int
 	Private     *big.Int
 	Public      *big.Int
+	ECPrivate   *ecdh.PrivateKey
+	ECPublic    []byte
 	Nonce       uint32
 	Anonymous   bool
 }
 
 // NewClient creates an RFC 4556 group-14 DH exchange state.
 func NewClient(cert *x509.Certificate, signer crypto.Signer) (*Client, error) {
+	return NewClientWithDHMinBits(cert, signer, "")
+}
+
+// NewClientWithDHMinBits creates a PKINIT exchange using the group implied by
+// pkinit_dh_min_bits. The default remains MODP-2048 for wire compatibility.
+func NewClientWithDHMinBits(cert *x509.Certificate, signer crypto.Signer, minBits string) (*Client, error) {
 	if cert == nil || signer == nil {
 		return nil, errors.New("pkinit: certificate and signer are required")
 	}
 	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
-		return nil, errors.New("pkinit: only RSA signing keys are supported")
+		if _, ecdsaOK := signer.Public().(*ecdsa.PublicKey); !ecdsaOK {
+			return nil, errors.New("pkinit: signer must use RSA or ECDSA")
+		}
+	}
+	group := groupForMinimum(ParseDHMinBits(minBits))
+	client, err := newClientForGroup(cert, signer, group)
+	if err != nil {
+		return nil, err
+	}
+	client.MinBits = ParseDHMinBits(minBits)
+	return client, nil
+}
+
+func groupForMinimum(minBits int) DHGroup {
+	switch {
+	case minBits <= groupStrength(GroupMODP2048):
+		return GroupMODP2048
+	case minBits <= groupStrength(GroupP256):
+		return GroupP256
+	case minBits <= groupStrength(GroupP384):
+		return GroupP384
+	default:
+		return GroupP521
+	}
+}
+
+func newClientForGroup(cert *x509.Certificate, signer crypto.Signer, group DHGroup) (*Client, error) {
+	client := &Client{Certificate: cert, Signer: signer, Group: group}
+	if curve, _, ok := curveForGroup(group); ok {
+		key, err := curve.GenerateKey(cryptorand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("pkinit: generate EC private value: %w", err)
+		}
+		client.ECPrivate = key
+		client.ECPublic = append([]byte(nil), key.PublicKey().Bytes()...)
+		return client, nil
 	}
 	x, err := newDHPrivate()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{Certificate: cert, Signer: signer, Private: x, Public: new(big.Int).Exp(group14G, x, group14P)}, nil
+	client.Private = x
+	client.Public = new(big.Int).Exp(group14G, x, group14P)
+	return client, nil
 }
 
 // NewAnonymousClient creates an unsigned RFC 6112 anonymous PKINIT DH state.
@@ -133,7 +182,8 @@ func NewAnonymousClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{Private: x, Public: new(big.Int).Exp(group14G, x, group14P), Anonymous: true}, nil
+	return &Client{Group: GroupMODP2048, MinBits: defaultDHMinBits,
+		Private: x, Public: new(big.Int).Exp(group14G, x, group14P), Anonymous: true}, nil
 }
 
 func newDHPrivate() (*big.Int, error) {
@@ -175,7 +225,8 @@ func (c *Client) BuildPAASReqForPrincipalsWithFreshness(bodyDER []byte,
 
 func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
 	supportedKDFs [][]byte, freshnessToken ...[]byte) (protocol.PAData, error) {
-	if c == nil || c.Private == nil || (!c.Anonymous && (c.Certificate == nil || c.Signer == nil)) {
+	if c == nil || ((c.Private == nil && c.ECPrivate == nil) ||
+		(!c.Anonymous && (c.Certificate == nil || c.Signer == nil))) {
 		return protocol.PAData{}, errors.New("pkinit: incomplete client state")
 	}
 	if len(bodyDER) == 0 {
@@ -186,12 +237,15 @@ func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
 	if len(freshnessToken) > 0 {
 		token = append([]byte(nil), freshnessToken[0]...)
 	}
+	publicValue, err := c.publicValue()
+	if err != nil {
+		return protocol.PAData{}, err
+	}
 	pack := authPackDER(PKAuthenticator{
 		Cusec: int32(now.Nanosecond() / 1000), CTime: now.UTC(), Nonce: nonce,
 		PAChecksum: sum[:], FreshnessToken: token,
-	}, marshalSPKI(c.Public), supportedKDFs)
+	}, publicValue, supportedKDFs)
 	var cms []byte
-	var err error
 	if c.Anonymous {
 		cms = unsignedCMS(pack, asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1})
 	} else {
@@ -203,6 +257,47 @@ func (c *Client) buildPAASReq(bodyDER []byte, now time.Time, nonce uint32,
 	// signedAuthPack is [0] IMPLICIT OCTET STRING.
 	value := derSeq(der(0x80, cms))
 	return protocol.PAData{PADataType: PADataASReq, PADataValue: value}, nil
+}
+
+func (c *Client) publicValue() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("pkinit: nil client")
+	}
+	if _, _, ok := curveForGroup(c.Group); ok {
+		if len(c.ECPublic) == 0 {
+			return nil, errors.New("pkinit: incomplete EC state")
+		}
+		return marshalECSPKI(c.Group, c.ECPublic)
+	}
+	if c.Public == nil {
+		return nil, errors.New("pkinit: incomplete DH state")
+	}
+	return marshalSPKI(c.Public), nil
+}
+
+// SelectDHParameters applies the first supported group meeting the client's
+// configured policy from TD-DH-PARAMETERS.
+func (c *Client) SelectDHParameters(data []byte) error {
+	groups, err := ParseDHParameters(data)
+	if err != nil {
+		return err
+	}
+	minBits := c.MinBits
+	if minBits == 0 {
+		minBits = defaultDHMinBits
+	}
+	for _, group := range groups {
+		if groupStrength(group) >= minBits {
+			next, err := newClientForGroup(c.Certificate, c.Signer, group)
+			if err != nil {
+				return err
+			}
+			next.Nonce, next.Anonymous, next.MinBits = c.Nonce, c.Anonymous, c.MinBits
+			*c = *next
+			return nil
+		}
+	}
+	return errors.New("pkinit: no acceptable DH parameters")
 }
 
 // BuildPAASReq creates a fresh DH state and its PA-PK-AS-REQ padata.
@@ -492,16 +587,11 @@ func (c *Client) SharedKey(serverPublic []byte, enctype int32) ([]byte, error) {
 
 // SharedKeyWithNonces derives a reply key, including the optional DH nonces.
 func (c *Client) SharedKeyWithNonces(serverPublic []byte, enctype int32, clientNonce, serverNonce []byte) ([]byte, error) {
-	if c == nil || c.Private == nil {
-		return nil, errors.New("pkinit: incomplete DH state")
+	shared, err := c.sharedSecret(serverPublic)
+	if err != nil {
+		return nil, err
 	}
-	y := new(big.Int).SetBytes(serverPublic)
-	if !validDHPublicValue(y) {
-		return nil, errors.New("pkinit: invalid DH public value")
-	}
-	shared := new(big.Int).Exp(y, c.Private, group14P).Bytes()
-	padded := make([]byte, (group14P.BitLen()+7)/8)
-	copy(padded[len(padded)-len(shared):], shared)
+	padded := shared
 	z := append(append(padded, clientNonce...), serverNonce...)
 	return octetString2Key(z, enctype)
 }
@@ -511,7 +601,37 @@ func (c *Client) SharedKeyWithNonces(serverPublic []byte, enctype int32, clientN
 func (c *Client) SharedKeyWithContext(serverPublic []byte, enctype int32,
 	clientNonce, serverNonce, algorithm []byte, client, server principal.Principal,
 	asReq, pkAsRep []byte) ([]byte, error) {
-	if c == nil || c.Private == nil {
+	shared, err := c.sharedSecret(serverPublic)
+	if err != nil {
+		return nil, err
+	}
+	padded := shared
+	if len(algorithm) == 0 {
+		z := append(append(append([]byte(nil), padded...), clientNonce...), serverNonce...)
+		return octetString2Key(z, enctype)
+	}
+	return DeriveKey(padded, algorithm, client, server, enctype, asReq, pkAsRep)
+}
+
+func (c *Client) sharedSecret(serverPublic []byte) ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("pkinit: nil client")
+	}
+	if curve, _, ok := curveForGroup(c.Group); ok {
+		if c.ECPrivate == nil {
+			return nil, errors.New("pkinit: incomplete EC state")
+		}
+		peer, err := curve.NewPublicKey(serverPublic)
+		if err != nil {
+			return nil, fmt.Errorf("pkinit: invalid EC public value: %w", err)
+		}
+		shared, err := c.ECPrivate.ECDH(peer)
+		if err != nil {
+			return nil, fmt.Errorf("pkinit: ECDH: %w", err)
+		}
+		return shared, nil
+	}
+	if c.Private == nil {
 		return nil, errors.New("pkinit: incomplete DH state")
 	}
 	y := new(big.Int).SetBytes(serverPublic)
@@ -521,11 +641,7 @@ func (c *Client) SharedKeyWithContext(serverPublic []byte, enctype int32,
 	shared := new(big.Int).Exp(y, c.Private, group14P).Bytes()
 	padded := make([]byte, (group14P.BitLen()+7)/8)
 	copy(padded[len(padded)-len(shared):], shared)
-	if len(algorithm) == 0 {
-		z := append(append(append([]byte(nil), padded...), clientNonce...), serverNonce...)
-		return octetString2Key(z, enctype)
-	}
-	return DeriveKey(padded, algorithm, client, server, enctype, asReq, pkAsRep)
+	return padded, nil
 }
 
 // BuildPAASRep constructs the DH profile of PA-PK-AS-REP for a client
@@ -541,6 +657,15 @@ func BuildPAASRep(clientPublic []byte, enctype int32, nonce uint32, cert *x509.C
 func BuildPAASRepWithKDF(clientPublic []byte, enctype int32, nonce uint32,
 	cert *x509.Certificate, signer crypto.Signer, algorithm []byte,
 	client, server principal.Principal, asReq []byte) (protocol.PAData, []byte, error) {
+	return BuildPAASRepWithKDFAndMinBits(clientPublic, enctype, nonce, cert, signer,
+		algorithm, client, server, asReq, "")
+}
+
+// BuildPAASRepWithKDFAndMinBits constructs a PA-PK-AS-REP and enforces the
+// configured minimum PKINIT group strength.
+func BuildPAASRepWithKDFAndMinBits(clientPublic []byte, enctype int32, nonce uint32,
+	cert *x509.Certificate, signer crypto.Signer, algorithm []byte,
+	client, server principal.Principal, asReq []byte, minBits string) (protocol.PAData, []byte, error) {
 	if cert == nil || signer == nil {
 		return protocol.PAData{}, nil, errors.New("pkinit: certificate and signer are required")
 	}
@@ -548,22 +673,50 @@ func BuildPAASRepWithKDF(clientPublic []byte, enctype int32, nonce uint32,
 		return protocol.PAData{}, nil, err
 	}
 	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
-		return protocol.PAData{}, nil, errors.New("pkinit: only RSA signing keys are supported")
+		if _, ecdsaOK := signer.Public().(*ecdsa.PublicKey); !ecdsaOK {
+			return protocol.PAData{}, nil, errors.New("pkinit: signer must use RSA or ECDSA")
+		}
 	}
-	clientY, err := parseSPKIPublicValue(clientPublic)
+	clientKey, err := parseSPKIPublicValue(clientPublic)
 	if err != nil {
 		return protocol.PAData{}, nil, err
 	}
-	private, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Sub(group14P, big.NewInt(2)))
-	if err != nil {
-		return protocol.PAData{}, nil, fmt.Errorf("pkinit: generate DH private value: %w", err)
+	min := ParseDHMinBits(minBits)
+	if groupStrength(clientKey.group) < min {
+		return protocol.PAData{}, nil, &GroupPolicyError{
+			Group: clientKey.group, MinBits: min, Supported: supportedGroups(min),
+		}
 	}
-	private.Add(private, big.NewInt(2))
-	serverY := new(big.Int).Exp(group14G, private, group14P)
-	shared := new(big.Int).Exp(clientY, private, group14P).Bytes()
-	padded := make([]byte, (group14P.BitLen()+7)/8)
-	copy(padded[len(padded)-len(shared):], shared)
-	dhFields := append(derExplicit(0, derBitString(derIntBig(serverY))),
+	var serverPublic, shared []byte
+	if curve, _, ok := curveForGroup(clientKey.group); ok {
+		serverKey, err := curve.GenerateKey(cryptorand.Reader)
+		if err != nil {
+			return protocol.PAData{}, nil, fmt.Errorf("pkinit: generate EC private value: %w", err)
+		}
+		peer, err := curve.NewPublicKey(clientKey.ecPublic)
+		if err != nil {
+			return protocol.PAData{}, nil, fmt.Errorf("pkinit: invalid EC public value: %w", err)
+		}
+		shared, err = serverKey.ECDH(peer)
+		if err != nil {
+			return protocol.PAData{}, nil, fmt.Errorf("pkinit: ECDH: %w", err)
+		}
+		serverPublic = serverKey.PublicKey().Bytes()
+	} else {
+		private, err := cryptorand.Int(cryptorand.Reader, new(big.Int).Sub(group14P, big.NewInt(2)))
+		if err != nil {
+			return protocol.PAData{}, nil, fmt.Errorf("pkinit: generate DH private value: %w", err)
+		}
+		private.Add(private, big.NewInt(2))
+		serverY := new(big.Int).Exp(group14G, private, group14P)
+		shared = new(big.Int).Exp(clientKey.dhPublic, private, group14P).Bytes()
+		padded := make([]byte, (group14P.BitLen()+7)/8)
+		copy(padded[len(padded)-len(shared):], shared)
+		shared = padded
+		serverPublic = derIntBig(serverY)
+	}
+	publicDER := derBitString(serverPublic)
+	dhFields := append(derExplicit(0, publicDER),
 		derExplicit(1, derInt(int64(nonce)))...)
 	dhInfo := der(0x30, dhFields)
 	signed, err := signCMSWithContentType(dhInfo,
@@ -582,34 +735,65 @@ func BuildPAASRepWithKDF(clientPublic []byte, enctype int32, nonce uint32,
 		PADataValue: derExplicit(0, derSeq(repFields)),
 	}
 	if len(algorithm) == 0 {
-		replyKey, err := octetString2Key(padded, enctype)
+		replyKey, err := octetString2Key(shared, enctype)
 		if err != nil {
 			return protocol.PAData{}, nil, err
 		}
 		return pa, replyKey, nil
 	}
-	replyKey, err := DeriveKey(padded, algorithm, client, server, enctype, asReq, pa.PADataValue)
+	replyKey, err := DeriveKey(shared, algorithm, client, server, enctype, asReq, pa.PADataValue)
 	if err != nil {
 		return protocol.PAData{}, nil, err
 	}
 	return pa, replyKey, nil
 }
 
-func parseSPKIPublicValue(data []byte) (*big.Int, error) {
+type parsedPublicValue struct {
+	group    DHGroup
+	dhPublic *big.Int
+	ecPublic []byte
+}
+
+func parseSPKIPublicValue(data []byte) (parsedPublicValue, error) {
 	fields, err := sequenceFields(data)
 	if err != nil || len(fields) != 2 {
-		return nil, errors.New("pkinit: malformed client DH public value")
+		return parsedPublicValue{}, errors.New("pkinit: malformed client public value")
+	}
+	algorithm, err := sequenceFields(fields[0])
+	if err != nil || len(algorithm) < 2 {
+		return parsedPublicValue{}, errors.New("pkinit: malformed client public value")
+	}
+	oid, err := parseOID(algorithm[0])
+	if err != nil {
+		return parsedPublicValue{}, err
 	}
 	bits, err := tlvContent(fields[1])
 	if err != nil || len(bits) < 2 || bits[0] != 0 {
-		return nil, errors.New("pkinit: malformed client DH public value")
+		return parsedPublicValue{}, errors.New("pkinit: malformed client public value")
 	}
-	integerDER := bits[1:]
-	value, err := parseInteger(integerDER)
-	if err != nil || !validDHPublicValue(value) {
-		return nil, errors.New("pkinit: invalid client DH public value")
+	if oid.Equal(idDHPublicNumber) {
+		value, err := parseInteger(bits[1:])
+		if err != nil || !validDHPublicValue(value) {
+			return parsedPublicValue{}, errors.New("pkinit: invalid client DH public value")
+		}
+		return parsedPublicValue{group: GroupMODP2048, dhPublic: value}, nil
 	}
-	return value, nil
+	if !oid.Equal(idECPublicKey) {
+		return parsedPublicValue{}, errors.New("pkinit: unsupported client public key algorithm")
+	}
+	curveOID, err := parseOID(algorithm[1])
+	if err != nil {
+		return parsedPublicValue{}, err
+	}
+	group, curve, ok := groupForCurveOID(curveOID)
+	if !ok {
+		return parsedPublicValue{}, errors.New("pkinit: unsupported EC curve")
+	}
+	point := append([]byte(nil), bits[1:]...)
+	if _, err := curve.NewPublicKey(point); err != nil {
+		return parsedPublicValue{}, errors.New("pkinit: invalid EC public value")
+	}
+	return parsedPublicValue{group: group, ecPublic: point}, nil
 }
 
 func validDHPublicValue(value *big.Int) bool {
@@ -660,7 +844,7 @@ func (c *Client) VerifyPAASRepWithContext(data []byte, anchors *x509.CertPool,
 	if err != nil || len(fields) < 2 {
 		return nil, errors.New("pkinit: malformed KDCDHKeyInfo")
 	}
-	serverY, err := parseExplicitBitStringInteger(fields[0])
+	serverPublic, err := parseExplicitPublicValue(fields[0])
 	if err != nil {
 		return nil, errors.New("pkinit: malformed KDC DH public value")
 	}
@@ -694,8 +878,40 @@ func (c *Client) VerifyPAASRepWithContext(data []byte, anchors *x509.CertPool,
 			return nil, errors.New("pkinit: malformed DHRepInfo")
 		}
 	}
-	return c.SharedKeyWithContext(serverY.Bytes(), enctype, nil, serverNonce,
+	return c.SharedKeyWithContext(serverPublic, enctype, nil, serverNonce,
 		algorithm, client, server, asReq, data)
+}
+
+func parseExplicitPublicValue(field []byte) ([]byte, error) {
+	inner, err := tlvContent(field)
+	if err != nil {
+		return nil, err
+	}
+	tag, value, err := tlv(inner)
+	if err != nil {
+		return nil, err
+	}
+	switch tag {
+	case 0x03:
+		if len(value) < 2 || value[0] != 0 {
+			return nil, errors.New("pkinit: malformed DH public value")
+		}
+		if value[1] == 4 {
+			return append([]byte(nil), value[1:]...), nil
+		}
+		integer, err := parseInteger(value[1:])
+		if err != nil || !validDHPublicValue(integer) {
+			return nil, errors.New("pkinit: invalid DH public value")
+		}
+		return integer.Bytes(), nil
+	case 0x04:
+		if len(value) == 0 {
+			return nil, errors.New("pkinit: empty EC public value")
+		}
+		return append([]byte(nil), value...), nil
+	default:
+		return nil, errors.New("pkinit: unsupported KDC public value")
+	}
 }
 
 func paASRepChoice(data []byte) ([]byte, error) {
@@ -923,6 +1139,18 @@ func marshalSPKI(y *big.Int) []byte {
 	return derSeq(alg, derBitString(pub))
 }
 
+func marshalECSPKI(group DHGroup, public []byte) ([]byte, error) {
+	_, curveOID, ok := curveForGroup(group)
+	if !ok {
+		return nil, errors.New("pkinit: unsupported EC group")
+	}
+	if len(public) == 0 || public[0] != 4 {
+		return nil, errors.New("pkinit: invalid EC public point")
+	}
+	algorithm := derSeq(derOID(idECPublicKey), derOID(curveOID))
+	return derSeq(algorithm, derBitString(public)), nil
+}
+
 func signCMS(content []byte, cert *x509.Certificate, signer crypto.Signer) ([]byte, error) {
 	return signCMSWithContentType(content,
 		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}, cert, signer)
@@ -942,8 +1170,12 @@ func signCMSWithContentType(content []byte, contentType asn1.ObjectIdentifier,
 		return nil, fmt.Errorf("pkinit: sign AuthPack: %w", err)
 	}
 	issuerSerial := derSeq(cert.RawIssuer, derIntBig(cert.SerialNumber))
+	signatureAlgorithm := asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}
+	if _, ok := signer.Public().(*ecdsa.PublicKey); ok {
+		signatureAlgorithm = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
+	}
 	// IssuerAndSerialNumber requires CMS SignerInfo version 1.
-	signerInfo := derSeq(derInt(1), issuerSerial, derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull()), derExplicitImplicit(0, attrs[2:]), derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}), derNull()), derOctet(sig))
+	signerInfo := derSeq(derInt(1), issuerSerial, derSeq(derOID(asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}), derNull()), derExplicitImplicit(0, attrs[2:]), derSeq(derOID(signatureAlgorithm), derNull()), derOctet(sig))
 	certificates := append([]byte(nil), cert.Raw...)
 	for _, additionalCert := range additional {
 		if additionalCert != nil {
@@ -1125,8 +1357,47 @@ func verifyCMSStatusWithCertificates(data []byte, anchors *x509.CertPool) (
 		return nil, nil, false, nil, err
 	}
 	sigHash := hashBytes(hashID, derSet(attrsContent))
-	rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
-	if !ok || rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) != nil {
+	sigAlgorithm, err := sequenceFields(si[4])
+	if err != nil || len(sigAlgorithm) == 0 {
+		return nil, nil, false, nil, errors.New("pkinit: malformed CMS signature algorithm")
+	}
+	sigOID, err := parseOID(sigAlgorithm[0])
+	if err != nil {
+		return nil, nil, false, nil, err
+	}
+	validSignature := false
+	switch {
+	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}):
+		if hashID != crypto.SHA1 {
+			return nil, nil, false, nil, errors.New("pkinit: RSA signature/digest mismatch")
+		}
+		if ecdsaKey, ok := cert.PublicKey.(*ecdsa.PublicKey); ok {
+			// Legacy MIT emits this identifier for EC certificates.
+			validSignature = ecdsa.VerifyASN1(ecdsaKey, sigHash, sig)
+			break
+		}
+		rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, nil, false, nil, errors.New("pkinit: CMS signature key type mismatch")
+		}
+		validSignature = rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) == nil
+	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}):
+		rsaKey, ok := cert.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, nil, false, nil, errors.New("pkinit: CMS signature key type mismatch")
+		}
+		if hashID != crypto.SHA256 {
+			return nil, nil, false, nil, errors.New("pkinit: RSA signature/digest mismatch")
+		}
+		validSignature = rsa.VerifyPKCS1v15(rsaKey, hashID, sigHash, sig) == nil
+	case sigOID.Equal(asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}):
+		ecdsaKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok || hashID != crypto.SHA256 {
+			return nil, nil, false, nil, errors.New("pkinit: ECDSA signature/digest mismatch")
+		}
+		validSignature = ok && ecdsa.VerifyASN1(ecdsaKey, sigHash, sig)
+	}
+	if !validSignature {
 		return nil, nil, false, nil, errors.New("pkinit: invalid CMS signature")
 	}
 	if anchors != nil {

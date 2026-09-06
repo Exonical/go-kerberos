@@ -31,6 +31,7 @@ func (s *Server) ApplyKDCConf(profile *config.KDCConfig, realm string) error {
 	s.EncryptedChallengeIndicator = settings.EncryptedChallengeIndicator
 	s.SPAKEPreauthIndicators = append([]string(nil), settings.SPAKEPreauthIndicators...)
 	s.PKINITIndicators = append([]string(nil), settings.PKINITIndicators...)
+	s.PKINITDHMinBits = settings.PKINITDHMinBits
 	s.OTPIndicators = append([]string(nil), settings.OTPIndicators...)
 	return nil
 }

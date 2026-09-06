@@ -2,6 +2,9 @@ package pkinit
 
 import (
 	"bytes"
+	stdcrypto "crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -343,6 +346,298 @@ func TestCMSRoundTripAndTamperRejection(t *testing.T) {
 	tampered[len(tampered)-1] ^= 1
 	if _, _, err := verifyCMSChoice(tampered, nil); err == nil {
 		t.Fatal("tampered CMS accepted")
+	}
+}
+
+func TestECDSACMSRoundTrip(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7),
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cms, err := signCMS([]byte{0x30, 0x00}, cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyCMS(cms, nil); err != nil {
+		t.Fatalf("verify ECDSA CMS: %v", err)
+	}
+}
+
+func TestCMSAcceptsLegacyMITECDSASignatureOID(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := certificateForPublicKey(t, &key.PublicKey, key)
+	cms, err := signLegacyECDSACMS([]byte{0x30, 0x00}, cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyCMS(cms, nil); err != nil {
+		t.Fatalf("verify legacy MIT ECDSA CMS: %v", err)
+	}
+}
+
+func signLegacyECDSACMS(content []byte, cert *x509.Certificate, signer stdcrypto.Signer) ([]byte, error) {
+	contentDigest := sha1.Sum(content)
+	attrs := derSet(
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 3}), derSet(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}))),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 4}), derSet(derOctet(contentDigest[:]))),
+	)
+	sigHash := sha1.Sum(attrs)
+	sig, err := signer.Sign(rand.Reader, sigHash[:], stdcrypto.SHA1)
+	if err != nil {
+		return nil, err
+	}
+	issuerSerial := derSeq(cert.RawIssuer, derIntBig(cert.SerialNumber))
+	signerInfo := derSeq(
+		derInt(1), issuerSerial,
+		derSeq(derOID(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}), derNull()),
+		derExplicitImplicit(0, attrs[2:]),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}), derNull()),
+		derOctet(sig),
+	)
+	signed := derSeq(
+		derInt(3),
+		derSet(derSeq(derOID(asn1.ObjectIdentifier{1, 3, 14, 3, 2, 26}), derNull())),
+		derSeq(derOID(asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 1}), derExplicit(0, derOctet(content))),
+		derExplicitImplicit(0, cert.Raw),
+		derSet(signerInfo),
+	)
+	return derSeq(
+		derOID(asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 2}),
+		derExplicit(0, signed),
+	), nil
+}
+
+func TestCMSRejectsSignatureKeyTypeConfusion(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecCert := certificateForPublicKey(t, &ecKey.PublicKey, ecKey)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaCert := certificateForPublicKey(t, &rsaKey.PublicKey, rsaKey)
+	tests := []struct {
+		name string
+		cert *x509.Certificate
+		key  stdcrypto.Signer
+		oid  asn1.ObjectIdentifier
+	}{
+		{
+			name: "ECDSA certificate with RSA signature OID",
+			cert: ecCert, key: ecKey,
+			oid: asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11},
+		},
+		{
+			name: "RSA certificate with ECDSA signature OID",
+			cert: rsaCert, key: rsaKey,
+			oid: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cms, err := signCMS([]byte{0x30, 0x00}, test.cert, test.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			confused := replaceCMSSignatureAlgorithm(t, cms, test.oid)
+			if _, _, err := verifyCMS(confused, nil); err == nil {
+				t.Fatal("accepted CMS signature with mismatched key type")
+			}
+		})
+	}
+}
+
+func certificateForPublicKey(t *testing.T, public any, signer stdcrypto.Signer) *x509.Certificate {
+	t.Helper()
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7),
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, public, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func replaceCMSSignatureAlgorithm(t *testing.T, cms []byte, oid asn1.ObjectIdentifier) []byte {
+	t.Helper()
+	outer, err := sequenceFields(cms)
+	if err != nil || len(outer) != 2 {
+		t.Fatalf("CMS outer fields: %v", err)
+	}
+	signedData, err := sequenceFields(mustContent(outer[1]))
+	if err != nil || len(signedData) < 5 {
+		t.Fatalf("CMS SignedData fields: %v", err)
+	}
+	signerInfos, err := collectionFields(signedData[4])
+	if err != nil || len(signerInfos) != 1 {
+		t.Fatalf("CMS signer infos: %v", err)
+	}
+	signer, err := sequenceFields(signerInfos[0])
+	if err != nil || len(signer) < 6 {
+		t.Fatalf("CMS signer fields: %v", err)
+	}
+	signer[4] = derSeq(derOID(oid), derNull())
+	signedData[4] = derSet(derSeq(signer...))
+	return derSeq(outer[0], derExplicit(0, derSeq(signedData...)))
+}
+
+func TestECSPKIAndExchangeRoundTrip(t *testing.T) {
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	clientCert, clientKey := testCertificate(t)
+	for _, group := range []DHGroup{GroupP256, GroupP384, GroupP521} {
+		client, err := newClientForGroup(clientCert, clientKey, group)
+		if err != nil {
+			t.Fatalf("%s client: %v", GroupName(group), err)
+		}
+		public, err := client.publicValue()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := parseSPKIPublicValue(public)
+		if err != nil || parsed.group != group {
+			t.Fatalf("%s SPKI parse: group=%v err=%v", GroupName(group), parsed.group, err)
+		}
+		pa, replyKey, err := BuildPAASRep(public, crypto.EnctypeAES256SHA1, 42, kdcCert, kdcKey)
+		if err != nil {
+			t.Fatalf("%s reply: %v", GroupName(group), err)
+		}
+		derived, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+		if err != nil {
+			t.Fatalf("%s verify: %v", GroupName(group), err)
+		}
+		if !bytes.Equal(replyKey, derived) {
+			t.Fatalf("%s derived key mismatch", GroupName(group))
+		}
+	}
+}
+
+func TestDHParameterNormalization(t *testing.T) {
+	tests := map[string]int{"": 2048, "1024": 1024, "1025": 2048,
+		"2048": 2048, "2049": 4096, "4096": 4096, "bogus": 2048,
+		"P-256": 3072, "P-384": 7680, "P-521": 15360}
+	for input, want := range tests {
+		if got := ParseDHMinBits(input); got != want {
+			t.Errorf("ParseDHMinBits(%q) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestNewClientSelectsWeakestSupportedGroup(t *testing.T) {
+	cert, signer := testCertificate(t)
+	tests := []struct {
+		minimum string
+		group   DHGroup
+	}{
+		{"", GroupMODP2048},
+		{"1024", GroupMODP2048},
+		{"2048", GroupMODP2048},
+		{"2049", GroupP384},
+		{"3072", GroupP384},
+		{"4096", GroupP384},
+		{"P-521", GroupP521},
+	}
+	for _, test := range tests {
+		client, err := NewClientWithDHMinBits(cert, signer, test.minimum)
+		if err != nil {
+			t.Fatalf("minimum %q: %v", test.minimum, err)
+		}
+		if client.Group != test.group {
+			t.Errorf("minimum %q selected %v, want %v", test.minimum, client.Group, test.group)
+		}
+	}
+}
+
+func TestTDHParametersRoundTrip(t *testing.T) {
+	want := []DHGroup{GroupP256, GroupP384, GroupP521, GroupMODP2048}
+	data, err := MarshalDHParameters(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseDHParameters(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("groups = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("group %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestTDHParametersSkipsForeignMODP(t *testing.T) {
+	foreign := derSeq(derOID(idDHPublicNumber),
+		derSeq(derInt(23), derInt(5), derInt(11)))
+	data := der(0x30, foreign)
+	if _, err := ParseDHParameters(data); err == nil {
+		t.Fatal("foreign MODP parameters accepted")
+	}
+}
+
+func TestDHParameterPolicyNegotiation(t *testing.T) {
+	cert, signer := testPKINITCertificate(t, "krbtgt", "TEST.REALM",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	client, err := NewClient(cert, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, minimum string
+		wantGroup     DHGroup
+		reject        bool
+	}{
+		{"P-256", "P-256", GroupP256, false},
+		{"P-384", "P-384", GroupP384, false},
+		{"P-521", "P-521", GroupP521, false},
+		{"MODP", "", GroupMODP2048, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next, err := newClientForGroup(cert, signer, tc.wantGroup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			public, err := next.publicValue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = BuildPAASRepWithKDFAndMinBits(public, 18, 7, cert, signer,
+				nil, principal.Principal{}, principal.Principal{}, nil, tc.minimum)
+			if err != nil {
+				t.Fatalf("group %s rejected: %v", tc.name, err)
+			}
+		})
+	}
+	public, err := client.publicValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = BuildPAASRepWithKDFAndMinBits(public, 18, 7, cert, signer,
+		nil, principal.Principal{}, principal.Principal{}, nil, "P-384")
+	var policyErr *GroupPolicyError
+	if !errors.As(err, &policyErr) {
+		t.Fatalf("expected group policy error, got %v", err)
 	}
 }
 

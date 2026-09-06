@@ -55,6 +55,14 @@ type PAData struct {
 	PADataValue []byte `krb5:"tag:2"`
 }
 
+// TypedData is the RFC 4120 KRB-ERROR e-data container.
+type TypedData []TypedDataEntry
+
+type TypedDataEntry struct {
+	DataType  int32  `krb5:"tag:0"`
+	DataValue []byte `krb5:"tag:1,optional"`
+}
+
 // OTPTokenInfo describes an RFC 6560 token accepted by the KDC.
 type OTPTokenInfo struct {
 	Flags            types.OTPFlags        `krb5:"tag:0,implicit"`
