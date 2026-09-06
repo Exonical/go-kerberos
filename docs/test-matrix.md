@@ -632,3 +632,21 @@ the current record and `PURGEKEYS` removes versions represented there. The
 installed MIT client tooling does not expose every legacy RPC variant as a
 direct command; live gates cover only the operations exercised by the local
 MIT `kadmin` version.
+
+## kadmin CLI parity
+
+`gokadmin` provides the shared MIT-style command engine with remote kadm5 RPC
+operations, while `gokadmin.local` uses the mutable local KDB backend. The
+command aliases, principal and policy mutation commands, listings, string
+attributes, key purging, keytab operations, privilege display, confirmations,
+script mode, terse output, and injectable date formatting are covered by
+`krb5/kadmin` tests. The local adapter is exercised against an in-memory
+database; remote adapter tests may use an in-process kadmind.
+
+The startup options `-n`, `-O`, `-N`, and `-x` are intentionally reported as
+not supported. Natural-language date expressions from MIT's `getdate.y` are
+not implemented; ISO date, RFC3339, and interval forms are supported.
+`lock` and `unlock` are local-only; remote use returns a not-supported error.
+`modprinc -unlock` resets the failure count, but does not attach MIT's
+`KRB5_TL_LAST_ADMIN_UNLOCK` TL-data when the backend surface does not expose
+that record.

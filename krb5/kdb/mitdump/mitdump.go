@@ -889,6 +889,24 @@ func (s *FileStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool,
 	return record, true, nil
 }
 
+// Records returns a copy of all principals in the dump. It is intended for
+// administrative tools which need to materialize a mutable local database.
+func (s *FileStore) Records() []kdb.PrincipalRecord {
+	if s == nil {
+		return nil
+	}
+	out := make([]kdb.PrincipalRecord, 0, len(s.records))
+	for _, record := range s.records {
+		record.Keys = copyKeys(record.Keys)
+		record.Strings = make(map[string]string, len(record.Strings))
+		for key, value := range record.Strings {
+			record.Strings[key] = value
+		}
+		out = append(out, record)
+	}
+	return out
+}
+
 func parseRecord(line string) (kdb.PrincipalRecord, error) {
 	fields := strings.Split(line, "\t")
 	if len(fields) < 16 || fields[0] != "princ" {

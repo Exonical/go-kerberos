@@ -276,6 +276,21 @@ func (db *Database) CreatePrincipal(name, password string) error {
 	return db.CreatePrincipalWithOptions(name, password, nil)
 }
 
+// ImportPrincipal installs an already materialized principal record.
+func (db *Database) ImportPrincipal(record PrincipalRecord) error {
+	if db == nil {
+		return ErrPrincipalNotFound
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	key := canonical(record.Name)
+	if _, exists := db.principals[key]; exists {
+		return ErrPrincipalExists
+	}
+	db.principals[key] = copyRecord(record)
+	return nil
+}
+
 // CreatePrincipalWithOptions creates a principal and, when policy is
 // non-nil, assigns an existing policy atomically with the creation.
 func (db *Database) CreatePrincipalWithOptions(name, password string, policy *PolicyRecord) error {
