@@ -28,6 +28,7 @@ type KDCRealmConfig struct {
 	EncryptedChallengeIndicator string
 	SPAKEPreauthIndicators      []string
 	PKINITIndicators            []string
+	PKINITDHMinBits             string
 	OTPIndicators               []string
 }
 
@@ -123,6 +124,7 @@ func parseKDCRealm(values map[string][]string) (KDCRealmConfig, error) {
 	settings.EncryptedChallengeIndicator = firstValues(values, "encrypted_challenge_indicator")
 	settings.SPAKEPreauthIndicators = splitList(firstValues(values, "spake_preauth_indicator"))
 	settings.PKINITIndicators = splitList(firstValues(values, "pkinit_indicator"))
+	settings.PKINITDHMinBits = firstValues(values, "pkinit_dh_min_bits")
 	settings.OTPIndicators = splitList(firstValues(values, "otp_indicator"))
 	return settings, nil
 }

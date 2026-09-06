@@ -62,11 +62,12 @@ and `t_std_conf.c`, plus the malformed-request regressions from
 `t_cve-2012-1014.py`, `t_cve-2012-1015.py`, `t_cve-2013-1416.py`,
 `t_cve-2013-1417.py`, `t_cve-2021-36222.py`, and `t_bogus_kdc_req.py`.
 The exact MIT enctype-expression parser from `t_etypes.c`, the standalone
-`k5_parse_host_string()` API from `t_parse_host_string.c`, the obsolete
-4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c`, and the
-standalone test-helper API from `t_expand_path.c` are not implemented as
-equivalent Go APIs. The deterministic path-token cases are covered through
-`ExpandPathTokens` tests on POSIX and Windows.
+`k5_parse_host_string()` API from `t_parse_host_string.c`, and the obsolete
+4.2/5.24 conversion and timestamp-driver portions of `t_kerb.c` are not
+implemented as equivalent Go APIs and are skipped. The standalone test-helper
+API from `t_expand_path.c` is also not exposed, but its deterministic token
+cases are covered through `ExpandPathTokens` tests on POSIX and Windows.
+Windows registry tokens remain out of scope.
 
 The live-KDC Python-suite adaptations cover the implemented portions of
 `t_ccache.py`, `t_alias.py`, `t_crossrealm.py`, `t_authdata.py`, and
@@ -193,13 +194,17 @@ in use.
 The KDC validates the client certificate chain,
 the id-pkinit-KPClientAuth EKU, and the Kerberos principal SAN before signing
 the DH reply and encrypting the AS-REP with the DH-derived reply key. Coverage
-includes Go client ↔ Go KDC, Go client ↔ MIT KDC, and a live MIT
-client ↔ Go KDC exchange when the system MIT client PKINIT plugin is
+includes Go client ↔ Go KDC, Go client ↔ MIT KDC, and live RSA and P-256 EC
+MIT client ↔ Go KDC exchanges when the system MIT client PKINIT plugin is
 available; the latter's `KRB5_TRACE` records the SHA-256 KDF identifier.
-The implementation currently uses the RFC 3526 MODP group 14 profile and
-does not implement group 2 negotiation. The SHA-512 KDF is implemented, but
-the MIT DES3 vector is not exercised because this repository does not expose
-the MIT DES3 enctype profile.
+PKINIT supports RFC 3526 MODP-2048 and ECDH P-256, P-384, and P-521. EC
+public values use named-curve SubjectPublicKeyInfo and raw ECDH shared bytes;
+ECDSA certificates use CMS ecdsa-with-SHA256 signatures. TD-DH-PARAMETERS
+retry is supported when the configured minimum rejects an offered group.
+`pkinit_dh_min_bits` accepts MIT's named curves and numeric normalization,
+with a default effective minimum of 2048. The SHA-512 KDF is implemented,
+but the MIT DES3 vector is not exercised because this repository does not
+expose the MIT DES3 enctype profile.
 
 Anonymous PKINIT follows RFC 6112/8062: the client sends unsigned DH-only
 PKINIT, and the KDC accepts that form only with the anonymous request option.

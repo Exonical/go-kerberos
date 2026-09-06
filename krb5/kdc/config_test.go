@@ -20,6 +20,7 @@ func TestApplyKDCConf(t *testing.T) {
         spake_preauth_indicator = password
         spake_preauth_indicator = hardware
         pkinit_indicator = pkinit
+        pkinit_dh_min_bits = P-256
         otp_indicator = otp
     }
 `))
@@ -36,6 +37,7 @@ func TestApplyKDCConf(t *testing.T) {
 		server.EncryptedChallengeIndicator != "encrypted" ||
 		fmt.Sprint(server.SPAKEPreauthIndicators) != "[password hardware]" ||
 		fmt.Sprint(server.PKINITIndicators) != "[pkinit]" ||
+		server.PKINITDHMinBits != "P-256" ||
 		fmt.Sprint(server.OTPIndicators) != "[otp]" {
 		t.Fatalf("server settings = %#v", server)
 	}

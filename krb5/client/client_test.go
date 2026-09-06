@@ -15,6 +15,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -295,6 +296,58 @@ func TestAnonymousASExchangeRejectsMissingTicketFlag(t *testing.T) {
 	err := requireAnonymousTicketFlag(&Credentials{})
 	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
 		t.Fatalf("missing anonymous ticket flag error = %v, want integrity", err)
+	}
+}
+
+func TestFindPKINITDHParametersUsesTypedDataAndCode(t *testing.T) {
+	payload, err := asn1.Marshal(protocol.TypedData{
+		{DataType: pkinit.PADataTDHParameters, DataValue: []byte{1, 2, 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := &krberrors.KRBError{Code: krberrors.KDCErrDHKeyParameters, EData: payload}
+	if got := findPKINITDHParameters(value); !bytes.Equal(got, []byte{1, 2, 3}) {
+		t.Fatalf("TD-DH-PARAMETERS = %x, want 010203", got)
+	}
+	for _, code := range []krberrors.ErrorCode{krberrors.KDCErrPreauthFailed, 25} {
+		value := &krberrors.KRBError{Code: code, EData: payload}
+		if got := findPKINITDHParameters(value); got != nil {
+			t.Fatalf("error code %d yielded TD-DH-PARAMETERS %x", code, got)
+		}
+	}
+}
+
+func TestRetryPKINITDHParametersRegeneratesAnonymousState(t *testing.T) {
+	td, err := pkinit.MarshalDHParameters([]pkinit.DHGroup{pkinit.GroupP256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := asn1.Marshal(protocol.TypedData{
+		{DataType: pkinit.PADataTDHParameters, DataValue: td},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := &krberrors.KRBError{Code: krberrors.KDCErrDHKeyParameters, EData: payload}
+	client, err := pkinit.NewAnonymousClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := client.ECPublic
+	retry, err := retryPKINITDHParameters(value, 0, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retry || client.Group != pkinit.GroupP256 || bytes.Equal(old, client.ECPublic) {
+		t.Fatalf("retry = %v, group=%v, public changed=%v", retry, client.Group, !bytes.Equal(old, client.ECPublic))
+	}
+	retry, err = retryPKINITDHParameters(value, 2, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry {
+		t.Fatal("retry exceeded bound")
 	}
 }
 

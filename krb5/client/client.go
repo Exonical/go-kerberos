@@ -697,6 +697,39 @@ func freshnessTokenFromError(value *krberrors.KRBError) []byte {
 	return nil
 }
 
+func findPKINITDHParameters(value *krberrors.KRBError) []byte {
+	if value == nil || value.Code != krberrors.KDCErrDHKeyParameters || len(value.ErrorData()) == 0 {
+		return nil
+	}
+	var data protocol.TypedData
+	if asn1.Unmarshal(value.ErrorData(), &data) != nil {
+		return nil
+	}
+	for _, item := range data {
+		if item.DataType == pkinit.PADataTDHParameters {
+			return append([]byte(nil), item.DataValue...)
+		}
+	}
+	return nil
+}
+
+func retryPKINITDHParameters(value *krberrors.KRBError, retries int, client *pkinit.Client) (bool, error) {
+	if value == nil || value.Code != krberrors.KDCErrDHKeyParameters {
+		return false, nil
+	}
+	if retries >= 2 {
+		return false, nil
+	}
+	td := findPKINITDHParameters(value)
+	if td == nil {
+		return false, nil
+	}
+	if err := client.SelectDHParameters(td); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
 	candidates, err := c.serviceCandidates(ctx, service)
@@ -1919,7 +1952,11 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("PKINIT AS exchange: invalid client principal")
 	}
-	pk, err := pkinit.NewClient(cert, key)
+	var pkMinBits string
+	if c.Config != nil {
+		pkMinBits = c.Config.PKINITDHMinBits
+	}
+	pk, err := pkinit.NewClientWithDHMinBits(cert, key, pkMinBits)
 	if err != nil {
 		return nil, err
 	}
@@ -1963,9 +2000,33 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		if err != nil {
 			return nil, fmt.Errorf("PKINIT AS request: %w", err)
 		}
-		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
-		if err != nil {
-			return nil, err
+		for retries := 0; ; retries++ {
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			kerberosError, ok := decodeKRBError(response)
+			if !ok {
+				break
+			}
+			retry, err := retryPKINITDHParameters(kerberosError, retries, pk)
+			if err != nil {
+				return nil, err
+			}
+			if !retry {
+				return nil, kerberosError
+			}
+			pa, err := pk.BuildPAASReqForPrincipalsWithFreshness(bodyDER, now,
+				request.ReqBody.Nonce, clientPrincipal, serverPrincipal,
+				freshnessToken)
+			if err != nil {
+				return nil, err
+			}
+			request.PAData = protocol.MethodData{pa}
+			requestDER, err = asn1.Marshal(request)
+			if err != nil {
+				return nil, fmt.Errorf("PKINIT AS request: %w", err)
+			}
 		}
 	}
 	var reply protocol.ASRep
@@ -2060,9 +2121,33 @@ func (c *Client) AnonymousASExchange(ctx context.Context, realm string, anchors 
 	if err != nil {
 		return nil, fmt.Errorf("anonymous PKINIT AS request: %w", err)
 	}
-	response, err = c.roundTrip(ctx, realm, request)
-	if err != nil {
-		return nil, err
+	for retries := 0; ; retries++ {
+		response, err = c.roundTrip(ctx, realm, request)
+		if err != nil {
+			return nil, err
+		}
+		kerberosError, ok := decodeKRBError(response)
+		if !ok {
+			break
+		}
+		retry, err := retryPKINITDHParameters(kerberosError, retries, pkClient)
+		if err != nil {
+			return nil, err
+		}
+		if !retry {
+			return nil, kerberosError
+		}
+		pa, err := pkClient.BuildPAASReqForPrincipalsWithFreshness(bodyDER, now,
+			request.ReqBody.Nonce, anon, serverPrincipal,
+			freshnessTokenFromError(kerberosError))
+		if err != nil {
+			return nil, err
+		}
+		request.PAData = protocol.MethodData{pa}
+		requestDER, err = asn1.Marshal(request)
+		if err != nil {
+			return nil, fmt.Errorf("anonymous PKINIT AS request: %w", err)
+		}
 	}
 	var reply protocol.ASRep
 	if err := asn1.Unmarshal(response, &reply); err != nil {

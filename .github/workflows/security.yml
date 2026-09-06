@@ -1,0 +1,40 @@
+name: Security
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  govulncheck:
+    name: govulncheck (SCA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+      - run: govulncheck ./...
+
+  opengrep:
+    name: opengrep (SAST)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install opengrep
+        run: |
+          curl -fsSL -o /usr/local/bin/opengrep \
+            https://github.com/opengrep/opengrep/releases/download/v1.29.0/opengrep_manylinux_x86
+          chmod +x /usr/local/bin/opengrep
+          opengrep --version
+      - name: Fetch Go rules
+        run: |
+          git clone --depth 1 https://github.com/opengrep/opengrep-rules /tmp/opengrep-rules
+          rm -rf /tmp/opengrep-rules/.github
+      - name: Scan
+        run: |
+          opengrep scan --error \
+            --config /tmp/opengrep-rules/go \
+            --exclude '*_test.go' \
+            .

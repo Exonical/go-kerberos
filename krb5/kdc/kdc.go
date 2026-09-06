@@ -55,6 +55,7 @@ const (
 	kdcErrServiceExpired   = 2
 	kdcErrPreauthFailed    = 24
 	kdcErrPreauthRequired  = 25
+	kdcErrDHKeyParameters  = 65
 	kdcErrMorePreauth      = 91
 	kdcErrGeneric          = 60
 	kdcErrBadOption        = 13
@@ -113,6 +114,8 @@ type Server struct {
 	// PKINITCertificate and PKINITSigner identify the KDC for PKINIT replies.
 	PKINITCertificate *x509.Certificate
 	PKINITSigner      stdcrypto.Signer
+	// PKINITDHMinBits applies MIT's pkinit_dh_min_bits group policy.
+	PKINITDHMinBits string
 	// PKINITClientCAs trusts client certificates for PKINIT authentication.
 	PKINITClientCAs *x509.CertPool
 	// CertAuthModules are additional PKINIT certificate authorization modules.
@@ -955,10 +958,19 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		if anonymousRequest {
 			kdfClientName = anonymousPrincipal()
 		}
-		paRep, replyKey, err := pkinit.BuildPAASRepWithKDF(verified.PublicValue, etypeID,
+		paRep, replyKey, err := pkinit.BuildPAASRepWithKDFAndMinBits(verified.PublicValue, etypeID,
 			request.ReqBody.Nonce, s.PKINITCertificate, s.PKINITSigner, selectedKDF,
-			kdfClientName, serviceName, requestDER)
+			kdfClientName, serviceName, requestDER, s.PKINITDHMinBits)
 		if err != nil {
+			var policyErr *pkinit.GroupPolicyError
+			if stderrors.As(err, &policyErr) {
+				td, tdErr := pkinit.MarshalDHParameters(policyErr.Supported)
+				if tdErr == nil {
+					typedData := protocol.TypedData{{DataType: pkinit.PADataTDHParameters, DataValue: td}}
+					return s.errorResponseWithData(kdcErrDHKeyParameters, request.ReqBody.SName,
+						marshalDER(typedData))
+				}
+			}
 			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}

@@ -33,6 +33,7 @@ func TestServerPKINITASExchange(t *testing.T) {
 	server.PKINITCertificate = kdcCert
 	server.PKINITSigner = kdcKey
 	server.PKINITClientCAs = roots
+	server.PKINITDHMinBits = "P-256"
 	server.PKINITIndicators = []string{"pkinit", "hardware"}
 	server.CertAuthModules = []CertAuthModule{
 		certAuthTestModule{decision: CertAuthPass, indicators: []string{"certauth"}},
@@ -48,6 +49,37 @@ func TestServerPKINITASExchange(t *testing.T) {
 	}
 	assertTicketIndicators(t, server, credentials.Ticket, "krbtgt/TEST.REALM",
 		"pkinit", "hardware", "certauth")
+}
+
+func TestPKINITDHPolicyErrorUsesTypedData(t *testing.T) {
+	server, _ := testServer(t, time.Unix(2000001000, 0).UTC())
+	td, err := pkinit.MarshalDHParameters([]pkinit.DHGroup{pkinit.GroupP256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eData, err := krb5asn1.Marshal(protocol.TypedData{{
+		DataType:  pkinit.PADataTDHParameters,
+		DataValue: td,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := server.errorResponseWithData(int32(krberrors.KDCErrDHKeyParameters), nil, eData)
+	var outer protocol.KRBError
+	if err := krb5asn1.Unmarshal(response, &outer); err != nil {
+		t.Fatal(err)
+	}
+	if outer.ErrorCode != int32(krberrors.KDCErrDHKeyParameters) {
+		t.Fatalf("KDC error code = %d, want %d", outer.ErrorCode, krberrors.KDCErrDHKeyParameters)
+	}
+	var typed protocol.TypedData
+	if err := krb5asn1.Unmarshal(outer.EData, &typed); err != nil {
+		t.Fatal(err)
+	}
+	if len(typed) != 1 || typed[0].DataType != pkinit.PADataTDHParameters ||
+		string(typed[0].DataValue) != string(td) {
+		t.Fatalf("typed data = %#v, want TD-DH-PARAMETERS payload", typed)
+	}
 }
 
 func TestServerPKINITDBMatchCertAuth(t *testing.T) {
@@ -275,6 +307,7 @@ func TestServerAnonymousPKINITASExchange(t *testing.T) {
 	roots.AddCert(ca)
 	server.PKINITCertificate = kdcCert
 	server.PKINITSigner = kdcKey
+	server.PKINITDHMinBits = "P-256"
 	server.PKINITIndicators = []string{"pkinit"}
 	var audit AuditState
 	server.AuditModules = []AuditModule{NewFuncAuditModule("capture",

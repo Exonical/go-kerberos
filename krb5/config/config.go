@@ -20,6 +20,7 @@ type Config struct {
 	RDNS                    bool
 	RDNSSet                 bool
 	Canonicalize            bool
+	PKINITDHMinBits         string
 	QualifyShortname        string
 	QualifyShortnameSet     bool
 	DNSCanonicalizeHostname string
@@ -636,6 +637,8 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.RealmTryDomainsSet = true
 		case "canonicalize":
 			cfg.Canonicalize = parseBool(value)
+		case "pkinit_dh_min_bits":
+			cfg.PKINITDHMinBits = value
 		case "clockskew":
 			duration, err := ParseDuration(value)
 			if err != nil {
