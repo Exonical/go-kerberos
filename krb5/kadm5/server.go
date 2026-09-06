@@ -16,6 +16,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/klog"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -49,6 +50,7 @@ type Server struct {
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
 	API            uint32
 	ErrorLog       func(error)
+	Logger         *klog.Logger
 	Now            func() time.Time
 	// PasswordQualityModules are evaluated after the named policy. A nil value
 	// uses MIT's built-in empty and princ modules.
@@ -62,6 +64,18 @@ type Server struct {
 	dictionaryMu  sync.Mutex
 	dictionary    *DictionaryPasswordQuality
 	dictionaryKey string
+}
+
+func (s *Server) reportError(err error) {
+	if err == nil {
+		return
+	}
+	if s.Logger != nil {
+		s.Logger.Error("%v", err)
+	}
+	if s.ErrorLog != nil {
+		s.ErrorLog(err)
+	}
 }
 
 // Backend is the mutable principal and policy store used by the kadm5 server.
@@ -160,31 +174,23 @@ func (s *Server) serveConn(conn net.Conn) error {
 		}
 		call, err := parseRPCCall(record)
 		if err != nil {
-			if s.ErrorLog != nil {
-				s.ErrorLog(err)
-			}
+			s.reportError(err)
 			return err
 		}
 		var reply []byte
 		if call.flavor == rpcsecGSS {
 			reply, session, err = s.handleGSS(conn, call, session)
 		} else {
-			if s.ErrorLog != nil {
-				s.ErrorLog(errors.New("kadm5: unsupported RPC authentication flavor"))
-			}
+			s.reportError(errors.New("kadm5: unsupported RPC authentication flavor"))
 			reply = rpcErrorReply(call.xid, 1)
 			err = nil
 		}
 		if err != nil {
-			if s.ErrorLog != nil {
-				s.ErrorLog(err)
-			}
+			s.reportError(err)
 			return err
 		}
 		if err := writeRPCRecord(conn, reply); err != nil {
-			if s.ErrorLog != nil {
-				s.ErrorLog(err)
-			}
+			s.reportError(err)
 			return err
 		}
 	}

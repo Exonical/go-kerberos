@@ -25,6 +25,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/klog"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -84,6 +85,7 @@ type OTPVerifier interface {
 type Server struct {
 	Realm         string
 	DB            kdb.Store
+	Logger        *klog.Logger
 	Now           func() time.Time
 	ClockSkew     time.Duration
 	MaxTicketLife time.Duration
@@ -289,6 +291,9 @@ func (s *Server) serveUDP(conn net.PacketConn) error {
 			if isClosedNetworkError(err) {
 				return nil
 			}
+			if s.Logger != nil {
+				s.Logger.Error("KDC UDP read: %v", err)
+			}
 			return fmt.Errorf("KDC UDP read: %w", err)
 		}
 		request := append([]byte(nil), buffer[:n]...)
@@ -318,6 +323,9 @@ func (s *Server) serveTCP(listener net.Listener) error {
 		if err != nil {
 			if isClosedNetworkError(err) {
 				return nil
+			}
+			if s.Logger != nil {
+				s.Logger.Error("KDC TCP accept: %v", err)
 			}
 			return fmt.Errorf("KDC TCP accept: %w", err)
 		}
