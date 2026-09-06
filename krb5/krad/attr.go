@@ -128,8 +128,6 @@ func AttrName2Num(name string) Attr {
 }
 
 func AttrNum2Name(attr Attr) string { return attrTable[attr].name }
-func Name2Attr(name string) Attr    { return AttrName2Num(name) }
-func AttrName(attr Attr) string     { return AttrNum2Name(attr) }
 
 func validAttr(attr Attr, value []byte) bool {
 	info, ok := attrTable[attr]
@@ -246,7 +244,8 @@ func encodeUserPassword(secret string, auth [16]byte, value []byte) []byte {
 	copy(out, value)
 	prev := auth[:]
 	for offset := 0; offset < length; offset += 16 {
-		hash := md5.Sum(append(append([]byte(secret), prev...), nil...))
+		input := append([]byte(secret), prev...)
+		hash := md5.Sum(input)
 		for i := 0; i < 16; i++ {
 			out[offset+i] ^= hash[i]
 		}
@@ -262,7 +261,8 @@ func decodeUserPassword(secret string, auth [16]byte, value []byte) ([]byte, err
 	out := make([]byte, len(value))
 	prev := auth[:]
 	for offset := 0; offset < len(value); offset += 16 {
-		hash := md5.Sum(append(append([]byte(secret), prev...), nil...))
+		input := append([]byte(secret), prev...)
+		hash := md5.Sum(input)
 		for i := 0; i < 16; i++ {
 			out[offset+i] = value[offset+i] ^ hash[i]
 		}

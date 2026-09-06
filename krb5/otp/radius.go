@@ -53,7 +53,7 @@ func DecodeTokenTypes(profile *config.Config) ([]TokenType, error) {
 	types := make([]TokenType, 0, len(sections)+1)
 	hasDefault := false
 	for name := range sections {
-		if strings.EqualFold(name, "DEFAULT") {
+		if name == "DEFAULT" {
 			hasDefault = true
 			break
 		}
@@ -93,16 +93,13 @@ func DecodeKDCConfigTokenTypes(profile *config.KDCConfig) ([]TokenType, error) {
 }
 
 func decodeTokenType(name string, values map[string][]string) (TokenType, error) {
-	if strings.EqualFold(name, "DEFAULT") {
-		name = "DEFAULT"
-	}
 	token := DefaultTokenType(name)
 	for key, entries := range values {
 		if len(entries) == 0 {
 			continue
 		}
 		value := strings.TrimSpace(entries[len(entries)-1])
-		switch strings.ToLower(key) {
+		switch key {
 		case "server":
 			token.Server = value
 		case "secret":
@@ -149,9 +146,9 @@ func parseBool(value string) bool {
 }
 
 type tokenConfig struct {
-	Type       string   `json:"type"`
-	Username   string   `json:"username"`
-	Indicators []string `json:"indicators"`
+	Type       string    `json:"type"`
+	Username   string    `json:"username"`
+	Indicators *[]string `json:"indicators"`
 }
 
 func decodeTokens(client principal.Principal, raw string, types []TokenType) ([]tokenConfig, error) {
@@ -241,13 +238,13 @@ func (v *RADIUSVerifier) Verify(client principal.Principal, rawConfig string,
 		response, sendErr := radius.Send(context.Background(), krad.AccessRequest,
 			attrs, tokenType.Server, tokenType.Secret, tokenType.Timeout, tokenType.Retries)
 		if sendErr != nil {
-			continue
+			return nil, sendErr
 		}
 		if response.Code != krad.AccessAccept {
 			continue
 		}
-		if len(tokenConfig.Indicators) > 0 {
-			return append([]string(nil), tokenConfig.Indicators...), nil
+		if tokenConfig.Indicators != nil {
+			return append([]string(nil), (*tokenConfig.Indicators)...), nil
 		}
 		return append([]string(nil), tokenType.Indicators...), nil
 	}

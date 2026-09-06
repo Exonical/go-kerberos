@@ -106,11 +106,82 @@ func TestDecodeTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tokens[0].Username != "remote" || len(tokens[0].Indicators) != 1 {
+	if tokens[0].Username != "remote" || tokens[0].Indicators == nil ||
+		len(*tokens[0].Indicators) != 1 {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	tokens, err = decodeTokens(user, `[{}]`, types)
 	if err != nil || tokens[0].Username != "alice" {
 		t.Fatalf("default token = %#v, %v", tokens, err)
+	}
+}
+
+func TestDecodeTokensIndicatorsPresence(t *testing.T) {
+	user := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"alice"}}
+	types := []TokenType{{Name: "DEFAULT", StripRealm: true, Indicators: []string{"otp"}}}
+	tokens, err := decodeTokens(user, `[{}]`, types)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens[0].Indicators != nil {
+		t.Fatal("absent indicators unexpectedly became present")
+	}
+	tokens, err = decodeTokens(user, `[{"indicators":[]}]`, types)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens[0].Indicators == nil || len(*tokens[0].Indicators) != 0 {
+		t.Fatalf("empty indicators = %#v", tokens[0].Indicators)
+	}
+}
+
+func TestDecodeTokenTypesCaseSensitiveDefault(t *testing.T) {
+	profile, err := config.Parse([]byte(`[otp]
+default = {
+ server = /tmp/lower.sock
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	types, err := DecodeTokenTypes(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 2 || types[0].Name != "DEFAULT" || types[1].Name != "default" {
+		t.Fatalf("types = %#v", types)
+	}
+}
+
+func TestRADIUSVerifierAbortsOnTransportError(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "missing.sock")
+	second := filepath.Join(dir, "second.sock")
+	listener, err := net.Listen("unix", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	reached := make(chan struct{}, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		reached <- struct{}{}
+		_ = conn.Close()
+	}()
+
+	verifier := &RADIUSVerifier{Types: []TokenType{
+		{Name: "first", Server: first, Timeout: time.Millisecond, Retries: 0},
+		{Name: "second", Server: second, Timeout: time.Second, Retries: 0},
+	}}
+	client := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"alice"}}
+	if _, err := verifier.Verify(client, `[{"type":"first"},{"type":"second"}]`, []byte("accept")); err == nil {
+		t.Fatal("transport error unexpectedly fell through to the next token")
+	}
+	select {
+	case <-reached:
+		t.Fatal("second token was attempted after transport failure")
+	default:
 	}
 }

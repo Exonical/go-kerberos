@@ -79,10 +79,6 @@ func NewRequest(code Code, attrs *Attributes, secret ...string) (*Packet, error)
 	}
 	packet.ID = id[0]
 	packet.request = true
-	if len(secret) > 0 && secret[0] != "" && code == AccessRequest {
-		// The authenticator is finalized by Bytes, after the ID has been
-		// selected. This branch exists to make request intent explicit.
-	}
 	return &packet, nil
 }
 
@@ -106,8 +102,6 @@ func (p *Packet) Bytes(secret ...string) ([]byte, error) {
 	return p.encode(value, nil)
 }
 
-func (p *Packet) Marshal(secret ...string) ([]byte, error) { return p.Bytes(secret...) }
-
 func (p *Packet) encode(secret string, requestAuth *[16]byte) ([]byte, error) {
 	attrs, err := p.encodeAttributes(secret, requestAuth)
 	if err != nil {
@@ -128,14 +122,14 @@ func (p *Packet) encode(secret string, requestAuth *[16]byte) ([]byte, error) {
 		if requestAuth != nil {
 			auth = *requestAuth
 		}
-		responseAuth := responseAuthenticator(packet, secret, auth)
-		copy(packet[4:20], responseAuth[:])
 		if hasMessageAuthenticator(packet) {
 			mac := messageAuthenticator(packet, secret, auth)
 			if position := messageAuthenticatorPosition(packet); position >= 0 {
 				copy(packet[position+2:position+18], mac[:])
 			}
 		}
+		responseAuth := responseAuthenticator(packet, secret, auth)
+		copy(packet[4:20], responseAuth[:])
 	} else if hasMessageAuthenticator(packet) {
 		mac := messageAuthenticator(packet, secret, p.Authenticator)
 		if position := messageAuthenticatorPosition(packet); position >= 0 {
@@ -219,15 +213,6 @@ func DecodeResponse(data []byte, request *Packet, secret ...string) (*Packet, er
 	}
 	expected := responseAuthenticator(data, value, request.Authenticator)
 	if !equalBytes(packet.Authenticator[:], expected[:]) {
-		zeroed := append([]byte(nil), data...)
-		if position := messageAuthenticatorPosition(zeroed); position >= 0 {
-			for i := 0; i < 16; i++ {
-				zeroed[position+2+i] = 0
-			}
-			expected = responseAuthenticator(zeroed, value, request.Authenticator)
-		}
-	}
-	if !equalBytes(packet.Authenticator[:], expected[:]) {
 		return nil, errors.New("invalid RADIUS response authenticator")
 	}
 	if hasMessageAuthenticator(data) &&
@@ -236,11 +221,6 @@ func DecodeResponse(data []byte, request *Packet, secret ...string) (*Packet, er
 	}
 	if packet.ID != request.ID {
 		return nil, errors.New("RADIUS response identifier mismatch")
-	}
-	if value != "" && (packet.Code == AccessRequest || packet.Code == AccessAccept ||
-		packet.Code == AccessReject || packet.Code == AccessChallenge) &&
-		!hasMessageAuthenticator(data) {
-		return nil, errors.New("missing RADIUS Message-Authenticator")
 	}
 	return packet, nil
 }
