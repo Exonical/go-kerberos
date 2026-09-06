@@ -35,6 +35,26 @@ const (
 	ChecksumCMACCamellia256     int32 = 18
 )
 
+// EnctypeName returns the MIT name for a supported Kerberos encryption type.
+func EnctypeName(id int32) string {
+	switch id {
+	case EnctypeAES128SHA1:
+		return "aes128-cts-hmac-sha1-96"
+	case EnctypeAES256SHA1:
+		return "aes256-cts-hmac-sha1-96"
+	case EnctypeAES128SHA256:
+		return "aes128-cts-hmac-sha256-128"
+	case EnctypeAES256SHA384:
+		return "aes256-cts-hmac-sha384-192"
+	case EnctypeCamellia128:
+		return "camellia128-cts-cmac"
+	case EnctypeCamellia256:
+		return "camellia256-cts-cmac"
+	default:
+		return fmt.Sprintf("<Encryption type 0x%x>", id)
+	}
+}
+
 // EType is the common Kerberos encryption-type and checksum contract.
 type EType interface {
 	ID() int32

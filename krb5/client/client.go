@@ -20,6 +20,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/hostrealm"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/kkdcp"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -299,7 +300,39 @@ func (c *Client) ASExchangeService(ctx context.Context, clientPrincipal principa
 	return nil, last
 }
 
+// ASExchangeServiceWithKey obtains initial credentials using a keytab entry
+// for the client principal.
+func (c *Client) ASExchangeServiceWithKey(ctx context.Context, clientPrincipal principal.Principal,
+	entry keytab.Entry, service principal.Principal) (*Credentials, error) {
+	candidates, err := c.serviceCandidates(ctx, service)
+	if err != nil {
+		return nil, err
+	}
+	for index := range candidates {
+		if candidates[index].Realm == "" {
+			candidates[index].Realm = clientPrincipal.Realm
+		}
+	}
+	var last error
+	for index, candidate := range candidates {
+		result, err := c.asExchangeServiceOnceWithKey(ctx, clientPrincipal, entry, candidate, "")
+		if err == nil {
+			return result, nil
+		}
+		last = err
+		if index == 0 && len(candidates) > 1 && !isUnknownServiceError(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
 func (c *Client) asExchangeServiceOnce(ctx context.Context, clientPrincipal principal.Principal, password string, service principal.Principal) (*Credentials, error) {
+	return c.asExchangeServiceOnceWithKey(ctx, clientPrincipal, keytab.Entry{}, service, password)
+}
+
+func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincipal principal.Principal,
+	entry keytab.Entry, service principal.Principal, password string) (*Credentials, error) {
 	if c == nil {
 		return nil, fmt.Errorf("AS service exchange: nil client")
 	}
@@ -339,10 +372,22 @@ func (c *Client) asExchangeServiceOnce(ctx context.Context, clientPrincipal prin
 	if initialEType == nil {
 		return nil, fmt.Errorf("AS service exchange: %w", krberrors.ErrUnsupportedEType)
 	}
-	initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
-	initialKey, err := initialEType.StringToKey([]byte(password), initialSalt, nil)
-	if err != nil {
-		return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+	var initialKey []byte
+	if entry.Key != nil {
+		if entry.Enctype != initialETypeID {
+			initialETypeID = entry.Enctype
+			initialEType, err = registry.Get(initialETypeID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		initialKey = append([]byte(nil), entry.Key...)
+	} else {
+		initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
+		initialKey, err = initialEType.StringToKey([]byte(password), initialSalt, nil)
+		if err != nil {
+			return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+		}
 	}
 	response, err := c.roundTrip(ctx, clientPrincipal.Realm, request)
 	if err != nil {
@@ -364,9 +409,17 @@ func (c *Client) asExchangeServiceOnce(ctx context.Context, clientPrincipal prin
 		if err != nil {
 			return nil, err
 		}
-		key, err := etype.StringToKey([]byte(password), salt, params)
-		if err != nil {
-			return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+		var key []byte
+		if entry.Key != nil {
+			if entry.Enctype != etypeID {
+				return nil, fmt.Errorf("AS service exchange keytab entry enctype %d does not match KDC enctype %d", entry.Enctype, etypeID)
+			}
+			key = append([]byte(nil), entry.Key...)
+		} else {
+			key, err = etype.StringToKey([]byte(password), salt, params)
+			if err != nil {
+				return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
+			}
 		}
 		timestamp, err := preauth.BuildEncryptedTimestamp(etype, key, now, 0)
 		if err != nil {

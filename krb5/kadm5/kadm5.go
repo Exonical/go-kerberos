@@ -290,6 +290,18 @@ func (c *Client) ChangePassword(ctx context.Context, p principal.Principal, pass
 	return c.genericCall(ctx, chpassPrincipal, body.bytes())
 }
 
+// ChangePassword3 changes a password with explicit key/salt tuples.
+func (c *Client) ChangePassword3(ctx context.Context, p principal.Principal,
+	password string, keepOld bool, tuples []KeySaltTuple) error {
+	body := xdrWriter{}
+	body.u32(c.API)
+	body.principal(p)
+	body.boolean(keepOld)
+	writeKeySaltTuples(&body, tuples)
+	body.nullString(password)
+	return c.genericCall(ctx, chpassPrincipal3, body.bytes())
+}
+
 func (c *Client) genericCall(ctx context.Context, proc uint32, body []byte) error {
 	reply, err := c.call(ctx, proc, body)
 	if err != nil {

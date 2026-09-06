@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -81,6 +82,41 @@ func TestParseMITDumpFixture(t *testing.T) {
 	}
 	if !ok || tgt.Flags != 8388608 {
 		t.Fatalf("krbtgt record = %#v", tgt)
+	}
+}
+
+func TestRecordsPreservesStringAttributes(t *testing.T) {
+	store := &FileStore{
+		records: map[string]kdb.PrincipalRecord{
+			"alice@TEST.GOKRB5.LOCAL": {
+				Name: principal.Principal{
+					Realm: "TEST.GOKRB5.LOCAL", Components: []string{"alice"},
+				},
+				Strings: map[string]string{"otp": "radius"},
+			},
+		},
+	}
+	records := store.Records()
+	if len(records) != 1 || records[0].Strings["otp"] != "radius" {
+		t.Fatalf("Records() = %#v, string attributes were not preserved", records)
+	}
+	records[0].Strings["otp"] = "changed"
+	if store.records["alice@TEST.GOKRB5.LOCAL"].Strings["otp"] != "radius" {
+		t.Fatal("Records() did not copy string attributes")
+	}
+}
+
+func TestParsePreservesStandalonePolicy(t *testing.T) {
+	data := fixtureBytes(t)
+	data = bytes.Replace(data, []byte("\nprinc\t"), []byte("\npolicy\tdefault\t60\t3600\t12\t2\t3\t0\t5\t60\t120\t0\t86400\t172800\t-\t0\nprinc\t"), 1)
+	store, err := ParseWithMasterPassword(data, "synthetic-master-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := store.Policies()
+	if len(policies) != 1 || policies[0].Name != "default" ||
+		policies[0].MinLength != 12 || policies[0].MaxFailure != 5 {
+		t.Fatalf("policies = %#v", policies)
 	}
 }
 
