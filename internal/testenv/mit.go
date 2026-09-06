@@ -341,7 +341,7 @@ func (r *Realm) Run(t *testing.T, input string, name string, args ...string) str
 
 func run(t *testing.T, env []string, input string, name string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), name, args...)
+	cmd := exec.CommandContext(context.Background(), name, args...) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.dangerous-exec-command -- test harness executes pinned MIT binaries by design
 	cmd.Env = env
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)

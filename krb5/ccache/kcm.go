@@ -816,7 +816,7 @@ func (s *KCMServer) Serve() error {
 		return errors.New("kcm: invalid server socket")
 	}
 	_ = os.Remove(s.Socket)
-	if err := os.MkdirAll(filepath.Dir(s.Socket), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.Socket), 0700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return err
 	}
 	listener, err := net.Listen("unix", s.Socket)

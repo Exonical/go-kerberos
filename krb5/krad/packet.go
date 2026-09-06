@@ -281,7 +281,7 @@ func responseAuthenticator(packet []byte, secret string, requestAuth [16]byte) [
 	value := append([]byte(nil), packet...)
 	copy(value[4:20], requestAuth[:])
 	value = append(value, []byte(secret)...)
-	return md5.Sum(value)
+	return md5.Sum(value) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.crypto.use-of-md5 -- RFC 2865 Response Authenticator mandates MD5
 }
 
 func messageAuthenticator(packet []byte, secret string, auth [16]byte) [16]byte {

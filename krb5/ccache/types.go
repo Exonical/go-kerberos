@@ -118,7 +118,7 @@ func resolveDirCollection(dir string) (*Handle, error) {
 	if dir == "" {
 		return nil, errors.New("ccache: empty DIR cache directory")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return nil, fmt.Errorf("ccache: create DIR directory: %w", err)
 	}
 	primary, err := dirPrimaryPath(dir)
@@ -156,7 +156,7 @@ func resolveDirSubsidiary(path string) (*Handle, error) {
 	if dir == "." {
 		return nil, errors.New("ccache: DIR subsidiary has no parent directory")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return nil, fmt.Errorf("ccache: create DIR directory: %w", err)
 	}
 	return &Handle{typ: TypeDir, name: "DIR::" + clean, path: clean, dir: dir}, nil
