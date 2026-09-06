@@ -55,6 +55,33 @@ func TestParseMITConfigSectionsAndOptions(t *testing.T) {
 	}
 }
 
+func TestParsePKINITDHMinBits(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+pkinit_dh_min_bits = P-256
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PKINITDHMinBits != "P-256" {
+		t.Fatalf("pkinit_dh_min_bits = %q", cfg.PKINITDHMinBits)
+	}
+}
+
+func TestParseKDCPKINITDHMinBits(t *testing.T) {
+	cfg, err := ParseKDCConf([]byte(`[realms]
+TEST.REALM = {
+    pkinit_dh_min_bits = P-384
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	realm, ok := cfg.Realm("TEST.REALM")
+	if !ok || realm.PKINITDHMinBits != "P-384" {
+		t.Fatalf("KDC pkinit_dh_min_bits = %#v, ok=%v", realm.PKINITDHMinBits, ok)
+	}
+}
+
 func TestParseHostRealmOptions(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
 qualify_shortname = EXAMPLE.TEST
@@ -218,6 +245,19 @@ func TestExpandPathTokensPOSIX(t *testing.T) {
 	for _, input := range []string{"%{unknown}", "%{uid"} {
 		if _, err := ExpandPathTokens(input); err == nil {
 			t.Fatalf("ExpandPathTokens(%q) unexpectedly succeeded", input)
+		}
+	}
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{"prefix/%{null}/suffix", "prefix//suffix"},
+		{"%{uid}%{uid}", strconv.Itoa(os.Getuid()) + strconv.Itoa(os.Getuid())},
+		{"literal", "literal"},
+	} {
+		got, err := ExpandPathTokens(test.input)
+		if err != nil || got != test.want {
+			t.Errorf("ExpandPathTokens(%q) = %q, %v; want %q", test.input, got, err, test.want)
 		}
 	}
 }

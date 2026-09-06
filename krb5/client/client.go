@@ -697,6 +697,15 @@ func freshnessTokenFromError(value *krberrors.KRBError) []byte {
 	return nil
 }
 
+func findPKINITDHParameters(value *krberrors.KRBError) []byte {
+	for _, pa := range errorMethodData(value) {
+		if pa.PADataType == pkinit.PADataTDHParameters {
+			return append([]byte(nil), pa.PADataValue...)
+		}
+	}
+	return nil
+}
+
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
 	candidates, err := c.serviceCandidates(ctx, service)
@@ -1919,7 +1928,11 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("PKINIT AS exchange: invalid client principal")
 	}
-	pk, err := pkinit.NewClient(cert, key)
+	var pkMinBits string
+	if c.Config != nil {
+		pkMinBits = c.Config.PKINITDHMinBits
+	}
+	pk, err := pkinit.NewClientWithDHMinBits(cert, key, pkMinBits)
 	if err != nil {
 		return nil, err
 	}
@@ -1963,9 +1976,34 @@ func (c *Client) ASExchangePKINIT(ctx context.Context, clientPrincipal principal
 		if err != nil {
 			return nil, fmt.Errorf("PKINIT AS request: %w", err)
 		}
-		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
-		if err != nil {
-			return nil, err
+		for retries := 0; ; retries++ {
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			kerberosError, ok := decodeKRBError(response)
+			if !ok {
+				break
+			}
+			td := findPKINITDHParameters(kerberosError)
+			if td == nil || retries >= 2 ||
+				(kerberosError.Code != 24 && kerberosError.Code != 25) {
+				return nil, kerberosError
+			}
+			if err := pk.SelectDHParameters(td); err != nil {
+				return nil, err
+			}
+			pa, err := pk.BuildPAASReqForPrincipalsWithFreshness(bodyDER, now,
+				request.ReqBody.Nonce, clientPrincipal, serverPrincipal,
+				freshnessToken)
+			if err != nil {
+				return nil, err
+			}
+			request.PAData = protocol.MethodData{pa}
+			requestDER, err = asn1.Marshal(request)
+			if err != nil {
+				return nil, fmt.Errorf("PKINIT AS request: %w", err)
+			}
 		}
 	}
 	var reply protocol.ASRep

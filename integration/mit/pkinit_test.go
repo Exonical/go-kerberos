@@ -4,6 +4,7 @@ package mit_test
 
 import (
 	"context"
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -70,7 +71,17 @@ func TestGoClientPKINITAgainstMITKDC(t *testing.T) {
 		kdcTrace, _ := os.ReadFile(filepath.Join(dir, "kdc-trace"))
 		t.Skipf("MIT PKINIT harness self-test failed: %v\noutput: %s\ntrace: %s\nkdc: %s\nkdc-trace: %s", err, out, trace, kdcOut.String(), kdcTrace)
 	}
-	certDER, err := os.ReadFile(filepath.Join(dir, "alice.crt"))
+	if out, err := runPK(append(env, "KRB5_TRACE="+filepath.Join(dir, "ec-trace"), "KRB5CCNAME="+filepath.Join(dir, "ec.ccache")), "", "/usr/bin/kinit", "-X", "X509_user_identity=FILE:"+filepath.Join(dir, "alice-ec.crt")+","+filepath.Join(dir, "alice-ec.key"), "alice@"+realm); err != nil {
+		trace, _ := os.ReadFile(filepath.Join(dir, "ec-trace"))
+		traceText := strings.ToLower(string(trace))
+		if strings.Contains(traceText, "unknown pkinit") ||
+			strings.Contains(traceText, "unsupported") ||
+			strings.Contains(traceText, "not supported") {
+			t.Skipf("MIT PKINIT EC support unavailable: %v\noutput: %s\ntrace: %s", err, out, trace)
+		}
+		t.Fatalf("MIT PKINIT EC self-test failed: %v\noutput: %s\ntrace: %s", err, out, trace)
+	}
+	certDER, err := os.ReadFile(filepath.Join(dir, "alice-ec.crt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,18 +89,19 @@ func TestGoClientPKINITAgainstMITKDC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := os.ReadFile(filepath.Join(dir, "alice.key"))
+	keyDER, err := os.ReadFile(filepath.Join(dir, "alice-ec.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	block, _ := pem.Decode(keyDER)
-	var key *rsa.PrivateKey
-	key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
+	var key crypto.Signer
+	if rsaKey, parseErr := x509.ParsePKCS1PrivateKey(block.Bytes); parseErr == nil {
+		key = rsaKey
+	} else {
 		var parsed any
 		parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err == nil {
-			key, _ = parsed.(*rsa.PrivateKey)
+			key, _ = parsed.(crypto.Signer)
 		}
 	}
 	if err != nil || key == nil {
@@ -219,10 +231,10 @@ func TestMITClientPKINITAgainstGoKDC(t *testing.T) {
 		}
 	})
 	conf := filepath.Join(dir, "gokdc-krb5.conf")
-	writePKFile(t, conf, fmt.Sprintf("[libdefaults]\n default_realm = %s\n dns_lookup_kdc = false\n dns_lookup_realm = false\n pkinit_anchors = FILE:%s\n pkinit_identities = FILE:%s,%s\n[realms]\n %s = {\n  kdc = 127.0.0.1:%d\n  pkinit_anchors = FILE:%s\n  pkinit_identities = FILE:%s,%s\n }\n", realm, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice.crt"), filepath.Join(dir, "alice.key"), realm, port, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice.crt"), filepath.Join(dir, "alice.key")))
+	writePKFile(t, conf, fmt.Sprintf("[libdefaults]\n default_realm = %s\n dns_lookup_kdc = false\n dns_lookup_realm = false\n pkinit_anchors = FILE:%s\n pkinit_identities = FILE:%s,%s\n[realms]\n %s = {\n  kdc = 127.0.0.1:%d\n  pkinit_anchors = FILE:%s\n  pkinit_identities = FILE:%s,%s\n }\n", realm, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice-ec.crt"), filepath.Join(dir, "alice-ec.key"), realm, port, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "alice-ec.crt"), filepath.Join(dir, "alice-ec.key")))
 	cache := filepath.Join(dir, "gokdc.ccache")
 	trace := filepath.Join(dir, "gokdc-trace")
-	out, err := runPK(append(os.Environ(), "KRB5_CONFIG="+conf, "KRB5_TRACE="+trace), "", "/usr/bin/kinit", "-X", "X509_user_identity=FILE:"+filepath.Join(dir, "alice.crt")+","+filepath.Join(dir, "alice.key"), "-c", cache, "alice@"+realm)
+	out, err := runPK(append(os.Environ(), "KRB5_CONFIG="+conf, "KRB5_TRACE="+trace), "", "/usr/bin/kinit", "-X", "X509_user_identity=FILE:"+filepath.Join(dir, "alice-ec.crt")+","+filepath.Join(dir, "alice-ec.key"), "-c", cache, "alice@"+realm)
 	if err != nil {
 		traceData, _ := os.ReadFile(trace)
 		t.Fatalf("MIT kinit against Go KDC: %v\noutput: %s\ntrace: %s", err, out, traceData)
@@ -497,6 +509,43 @@ func generatePKINITFixtures(t *testing.T, dir, realm string) error {
 		if _, err := runPK(opensslEnv, "", "/usr/bin/openssl", "x509", "-req", "-in", csr, "-CA", filepath.Join(dir, "ca.crt"), "-CAkey", filepath.Join(dir, "ca.key"), "-CAcreateserial", "-out", filepath.Join(dir, x.name+".crt"), "-days", "2", "-extfile", ext, "-extensions", x.section); err != nil {
 			return err
 		}
+	}
+	ecKey := filepath.Join(dir, "alice-ec.key")
+	ecCSR := filepath.Join(dir, "alice-ec.csr")
+	if _, err := runPK(nil, "", "/usr/bin/openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", ecKey); err != nil {
+		return err
+	}
+	if _, err := runPK(nil, "", "/usr/bin/openssl", "req", "-new", "-key", ecKey, "-out", ecCSR, "-subj", "/CN=alice-ec-"+realm); err != nil {
+		return err
+	}
+	ecExt := filepath.Join(dir, "alice-ec.ext")
+	ecContent := strings.ReplaceAll(`[client_cert]
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyAgreement
+extendedKeyUsage=1.3.6.1.5.2.3.4
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+issuerAltName=issuer:copy
+subjectAltName=otherName:1.3.6.1.5.2.2;SEQUENCE:princ_name
+[princ_name]
+realm=EXP:0,GeneralString:${ENV::REALM}
+principal_name=EXP:1,SEQUENCE:principal_seq
+[principal_seq]
+name_type=EXP:0,INTEGER:1
+name_string=EXP:1,SEQUENCE:principals
+[principals]
+princ1=GeneralString:${ENV::CLIENT}
+`, "\n+", "\n")
+	writePKFile(t, ecExt, ecContent)
+	if _, err := runPK(opensslEnv, "", "/usr/bin/openssl", "x509", "-req", "-in", ecCSR, "-CA", filepath.Join(dir, "ca.crt"), "-CAkey", filepath.Join(dir, "ca.key"), "-CAcreateserial", "-out", filepath.Join(dir, "alice-ec.crt"), "-days", "2", "-extfile", ecExt, "-extensions", "client_cert"); err != nil {
+		return err
+	}
+	ecPKCS8 := filepath.Join(dir, "alice-ec.pk8")
+	if _, err := runPK(nil, "", "/usr/bin/openssl", "pkcs8", "-topk8", "-nocrypt", "-in", ecKey, "-out", ecPKCS8); err != nil {
+		return err
+	}
+	if err := os.Rename(ecPKCS8, ecKey); err != nil {
+		return err
 	}
 	return nil
 }

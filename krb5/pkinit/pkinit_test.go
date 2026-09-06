@@ -2,6 +2,8 @@ package pkinit
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -343,6 +345,137 @@ func TestCMSRoundTripAndTamperRejection(t *testing.T) {
 	tampered[len(tampered)-1] ^= 1
 	if _, _, err := verifyCMSChoice(tampered, nil); err == nil {
 		t.Fatal("tampered CMS accepted")
+	}
+}
+
+func TestECDSACMSRoundTrip(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(7),
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cms, err := signCMS([]byte{0x30, 0x00}, cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyCMS(cms, nil); err != nil {
+		t.Fatalf("verify ECDSA CMS: %v", err)
+	}
+}
+
+func TestECSPKIAndExchangeRoundTrip(t *testing.T) {
+	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	clientCert, clientKey := testCertificate(t)
+	for _, group := range []DHGroup{GroupP256, GroupP384, GroupP521} {
+		client, err := newClientForGroup(clientCert, clientKey, group)
+		if err != nil {
+			t.Fatalf("%s client: %v", GroupName(group), err)
+		}
+		public, err := client.publicValue()
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := parseSPKIPublicValue(public)
+		if err != nil || parsed.group != group {
+			t.Fatalf("%s SPKI parse: group=%v err=%v", GroupName(group), parsed.group, err)
+		}
+		pa, replyKey, err := BuildPAASRep(public, crypto.EnctypeAES256SHA1, 42, kdcCert, kdcKey)
+		if err != nil {
+			t.Fatalf("%s reply: %v", GroupName(group), err)
+		}
+		derived, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+		if err != nil {
+			t.Fatalf("%s verify: %v", GroupName(group), err)
+		}
+		if !bytes.Equal(replyKey, derived) {
+			t.Fatalf("%s derived key mismatch", GroupName(group))
+		}
+	}
+}
+
+func TestDHParameterNormalization(t *testing.T) {
+	tests := map[string]int{"": 2048, "1024": 1024, "1025": 2048,
+		"2048": 2048, "2049": 4096, "4096": 4096, "bogus": 2048,
+		"P-256": 3072, "P-384": 7680, "P-521": 15360}
+	for input, want := range tests {
+		if got := ParseDHMinBits(input); got != want {
+			t.Errorf("ParseDHMinBits(%q) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestTDHParametersRoundTrip(t *testing.T) {
+	want := []DHGroup{GroupP256, GroupP384, GroupP521, GroupMODP2048}
+	data, err := MarshalDHParameters(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseDHParameters(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("groups = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("group %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDHParameterPolicyNegotiation(t *testing.T) {
+	cert, signer := testPKINITCertificate(t, "krbtgt", "TEST.REALM",
+		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
+	client, err := NewClient(cert, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, minimum string
+		wantGroup     DHGroup
+		reject        bool
+	}{
+		{"P-256", "P-256", GroupP256, false},
+		{"P-384", "P-384", GroupP384, false},
+		{"P-521", "P-521", GroupP521, false},
+		{"MODP", "", GroupMODP2048, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next, err := newClientForGroup(cert, signer, tc.wantGroup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			public, err := next.publicValue()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = BuildPAASRepWithKDFAndMinBits(public, 18, 7, cert, signer,
+				nil, principal.Principal{}, principal.Principal{}, nil, tc.minimum)
+			if err != nil {
+				t.Fatalf("group %s rejected: %v", tc.name, err)
+			}
+		})
+	}
+	public, err := client.publicValue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = BuildPAASRepWithKDFAndMinBits(public, 18, 7, cert, signer,
+		nil, principal.Principal{}, principal.Principal{}, nil, "P-384")
+	var policyErr *GroupPolicyError
+	if !errors.As(err, &policyErr) {
+		t.Fatalf("expected group policy error, got %v", err)
 	}
 }
 
