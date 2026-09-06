@@ -78,8 +78,21 @@ func (r *Remote) CreatePrincipal(ctx context.Context, e PrincipalEntry, password
 	if nokey {
 		password = ""
 	}
-	_ = randkey
-	return r.Client.CreatePrincipal3(ctx, remoteKadmEntry(e), mask, tuples, password)
+	if randkey {
+		password = ""
+	}
+	if err := r.Client.CreatePrincipal3(ctx, remoteKadmEntry(e), mask, tuples, password); err != nil {
+		return err
+	}
+	if randkey {
+		if len(tuples) > 0 {
+			_, err := r.Client.RandKey3(ctx, e.Principal, false, tuples)
+			return err
+		}
+		_, err := r.Client.RandKey(ctx, e.Principal)
+		return err
+	}
+	return nil
 }
 func (r *Remote) ModifyPrincipal(ctx context.Context, e PrincipalEntry, mask int32) error {
 	return r.Client.ModifyPrincipal(ctx, remoteKadmEntry(e), mask)
@@ -96,6 +109,9 @@ func (r *Remote) AddAlias(ctx context.Context, a, b principal.Principal) error {
 func (r *Remote) ChangePassword(ctx context.Context, p principal.Principal, password string, randkey, keepold bool, t []kadm5.KeySaltTuple) ([]Key, error) {
 	if randkey {
 		return r.RandomizeKeys(ctx, p, keepold, t)
+	}
+	if len(t) > 0 {
+		return nil, fmt.Errorf("password changes with explicit key/salt types are not supported by the remote client API")
 	}
 	if err := r.Client.ChangePassword(ctx, p, password); err != nil {
 		return nil, err
@@ -250,7 +266,7 @@ func (l *Local) CreatePrincipal(_ context.Context, e PrincipalEntry, password st
 		}
 	}
 	if randkey {
-		_, err = l.RandomizeKeys(context.Background(), e.Principal, false, nil)
+		_, err = l.RandomizeKeys(context.Background(), e.Principal, false, t)
 	}
 	return err
 }
@@ -300,6 +316,9 @@ func (l *Local) AddAlias(_ context.Context, a, b principal.Principal) error {
 func (l *Local) ChangePassword(ctx context.Context, p principal.Principal, password string, randkey, keepold bool, t []kadm5.KeySaltTuple) ([]Key, error) {
 	if randkey {
 		return l.RandomizeKeys(ctx, p, keepold, t)
+	}
+	if len(t) > 0 {
+		return nil, fmt.Errorf("password changes with explicit key/salt types are not supported by the local backend")
 	}
 	if err := l.Backend.ChangePasswordWithPolicyAndKeepOld(p, password, time.Now(), nil, keepold, false); err != nil {
 		return nil, err

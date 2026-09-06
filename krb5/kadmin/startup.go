@@ -17,6 +17,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/kadm5"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
+	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -84,11 +85,8 @@ func LoadLocalDatabase(path, realm, password string) (*kdb.Database, error) {
 	} else {
 		store, err = mitdump.Load(path)
 		if err != nil {
-			stash := os.Getenv("KRB5_KDC_STASH")
-			if stash == "" {
-				stash = "/etc/krb5kdc/stash"
-			}
-			if _, statErr := os.Stat(stash); statErr == nil {
+			stash, stashErr := resolveStashFile(realm)
+			if stashErr == nil {
 				store, err = mitdump.LoadWithStash(path, stash)
 			}
 		}
@@ -106,6 +104,31 @@ func LoadLocalDatabase(path, realm, password string) (*kdb.Database, error) {
 		}
 	}
 	return db, nil
+}
+
+func resolveStashFile(realm string) (string, error) {
+	path := os.Getenv("KRB5_KDC_PROFILE")
+	if path == "" {
+		path = "/etc/krb5kdc/kdc.conf"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	profile, err := config.ParseKDCConf(data)
+	if err != nil {
+		return "", err
+	}
+	settings, ok := profile.Realm(realm)
+	if !ok {
+		return "", fmt.Errorf("realm %s is not configured in %s", realm, path)
+	}
+	for key, values := range settings.Values {
+		if strings.EqualFold(key, "key_stash_file") && len(values) > 0 {
+			return strings.TrimSpace(values[0]), nil
+		}
+	}
+	return "", fmt.Errorf("realm %s has no key_stash_file", realm)
 }
 
 // RunLocal starts a local command engine using the supplied startup options.
@@ -143,8 +166,21 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 			realm = cache.DefaultPrincipal.Realm
 		}
 	}
+	cfg, err := loadClientConfig()
+	if err != nil {
+		return err
+	}
+	if realm == "" {
+		realm = cfg.DefaultRealm
+	}
 	name := opts.Principal
-	if name == "" {
+	if name == "" && opts.KeytabAuth {
+		host, hostErr := os.Hostname()
+		if hostErr != nil {
+			return hostErr
+		}
+		name = "host/" + host
+	} else if name == "" {
 		name = os.Getenv("USER")
 		if name == "" {
 			name = "admin"
@@ -158,27 +194,71 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 	if realm == "" {
 		realm = admin.Realm
 	}
-	cfg, err := config.ParseFile("/etc/krb5.conf")
-	if err != nil {
-		cfg = &config.Config{}
-	}
 	kerberos := &client.Client{Config: cfg}
 	var creds *client.Credentials
-	if opts.KeytabAuth {
-		return errors.New("-k keytab authentication is not supported by the current client API")
+	service, parseErr := principal.Parse("kadmin/admin@" + realm)
+	if parseErr != nil {
+		return parseErr
 	}
-	if opts.CCache != "" {
+	if opts.KeytabAuth {
+		keytabName := opts.Keytab
+		if keytabName == "" {
+			keytabName = os.Getenv("KRB5_CLIENT_KTNAME")
+		}
+		if keytabName == "" {
+			keytabName = cfg.DefaultClientKeytabName
+		}
+		if keytabName == "" {
+			keytabName = cfg.DefaultKeytabName
+		}
+		if keytabName == "" {
+			keytabName = "/etc/krb5.keytab"
+		}
+		kt, keytabErr := keytab.Resolve(keytabName)
+		if keytabErr != nil {
+			return keytabErr
+		}
+		entries, keytabErr := kt.LookupPrincipal(admin)
+		if keytabErr != nil {
+			return keytabErr
+		}
+		if len(entries) == 0 {
+			return fmt.Errorf("keytab %s has no entry for %s", keytabName, admin)
+		}
+		entry := entries[0]
+		for _, candidate := range entries[1:] {
+			if candidate.KVNO > entry.KVNO {
+				entry = candidate
+			}
+		}
+		creds, err = kerberos.ASExchangeServiceWithKey(ctx, admin, entry, *service)
+		if err != nil {
+			return err
+		}
+	} else if opts.CCache != "" {
 		if len(cache.Credentials) == 0 {
 			return errors.New("ccache contains no credentials")
 		}
-		base := cache.Credentials[0]
-		creds = fromCCache(base)
-		if !strings.Contains(base.Server.String(), "krbtgt/") {
-			creds = fromCCache(base)
-		} else {
-			service, parseErr := principal.Parse("kadmin/admin@" + realm)
-			if parseErr != nil {
-				return parseErr
+		found := false
+		for _, candidate := range cache.Credentials {
+			if candidate.Server.String() == service.String() {
+				creds = fromCCache(candidate)
+				found = true
+				break
+			}
+		}
+		if !found {
+			for _, candidate := range cache.Credentials {
+				if len(candidate.Server.Components) == 2 &&
+					candidate.Server.Components[0] == "krbtgt" &&
+					strings.EqualFold(candidate.Server.Components[1], realm) {
+					creds = fromCCache(candidate)
+					found = true
+					break
+				}
+			}
+			if !found {
+				return errors.New("ccache has no kadmin/admin credential or realm TGT")
 			}
 			creds, err = kerberos.TGSExchange(ctx, creds, *service)
 			if err != nil {
@@ -192,10 +272,6 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 				return err
 			}
 		}
-		service, parseErr := principal.Parse("kadmin/admin@" + realm)
-		if parseErr != nil {
-			return parseErr
-		}
 		creds, err = kerberos.ASExchangeService(ctx, admin, opts.Password, *service)
 		if err != nil {
 			return err
@@ -203,7 +279,10 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 	}
 	address := opts.Server
 	if address == "" {
-		address = "127.0.0.1:749"
+		address = configuredAdminServer(cfg, realm)
+		if address == "" {
+			return fmt.Errorf("no admin_server configured for realm %s", realm)
+		}
 	} else if _, _, err := net.SplitHostPort(address); err != nil {
 		address += ":749"
 	}
@@ -214,6 +293,35 @@ func RunRemote(ctx context.Context, opts StartupOptions, in *bufio.Reader, out, 
 	defer rpc.Close()
 	engine := New(Config{Ops: NewRemote(rpc, realm), Realm: realm, Stdin: in, Stdout: out, Stderr: errOut, Password: opts.Password})
 	return engine.RunInteractive(opts.Query, opts.Command, "gokadmin:  ")
+}
+
+func loadClientConfig() (*config.Config, error) {
+	path := os.Getenv("KRB5_CONFIG")
+	if path == "" {
+		path = "/etc/krb5.conf"
+	}
+	return config.ParseFile(path)
+}
+
+func configuredAdminServer(cfg *config.Config, realm string) string {
+	if cfg == nil {
+		return ""
+	}
+	for name, values := range cfg.RealmOptions {
+		if !strings.EqualFold(name, realm) {
+			continue
+		}
+		for key, candidates := range values {
+			if strings.EqualFold(key, "admin_server") && len(candidates) > 0 {
+				address := strings.TrimSpace(candidates[0])
+				if _, _, err := net.SplitHostPort(address); err != nil {
+					address += ":749"
+				}
+				return address
+			}
+		}
+	}
+	return ""
 }
 
 func fromCCache(value ccache.Credential) *client.Credentials {

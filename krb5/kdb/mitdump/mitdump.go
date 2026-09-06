@@ -898,10 +898,11 @@ func (s *FileStore) Records() []kdb.PrincipalRecord {
 	out := make([]kdb.PrincipalRecord, 0, len(s.records))
 	for _, record := range s.records {
 		record.Keys = copyKeys(record.Keys)
-		record.Strings = make(map[string]string, len(record.Strings))
+		stringsCopy := make(map[string]string, len(record.Strings))
 		for key, value := range record.Strings {
-			record.Strings[key] = value
+			stringsCopy[key] = value
 		}
+		record.Strings = stringsCopy
 		out = append(out, record)
 	}
 	return out

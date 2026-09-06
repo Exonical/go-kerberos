@@ -650,3 +650,6 @@ not implemented; ISO date, RFC3339, and interval forms are supported.
 `modprinc -unlock` resets the failure count, but does not attach MIT's
 `KRB5_TL_LAST_ADMIN_UNLOCK` TL-data when the backend surface does not expose
 that record.
+Local non-randkey `cpw -e` returns an explicit unsupported error because the
+current backend password-change API cannot accept key/salt tuples; remote
+password changes support explicit key/salt selection.

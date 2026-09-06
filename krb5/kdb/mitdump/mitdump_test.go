@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
@@ -81,6 +82,27 @@ func TestParseMITDumpFixture(t *testing.T) {
 	}
 	if !ok || tgt.Flags != 8388608 {
 		t.Fatalf("krbtgt record = %#v", tgt)
+	}
+}
+
+func TestRecordsPreservesStringAttributes(t *testing.T) {
+	store := &FileStore{
+		records: map[string]kdb.PrincipalRecord{
+			"alice@TEST.GOKRB5.LOCAL": {
+				Name: principal.Principal{
+					Realm: "TEST.GOKRB5.LOCAL", Components: []string{"alice"},
+				},
+				Strings: map[string]string{"otp": "radius"},
+			},
+		},
+	}
+	records := store.Records()
+	if len(records) != 1 || records[0].Strings["otp"] != "radius" {
+		t.Fatalf("Records() = %#v, string attributes were not preserved", records)
+	}
+	records[0].Strings["otp"] = "changed"
+	if store.records["alice@TEST.GOKRB5.LOCAL"].Strings["otp"] != "radius" {
+		t.Fatal("Records() did not copy string attributes")
 	}
 }
 

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kadm5"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -137,13 +139,14 @@ func (e *Engine) deletePrincipal(args []string) error {
 	}
 	name := e.canonical(p)
 	if !force && !e.cfg.Script && !e.confirm(fmt.Sprintf("Are you sure you want to delete the principal \"%s\"? (yes/no): ", name)) {
-		fmt.Fprintf(e.cfg.Stderr, "Principal \"%s\" not deleted.\n", name)
+		fmt.Fprintf(e.cfg.Stderr, "Principal \"%s\" not deleted\n", name)
 		return nil
 	}
 	if err := e.cfg.Ops.DeletePrincipal(context.Background(), p); err != nil {
 		return err
 	}
 	e.info(fmt.Sprintf("Principal \"%s\" deleted.\n", name))
+	e.info("Make sure that you have removed this principal from all ACLs before reusing.\n")
 	return nil
 }
 
@@ -168,13 +171,14 @@ func (e *Engine) renamePrincipal(args []string) error {
 		return err
 	}
 	if !force && !e.cfg.Script && !e.confirm(fmt.Sprintf("Are you sure you want to rename the principal \"%s\" to \"%s\"? (yes/no): ", e.canonical(src), e.canonical(dst))) {
-		fmt.Fprintf(e.cfg.Stderr, "Principal \"%s\" not renamed.\n", e.canonical(src))
+		fmt.Fprintf(e.cfg.Stderr, "Principal \"%s\" not renamed\n", e.canonical(src))
 		return nil
 	}
 	if err := e.cfg.Ops.RenamePrincipal(context.Background(), src, dst); err != nil {
 		return err
 	}
 	e.info(fmt.Sprintf("Principal \"%s\" renamed to \"%s\".\n", e.canonical(src), e.canonical(dst)))
+	e.info("Make sure that you have removed the old principal from all ACLs before reusing.\n")
 	return nil
 }
 
@@ -190,7 +194,11 @@ func (e *Engine) addAlias(args []string) error {
 	if err != nil {
 		return err
 	}
-	return e.cfg.Ops.AddAlias(context.Background(), a, p)
+	if err := e.cfg.Ops.AddAlias(context.Background(), a, p); err != nil {
+		return err
+	}
+	e.info(fmt.Sprintf("Principal \"%s\" aliased to \"%s\".\n", e.canonical(a), e.canonical(p)))
+	return nil
 }
 
 func (e *Engine) changePassword(args []string) error {
@@ -295,7 +303,7 @@ func (e *Engine) getPrincipal(args []string) error {
 	fmt.Fprintf(e.cfg.Stdout, "Failed password attempts: %d\n", entry.FailAuthCount)
 	fmt.Fprintf(e.cfg.Stdout, "Number of keys: %d\n", len(entry.Keys))
 	for _, key := range entry.Keys {
-		fmt.Fprintf(e.cfg.Stdout, "Key: vno %d, enctype %d\n", key.KVNO, key.Enctype)
+		fmt.Fprintf(e.cfg.Stdout, "Key: vno %d, %s\n", key.KVNO, crypto.EnctypeName(key.Enctype))
 	}
 	fmt.Fprintf(e.cfg.Stdout, "MKey: vno %d\n", entry.MKVNO)
 	fmt.Fprintf(e.cfg.Stdout, "Attributes:%s\n", formatFlags(entry.Attributes))
@@ -339,14 +347,17 @@ func formatFlags(flags uint32) string {
 	names := []struct {
 		name string
 		bit  uint32
-	}{{"DISALLOW_POSTDATED", flagDisallowPostdated}, {"DISALLOW_FORWARDABLE", flagDisallowForwardable}, {"DISALLOW_TGT_BASED", flagDisallowTGTBased}, {"DISALLOW_RENEWABLE", flagDisallowRenewable}, {"DISALLOW_PROXIABLE", flagDisallowProxiable}, {"DISALLOW_DUP_SKEY", flagDisallowDupSkey}, {"DISALLOW_ALL_TIX", flagDisallowAllTickets}, {"REQUIRES_PRE_AUTH", flagRequiresPreAuth}, {"REQUIRES_HW_AUTH", flagRequiresHWAuth}, {"REQUIRES_PWCHANGE", flagRequiresPWChange}, {"DISALLOW_SVR", flagDisallowServer}, {"PWCHANGE_SERVICE", flagPWChangeService}}
+	}{{"DISALLOW_POSTDATED", flagDisallowPostdated}, {"DISALLOW_FORWARDABLE", flagDisallowForwardable}, {"DISALLOW_TGT_BASED", flagDisallowTGTBased}, {"DISALLOW_RENEWABLE", flagDisallowRenewable}, {"DISALLOW_PROXIABLE", flagDisallowProxiable}, {"DISALLOW_DUP_SKEY", flagDisallowDupSkey}, {"DISALLOW_ALL_TIX", flagDisallowAllTickets}, {"REQUIRES_PRE_AUTH", flagRequiresPreAuth}, {"REQUIRES_HW_AUTH", flagRequiresHWAuth}, {"REQUIRES_PWCHANGE", flagRequiresPWChange}, {"DISALLOW_SVR", flagDisallowServer}, {"PWCHANGE_SERVICE", flagPWChangeService}, {"OK_AS_DELEGATE", flagOKAsDelegate}, {"OK_TO_AUTH_AS_DELEGATE", flagOKToAuthAsDelegate}, {"NO_AUTH_DATA_REQUIRED", flagNoAuthDataRequired}, {"LOCKDOWN_KEYS", flagLockdownKeys}}
 	var out []string
 	for _, item := range names {
 		if flags&item.bit != 0 {
 			out = append(out, item.name)
 		}
 	}
-	return strings.Join(out, " ")
+	if len(out) == 0 {
+		return ""
+	}
+	return " " + strings.Join(out, " ")
 }
 
 func (e *Engine) listPrincipals(args []string) error {
@@ -489,7 +500,11 @@ func (e *Engine) getPolicy(args []string) error {
 		return err
 	}
 	if terse {
-		fmt.Fprintf(e.cfg.Stdout, "\"%s\"\t%d\t%d\t%d\t%d\t%d\t0\t%d\t%d\t%d\t%s\n", p.Name, int64(p.MaxLife/time.Second), int64(p.MinLife/time.Second), p.MinLength, p.MinClasses, p.HistoryNum, p.MaxFailure, int64(p.FailureCountInterval/time.Second), int64(p.LockoutDuration/time.Second), choosePolicy(p.AllowedKeySalts))
+		allowed := p.AllowedKeySalts
+		if allowed == "" {
+			allowed = "-"
+		}
+		fmt.Fprintf(e.cfg.Stdout, "\"%s\"\t%d\t%d\t%d\t%d\t%d\t0\t%d\t%d\t%d\t%s\n", p.Name, int64(p.MaxLife/time.Second), int64(p.MinLife/time.Second), p.MinLength, p.MinClasses, p.HistoryNum, p.MaxFailure, int64(p.FailureCountInterval/time.Second), int64(p.LockoutDuration/time.Second), allowed)
 		return nil
 	}
 	fmt.Fprintf(e.cfg.Stdout, "Policy: %s\nMaximum password life: %s\nMinimum password life: %s\nMinimum password length: %d\nMinimum number of password character classes: %d\nNumber of old keys kept: %d\nMaximum password failures before lockout: %d\nPassword failure count reset interval: %s\nPassword lockout duration: %s\n", p.Name, formatDuration(p.MaxLife), formatDuration(p.MinLife), p.MinLength, p.MinClasses, p.HistoryNum, p.MaxFailure, formatDuration(p.FailureCountInterval), formatDuration(p.LockoutDuration))
@@ -539,7 +554,7 @@ func (e *Engine) purgeKeys(args []string) error {
 	if len(args) == 2 {
 		name = args[1]
 	} else if len(args) == 3 && args[1] == "-all" {
-		keep = 1 << 30
+		keep = math.MaxInt32
 		name = args[2]
 	} else if len(args) == 4 && args[1] == "-keepkvno" {
 		n, err := strconv.ParseInt(args[2], 10, 32)
@@ -558,7 +573,7 @@ func (e *Engine) purgeKeys(args []string) error {
 	if err = e.cfg.Ops.PurgeKeys(context.Background(), p, keep); err != nil {
 		return err
 	}
-	if keep == 1<<30 {
+	if keep == math.MaxInt32 {
 		e.info(fmt.Sprintf("All keys for principal \"%s\" removed.\n", e.canonical(p)))
 	} else {
 		e.info(fmt.Sprintf("Old keys for principal \"%s\" purged.\n", e.canonical(p)))
@@ -641,7 +656,7 @@ func (e *Engine) ktadd(args []string) error {
 	if err := e.requireOps(); err != nil {
 		return err
 	}
-	name, rest, quiet, norand, err := parseKTArgs(args)
+	name, rest, quiet, norand, keySalts, err := parseKTArgs(args)
 	if err != nil {
 		return err
 	}
@@ -668,7 +683,7 @@ func (e *Engine) ktadd(args []string) error {
 			}
 			keys = entry.Keys
 		} else {
-			keys, err = e.cfg.Ops.RandomizeKeys(context.Background(), p, false, nil)
+			keys, err = e.cfg.Ops.RandomizeKeys(context.Background(), p, false, keySalts)
 			if err != nil {
 				return err
 			}
@@ -685,7 +700,7 @@ func (e *Engine) ktadd(args []string) error {
 				return err
 			}
 			if !quiet {
-				fmt.Fprintf(e.cfg.Stdout, "Entry for principal %s with kvno %d, encryption type %d added to keytab %s.\n", e.canonical(p), k.KVNO, k.Enctype, name)
+				fmt.Fprintf(e.cfg.Stdout, "Entry for principal %s with kvno %d, encryption type %s added to keytab %s.\n", e.canonical(p), k.KVNO, crypto.EnctypeName(k.Enctype), name)
 			}
 		}
 	}
@@ -702,15 +717,20 @@ func (e *Engine) ktadd(args []string) error {
 	return nil
 }
 func (e *Engine) ktremove(args []string) error {
-	name, rest, quiet, _, err := parseKTArgs(args)
+	name, rest, quiet, _, _, err := parseKTArgs(args)
 	if err != nil {
 		return err
 	}
-	if len(rest) != 2 {
-		return errors.New("usage: ktremove [-k keytab] principal kvno|all|old")
+	if len(rest) < 1 || len(rest) > 2 {
+		return errors.New("usage: ktremove [-k keytab] principal [kvno|all|old]")
 	}
 	if name == "" {
 		name = "/etc/krb5.keytab"
+	}
+	if !strings.HasPrefix(name, "MEMORY:") {
+		if _, statErr := os.Stat(strings.TrimPrefix(name, "FILE:")); statErr != nil {
+			return fmt.Errorf("Keytab %s does not exist", name)
+		}
 	}
 	kt, err := loadKeytab(name)
 	if err != nil {
@@ -720,18 +740,36 @@ func (e *Engine) ktremove(args []string) error {
 	if err != nil {
 		return err
 	}
-	selector := rest[1]
-	for _, entry := range kt.EntriesSnapshot() {
+	selector := "highest"
+	if len(rest) == 2 {
+		selector = rest[1]
+	}
+	entries := kt.EntriesSnapshot()
+	max := maxKVNO(kt, p)
+	removed := 0
+	for _, entry := range entries {
 		if entry.Principal.String() != p.String() {
 			continue
 		}
-		match := selector == "all" || (selector == "old" && entry.KVNO < maxKVNO(kt, p)) || strconv.FormatUint(uint64(entry.KVNO), 10) == selector
+		match := selector == "all" || selector == "highest" && entry.KVNO == max ||
+			(selector == "old" && entry.KVNO != max) ||
+			strconv.FormatUint(uint64(entry.KVNO), 10) == selector
 		if match {
-			_ = kt.RemoveEntry(entry)
+			if err := kt.RemoveEntry(entry); err != nil {
+				return err
+			}
+			removed++
+			if !quiet {
+				fmt.Fprintf(e.cfg.Stdout, "Entry for principal %s with kvno %d removed from keytab %s.\n", rest[0], entry.KVNO, name)
+			}
 		}
 	}
-	if !quiet {
-		fmt.Fprintf(e.cfg.Stdout, "Keytab %s updated.\n", name)
+	if removed == 0 {
+		if selector == "old" {
+			fmt.Fprintf(e.cfg.Stderr, "There is only one entry for principal %s in keytab %s\n", rest[0], name)
+		} else {
+			return fmt.Errorf("no entry for principal %s with kvno %s exists in keytab %s", rest[0], selector, name)
+		}
 	}
 	if !strings.HasPrefix(name, "MEMORY:") {
 		file, err := os.OpenFile(strings.TrimPrefix(name, "FILE:"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -768,10 +806,11 @@ func maxKVNO(kt *keytab.Keytab, p principal.Principal) uint32 {
 	}
 	return max
 }
-func parseKTArgs(args []string) (string, []string, bool, bool, error) {
+func parseKTArgs(args []string) (string, []string, bool, bool, []kadm5.KeySaltTuple, error) {
 	name := ""
 	quiet := false
 	norand := false
+	var keySalts []kadm5.KeySaltTuple
 	rest := []string{}
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -781,20 +820,25 @@ func parseKTArgs(args []string) (string, []string, bool, bool, error) {
 			norand = true
 		case "-k", "-keytab":
 			if i+1 >= len(args) {
-				return "", nil, false, false, errors.New("-k requires keytab")
+				return "", nil, false, false, nil, errors.New("-k requires keytab")
 			}
 			i++
 			name = args[i]
 		default:
 			if args[i] == "-e" {
 				if i+1 >= len(args) {
-					return "", nil, false, false, errors.New("-e requires keysalts")
+					return "", nil, false, false, nil, errors.New("-e requires keysalts")
 				}
 				i++
+				var err error
+				keySalts, err = parseKeySalts(args[i])
+				if err != nil {
+					return "", nil, false, false, nil, err
+				}
 			} else {
 				rest = append(rest, args[i])
 			}
 		}
 	}
-	return name, rest, quiet, norand, nil
+	return name, rest, quiet, norand, keySalts, nil
 }

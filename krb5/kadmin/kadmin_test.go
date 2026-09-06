@@ -98,7 +98,7 @@ func TestPrincipalOutputGolden(t *testing.T) {
 		"Failed password attempts: 0\n" +
 		"Number of keys: 0\n" +
 		"MKey: vno 0\n" +
-		"Attributes:REQUIRES_PRE_AUTH\n" +
+		"Attributes: REQUIRES_PRE_AUTH\n" +
 		"Policy: [none]\n"
 	if out.String() != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
