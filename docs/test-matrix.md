@@ -296,10 +296,16 @@ authorize callers by authenticated principal, operation, and target; MIT
 `kadm5.acl` files are supported by `kadm5.ParseACL` and `kadm5.LoadACL`, with
 first-match-wins evaluation, ordered lowercase grants and uppercase denies,
 per-component `*` wildcards, and `*1` through `*9` target back-references.
-Restriction clauses are rejected because this server does not expose
-field-level mutation restrictions. When `Server.ACL` is nil, only
+The Go-native `kadm5_auth` interface exposes MIT-shaped optional
+authorization methods through compile-time registered modules. Modules combine
+with MIT's authorize-plus-no-deny semantics, the built-in self module, and
+principal mutation restrictions. Go modules are not dynamically loaded shared
+objects. There is no live `kadm5_auth` plugin gate because the existing MIT
+fixture does not make kadmind authorization plugins configurable. When
+`Server.ACL` is nil and `Server.AuthModules` is nil, only
 `Server.AdminPrincipal` is allowed, and an unset admin principal denies all
-requests. Unknown procedures are rejected with RPC
+requests. The legacy callback ACL path does not parse restriction clauses;
+modules can return restrictions directly. Unknown procedures are rejected with RPC
 `PROC_UNAVAIL`; malformed or truncated XDR is rejected.
 API versions 4, 3, and 2 are negotiated against MIT `kadmind`; the live gate
 covers principal create/get/modify/rename/delete/password-change,

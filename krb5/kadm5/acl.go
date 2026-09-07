@@ -37,8 +37,7 @@ type aclEntry struct {
 
 // ParseACL parses MIT kadm5.acl syntax from r.  ACL entries are evaluated in
 // file order; the first entry matching both client and target controls access.
-// Restrictions are rejected because the Server callback cannot apply
-// add/modify field restrictions.
+// ACL entries use MIT's ordered first-match semantics.
 func ParseACL(r io.Reader) (*ACL, error) {
 	if r == nil {
 		return nil, fmt.Errorf("kadm5 ACL: nil reader")
@@ -148,9 +147,9 @@ func aclOperation(operation string) (uint32, bool) {
 		return aclDelete, true
 	case "modify", "modify-policy":
 		return aclModify, true
-	case "change-password", "set-password":
+	case "change-password", "set-password", "randkey":
 		return aclChangePassword, true
-	case "get", "get-policy":
+	case "get", "get-policy", "get-strings":
 		return aclInquire, true
 	case "list", "list-policy":
 		return aclList, true
@@ -158,6 +157,10 @@ func aclOperation(operation string) (uint32, bool) {
 		return aclExtract, true
 	case "set-key":
 		return aclSetKey, true
+	case "set-string":
+		return aclModify, true
+	case "iprop":
+		return aclIPop, true
 	default:
 		return 0, false
 	}
