@@ -49,8 +49,10 @@ type Server struct {
 	AdminPrincipal principal.Principal
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
 	// AuthModules enables MIT-shaped pluggable authorization. When non-nil,
-	// the configured modules are combined with the optional ACL adapter and
-	// the built-in self-service module.
+	// including an empty non-nil list, the configured modules are combined with
+	// the optional ACL adapter and the built-in self-service module. This
+	// replaces the legacy admin-only fallback and allows self-service
+	// cpw/chrand/purgekeys/getprinc/getstrs operations.
 	AuthModules []AuthModule
 	API         uint32
 	ErrorLog    func(error)
@@ -1092,7 +1094,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || key == nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorizeString(client, p, *key, *value) {
+		if !s.authorizeString(client, p, *key, value) {
 			return status(authModify)
 		}
 		return status(kdbCode(s.Database.SetString(p, *key, value)))

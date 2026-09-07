@@ -154,6 +154,60 @@ func TestReadKeySaltTuplesRejectsTruncatedArray(t *testing.T) {
 	}
 }
 
+func TestDispatchSetStringDeletion(t *testing.T) {
+	client := authTestPrincipal(t, "alice@EXAMPLE.COM")
+	for _, test := range []struct {
+		name    string
+		modules []AuthModule
+	}{
+		{name: "legacy", modules: nil},
+		{name: "auth modules", modules: []AuthModule{authStringModule{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := kdb.NewDatabase("EXAMPLE.COM")
+			if err := db.AddPrincipal(client.String(), "password", 1); err != nil {
+				t.Fatal(err)
+			}
+			value := "present"
+			if err := db.SetString(client, "delete-me", &value); err != nil {
+				t.Fatal(err)
+			}
+			server := &Server{
+				Database:       db,
+				AdminPrincipal: client,
+				AuthModules:    test.modules,
+				API:            APIv4,
+			}
+			body := xdrWriter{}
+			body.u32(APIv4)
+			body.principal(client)
+			key := "delete-me"
+			body.nullableString(&key)
+			body.nullableString(nil)
+			reply := server.dispatch(client, setString, body.bytes())
+			reader := xdrReader{b: reply}
+			api, err := reader.u32()
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, err := reader.u32()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api != APIv4 || code != 0 {
+				t.Fatalf("set-string deletion status = (%d, %d)", api, code)
+			}
+			attributes, err := db.GetStrings(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attributes) != 0 {
+				t.Fatalf("attributes after deletion = %#v", attributes)
+			}
+		})
+	}
+}
+
 func TestServerGoClientRoundTrip(t *testing.T) {
 	const realm = "TEST.REALM"
 	kt, creds := serverTestCredentials(t, realm)

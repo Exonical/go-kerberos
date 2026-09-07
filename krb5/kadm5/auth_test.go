@@ -17,6 +17,13 @@ func (m authTestModule) AuthGetPrinc(principal.Principal, principal.Principal) A
 	return m.decision
 }
 
+type authStringModule struct{}
+
+func (authStringModule) Name() string { return "string" }
+func (authStringModule) AuthSetString(principal.Principal, principal.Principal, string, *string) AuthDecision {
+	return AuthAuthorize
+}
+
 type authRestrictionModule struct{}
 
 func (authRestrictionModule) Name() string { return "restriction" }
@@ -167,5 +174,12 @@ func TestACLAuthModuleOperationMappings(t *testing.T) {
 	}
 	if len(operations) != 2 || operations[0] != "create" || operations[1] != "modify" {
 		t.Fatalf("alias operations = %#v", operations)
+	}
+	operations = nil
+	if module.AuthPurgeKeys(client, source) != AuthAuthorize {
+		t.Fatal("purgekeys should use modify authorization")
+	}
+	if len(operations) != 1 || operations[0] != "modify" {
+		t.Fatalf("purgekeys operation = %#v", operations)
 	}
 }
