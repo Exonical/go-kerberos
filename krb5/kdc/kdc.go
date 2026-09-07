@@ -58,6 +58,7 @@ const (
 	kdcErrDHKeyParameters  = 65
 	kdcErrMorePreauth      = 91
 	kdcErrGeneric          = 60
+	kdcErrServiceUnknown   = 7
 	kdcErrBadOption        = 13
 	kdcErrPolicy           = 12
 	kdcErrServerNoMatch    = 26
@@ -124,6 +125,19 @@ type Server struct {
 	// AuthDataModules add MIT-shaped KDC authorization data to issued tickets.
 	// A nil list leaves authorization-data module handling disabled.
 	AuthDataModules []AuthDataModule
+	// DisablePAC suppresses PAC issuance while retaining authentication
+	// indicators and other authorization data.
+	DisablePAC bool
+	// RejectBadTransit controls whether a failed transited-policy check
+	// rejects the TGS request. MIT defaults this to true.
+	RejectBadTransit    bool
+	RejectBadTransitSet bool
+	// RestrictAnonymousToTGT permits anonymous tickets only for local TGTs.
+	RestrictAnonymousToTGT bool
+	// HostBasedServices controls referral eligibility for NT-UNKNOWN services.
+	HostBasedServices []string
+	// NoHostReferral suppresses referrals for listed service types.
+	NoHostReferral []string
 	// PKINITRequireFreshness requires RFC 8070 freshness tokens on signed
 	// PKINIT requests. Clients which advertise freshness receive an opaque
 	// token in PREAUTH_REQUIRED and must echo it in PKAuthenticator.
@@ -526,6 +540,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.errorResponse(kdcErrClientRevoked, request.ReqBody.SName)
 	}
 	serviceName := principalFromProtocol(*request.ReqBody.SName, request.ReqBody.Realm)
+	if s.restrictAnonymous(clientName, serviceName) {
+		return s.errorResponse(kdcErrPolicy, request.ReqBody.SName)
+	}
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
@@ -1239,7 +1256,7 @@ func (s *Server) issuePACWithOptions(ticketPart *protocol.EncTicketPart, client,
 	headerKey, serviceKey kdb.Key, serviceTicket bool, replaceClient bool,
 	replacedReplyKey *kdb.Key, delegationEvidence *principal.Principal,
 	pacVerifyKey *kdb.Key) error {
-	if !s.EnablePAC {
+	if !s.EnablePAC || s.DisablePAC {
 		return nil
 	}
 	privKey, ok := s.pacPrivsvrKey()
@@ -2004,10 +2021,18 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 	if options&(types.KDCRenew|types.KDCValidate) != 0 {
 		serviceName = principalFromProtocol(apRequest.Ticket.SName, apRequest.Ticket.Realm)
 	} else if serviceName.Realm != s.Realm {
+		if !s.referralAllowed(requestedServiceName,
+			options&types.KDCCanonicalize != 0,
+			options&types.KDCEncTktInSkey != 0) {
+			return s.tgsErrorResponse(armor, kdcErrServiceUnknown, request.ReqBody.SName)
+		}
 		serviceName = principal.Principal{
 			Realm: s.Realm, NameType: principal.NTSrvInstance,
 			Components: []string{"krbtgt", request.ReqBody.Realm},
 		}
+	}
+	if s.restrictAnonymous(ticketClient, serviceName) {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
 	}
 	serviceRecord, ok, err := s.DB.Lookup(serviceName)
 	if err != nil {
@@ -2603,9 +2628,12 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if !crossRealmTGT && len(ticketPart.Transited.Contents) > 0 {
 		if !transitedPermitted(ticketPart.Transited.Contents, ticketPart.CRealm,
 			serviceName.Realm, s.Capaths) {
-			return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+			if s.rejectBadTransit() {
+				return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+			}
+		} else {
+			flags |= types.TicketTransited
 		}
-		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
 	s.handleAuthData(&AuthDataRequest{
@@ -3491,6 +3519,54 @@ func isAnonymousPrincipal(p principal.Principal) bool {
 		}
 	}
 	return true
+}
+
+func (s *Server) rejectBadTransit() bool {
+	if s == nil || !s.RejectBadTransitSet {
+		return true
+	}
+	return s.RejectBadTransit
+}
+
+func (s *Server) restrictAnonymous(client, service principal.Principal) bool {
+	if s == nil || !s.RestrictAnonymousToTGT || !isAnonymousPrincipal(client) {
+		return false
+	}
+	return service.Realm != s.Realm ||
+		service.NameType != principal.NTSrvInstance ||
+		len(service.Components) != 2 ||
+		service.Components[0] != "krbtgt" ||
+		service.Components[1] != s.Realm
+}
+
+func (s *Server) referralAllowed(service principal.Principal, canonicalize bool,
+	encTktInSKey bool) bool {
+	if !canonicalize || encTktInSKey || len(service.Components) != 2 {
+		return false
+	}
+	first := service.Components[0]
+	if service.NameType == principal.NTUnknown && !listContains(s.HostBasedServices, first) &&
+		!listContains(s.HostBasedServices, "*") {
+		return false
+	}
+	if (service.NameType == principal.NTUnknown ||
+		service.NameType == principal.NTSrvHst ||
+		service.NameType == principal.NTSrvInstance) &&
+		(listContains(s.NoHostReferral, first) || listContains(s.NoHostReferral, "*")) {
+		return false
+	}
+	return service.NameType == principal.NTUnknown ||
+		service.NameType == principal.NTSrvHst ||
+		service.NameType == principal.NTSrvInstance
+}
+
+func listContains(values []string, item string) bool {
+	for _, value := range values {
+		if value == item {
+			return true
+		}
+	}
+	return false
 }
 
 func protocolPrincipal(value principal.Principal) *protocol.PrincipalName {

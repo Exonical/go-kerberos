@@ -23,6 +23,11 @@ type KDCRealmConfig struct {
 	KDCTCPPorts                 []int
 	MaxLife                     time.Duration
 	MaxRenewableLife            time.Duration
+	DisablePAC                  bool
+	RejectBadTransit            bool
+	RestrictAnonymousToTGT      bool
+	HostBasedServices           []string
+	NoHostReferral              []string
 	MasterKeyType               string
 	SupportedEnctypes           []string
 	EncryptedChallengeIndicator string
@@ -54,6 +59,14 @@ func ParseKDCConf(data []byte) (*KDCConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("realm %s: %w", realm, err)
 		}
+		settings.HostBasedServices = append(
+			splitList(firstValues(defaults, "host_based_services")),
+			splitList(firstValues(values, "host_based_services"))...,
+		)
+		settings.NoHostReferral = append(
+			splitList(firstValues(defaults, "no_host_referral")),
+			splitList(firstValues(values, "no_host_referral"))...,
+		)
 		settings.Values = cloneOptions(merged)
 		result.Realms[realm] = settings
 	}
@@ -97,7 +110,7 @@ func firstValues(values map[string][]string, key string) string {
 }
 
 func parseKDCRealm(values map[string][]string) (KDCRealmConfig, error) {
-	settings := KDCRealmConfig{}
+	settings := KDCRealmConfig{RejectBadTransit: true}
 	var err error
 	settings.KDCPorts, err = parsePorts(firstValues(values, "kdc_ports"))
 	if err != nil {
@@ -119,6 +132,17 @@ func parseKDCRealm(values map[string][]string) (KDCRealmConfig, error) {
 			return settings, fmt.Errorf("max_renewable_life: %w", err)
 		}
 	}
+	if raw := firstValues(values, "disable_pac"); raw != "" {
+		settings.DisablePAC = parseBool(raw)
+	}
+	if raw := firstValues(values, "reject_bad_transit"); raw != "" {
+		settings.RejectBadTransit = parseBool(raw)
+	}
+	if raw := firstValues(values, "restrict_anonymous_to_tgt"); raw != "" {
+		settings.RestrictAnonymousToTGT = parseBool(raw)
+	}
+	settings.HostBasedServices = splitList(firstValues(values, "host_based_services"))
+	settings.NoHostReferral = splitList(firstValues(values, "no_host_referral"))
 	settings.MasterKeyType = firstValues(values, "master_key_type")
 	settings.SupportedEnctypes = splitList(firstValues(values, "supported_enctypes"))
 	settings.EncryptedChallengeIndicator = firstValues(values, "encrypted_challenge_indicator")

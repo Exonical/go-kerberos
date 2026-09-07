@@ -83,6 +83,36 @@ TEST.REALM = {
 	}
 }
 
+func TestParseKDCConfigRelationsAndFallback(t *testing.T) {
+	profile, err := ParseKDCConf([]byte(`[kdcdefaults]
+reject_bad_transit = false
+host_based_services = host, ldap
+no_host_referral = nfs
+[realms]
+EXAMPLE.COM = {
+    disable_pac = true
+    restrict_anonymous_to_tgt = true
+    host_based_services = ftp
+    no_host_referral = ldap
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, ok := profile.Realm("example.com")
+	if !ok {
+		t.Fatal("realm settings missing")
+	}
+	if !settings.DisablePAC || settings.RejectBadTransit ||
+		!settings.RestrictAnonymousToTGT {
+		t.Fatalf("boolean relations = %#v", settings)
+	}
+	if fmt.Sprint(settings.HostBasedServices) != "[host ldap ftp]" ||
+		fmt.Sprint(settings.NoHostReferral) != "[nfs ldap]" {
+		t.Fatalf("referral relations = %#v", settings)
+	}
+}
+
 func TestParseHostRealmOptions(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
 qualify_shortname = EXAMPLE.TEST
@@ -121,6 +151,37 @@ TEST.REALM = {
 	}
 	if got := cfg.LibDefaultValues("OTHER.REALM", "verify_ap_req_nofail"); len(got) != 1 || got[0] != "false" {
 		t.Fatalf("global libdefault = %#v, want [false]", got)
+	}
+}
+
+func TestParseClientConfigRelations(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+preferred_preauth_types = 17, 16 15
+request_timeout = 2m
+noaddresses = false
+extra_addresses = 192.0.2.10 2001:db8::10
+kdc_default_options = 0x4000
+TEST.REALM = {
+    preferred_preauth_types = 14, 13
+    request_timeout = 3s
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.LibDefaultValues("TEST.REALM", "preferred_preauth_types"); len(got) != 2 ||
+		got[0] != "14," || got[1] != "13" {
+		t.Fatalf("preferred_preauth_types = %#v", got)
+	}
+	if got := cfg.LibDefaultValues("TEST.REALM", "request_timeout"); len(got) != 1 ||
+		got[0] != "3s" {
+		t.Fatalf("request_timeout = %#v", got)
+	}
+	if cfg.NoAddressesEnabled("OTHER.REALM") {
+		t.Fatal("noaddresses unexpectedly enabled")
+	}
+	if cfg.KDCDefaultOptions != 0x4000 || len(cfg.ExtraAddresses) != 2 {
+		t.Fatalf("parsed client relations = %#v", cfg)
 	}
 }
 
