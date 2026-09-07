@@ -12,7 +12,7 @@ func TestExpandPathTokensSharedSyntax(t *testing.T) {
 	}
 	want := `prefix//suffix`
 	if runtime.GOOS == "windows" {
-		want = `prefix\suffix`
+		want = `prefix\\suffix`
 	}
 	if path != want {
 		t.Fatalf("expanded path = %q, want %q", path, want)
