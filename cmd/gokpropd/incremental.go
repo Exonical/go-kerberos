@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/client"
@@ -32,6 +34,8 @@ type incrementalState struct {
 	ulog        *iprop.Ulog
 	fullResync  chan error
 	pendingLast iprop.Last
+	mu          sync.Mutex
+	pending     bool
 }
 
 func runIncremental(ctx context.Context, options propdOptions, cfg *config.Config,
@@ -62,24 +66,30 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 		Realm: realm, NameType: principal.NTSrvInstance,
 		Components: []string{"krbtgt", realm},
 	}
-	tgt, err := kclient.ASExchangeServiceWithKey(ctx, clientPrincipal, entry, tgtService)
-	if err != nil {
-		return fmt.Errorf("get iprop TGT: %w", err)
-	}
 	service := principal.Principal{
 		Realm: realm, NameType: principal.NTSrvHst,
 		Components: []string{"kiprop", adminHost},
 	}
-	credentials, err := kclient.TGSExchange(ctx, tgt, service)
-	if err != nil {
-		return fmt.Errorf("get iprop service ticket: %w", err)
+	dialIprop := func(dialCtx context.Context) (*iprop.Client, error) {
+		tgt, dialErr := kclient.ASExchangeServiceWithKey(dialCtx, clientPrincipal, entry, tgtService)
+		if dialErr != nil {
+			return nil, fmt.Errorf("get iprop TGT: %w", dialErr)
+		}
+		credentials, dialErr := kclient.TGSExchange(dialCtx, tgt, service)
+		if dialErr != nil {
+			return nil, fmt.Errorf("get iprop service ticket: %w", dialErr)
+		}
+		ipropClient, dialErr := iprop.Dial(dialCtx, net.JoinHostPort(adminHost, adminPort), credentials)
+		if dialErr != nil {
+			return nil, fmt.Errorf("connect to iprop master: %w", dialErr)
+		}
+		return ipropClient, nil
 	}
-	ipropClient, err := iprop.Dial(ctx, net.JoinHostPort(adminHost, adminPort),
-		credentials)
+	ipropClient, err := dialIprop(ctx)
 	if err != nil {
-		return fmt.Errorf("connect to iprop master: %w", err)
+		return err
 	}
-	defer ipropClient.Close()
+	defer func() { _ = ipropClient.Close() }()
 
 	ulogPath, poll, ulogSize, resyncTimeout, err := ipropSettings(cfg, realm, options)
 	if err != nil {
@@ -94,6 +104,29 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 		Cursor: cursor, Ulog: ulog}
 	state := &incrementalState{replica: replica, ulog: ulog,
 		fullResync: make(chan error, 1)}
+	replica.Persist = func() error {
+		if replica.MasterEnctype == 0 || len(replica.MasterKey) == 0 {
+			return errors.New("iprop: incremental database persistence requires a master key")
+		}
+		data, err := mitdump.DumpWithMasterKey(replica.Database,
+			replica.MasterEnctype, replica.MasterKey)
+		if err != nil {
+			return err
+		}
+		if options.KDBUtil == "" {
+			return writeFileAtomic(options.Database, data)
+		}
+		if err := writeFileAtomic(options.ReplicaFile, data); err != nil {
+			return err
+		}
+		args := buildLoadArgs(options)
+		command := exec.Command(options.KDBUtil, args...) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.dangerous-exec-command -- -p intentionally selects an administrator-configured kdb5_util-compatible loader
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s load: %w: %s", options.KDBUtil, err,
+				strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
 
 	listener, err := net.Listen("tcp", net.JoinHostPort("", options.Port))
 	if err != nil {
@@ -121,7 +154,12 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 				}
 			}
 			state.replica.Database = database
-			state.fullResync <- nil
+			state.mu.Lock()
+			pending := state.pending
+			state.mu.Unlock()
+			if pending {
+				state.fullResync <- nil
+			}
 			return nil
 		},
 		ErrorLog: func(err error) {
@@ -138,9 +176,16 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 			}
 			go func() {
 				if serveErr := kpropServer.ServeConn(ctx, conn); serveErr != nil {
-					select {
-					case state.fullResync <- serveErr:
-					default:
+					state.mu.Lock()
+					pending := state.pending
+					state.mu.Unlock()
+					if pending {
+						select {
+						case state.fullResync <- serveErr:
+						default:
+						}
+					} else if options.Debug {
+						fmt.Fprintln(errOut, serveErr)
 					}
 				}
 			}()
@@ -157,6 +202,11 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 		if pollErr != nil {
 			if options.RunOnce {
 				return pollErr
+			}
+			_ = ipropClient.Close()
+			ipropClient, err = dialIprop(ctx)
+			if err == nil {
+				replica.Client = ipropClient
 			}
 			if err := sleepIprop(ctx, ipropBackoff(&backoff)); err != nil {
 				return err
@@ -190,14 +240,25 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 			}
 		case iprop.UpdateFullResyncNeeded:
 			backoff = 0
-			resyncCtx := ctx
-			cancel := func() {}
-			if resyncTimeout > 0 {
-				resyncCtx, cancel = context.WithTimeout(ctx, resyncTimeout)
+			state.mu.Lock()
+			state.pending = true
+			state.mu.Unlock()
+			select {
+			case <-state.fullResync:
+			default:
 			}
-			result, resyncErr := requestFullResync(resyncCtx, ipropClient)
-			cancel()
+			rpcCtx, cancelRPC := context.WithTimeout(ctx, 25*time.Second)
+			result, resyncErr := requestFullResync(rpcCtx, ipropClient)
+			cancelRPC()
 			if resyncErr != nil {
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
+				_ = ipropClient.Close()
+				ipropClient, err = dialIprop(ctx)
+				if err == nil {
+					replica.Client = ipropClient
+				}
 				if options.RunOnce {
 					return resyncErr
 				}
@@ -210,6 +271,9 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 			switch result.Ret {
 			case iprop.UpdateOK:
 			case iprop.UpdateBusy:
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
 				if options.RunOnce {
 					return nil
 				}
@@ -219,21 +283,43 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 				}
 				continue
 			case iprop.UpdatePermDenied, iprop.UpdateError:
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
 				return fmt.Errorf("iprop full resync failed with status %d", result.Ret)
 			default:
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
 				return fmt.Errorf("iprop full resync returned status %d", result.Ret)
 			}
 			state.pendingLast = result.LastEntry
+			waitCtx := ctx
+			cancelWait := func() {}
+			if resyncTimeout > 0 {
+				waitCtx, cancelWait = context.WithTimeout(ctx, resyncTimeout)
+			}
 			select {
 			case transferErr := <-state.fullResync:
+				cancelWait()
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
 				if transferErr != nil {
 					return transferErr
 				}
 				if err := replica.SetCursor(state.pendingLast); err != nil {
 					return err
 				}
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-waitCtx.Done():
+				cancelWait()
+				state.mu.Lock()
+				state.pending = false
+				state.mu.Unlock()
+				if options.Debug {
+					fmt.Fprintln(errOut, "iprop full resync dump timed out")
+				}
+				continue
 			}
 			if options.RunOnce {
 				return nil

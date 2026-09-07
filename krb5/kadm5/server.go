@@ -175,7 +175,11 @@ func (s *Server) ServeWithIPROP(kadmListener, ipropListener net.Listener,
 	errs := make(chan error, 2)
 	go func() { errs <- s.Serve(kadmListener) }()
 	go func() { errs <- ipropServer.Serve(ipropListener) }()
-	return <-errs
+	err := <-errs
+	_ = kadmListener.Close()
+	_ = ipropListener.Close()
+	<-errs
+	return err
 }
 
 type serverSession struct {

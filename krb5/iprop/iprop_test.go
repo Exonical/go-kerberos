@@ -305,6 +305,36 @@ func TestReplicaPollPersistsCursorAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestReplicaPollPersistsBeforeCursor(t *testing.T) {
+	master := kdb.NewDatabase("EXAMPLE.COM")
+	if err := master.CreatePrincipal("alice@EXAMPLE.COM", "password"); err != nil {
+		t.Fatal(err)
+	}
+	replicaName := mustPrincipal(t, "host/replica@EXAMPLE.COM")
+	server := NewServer(master, nil)
+	server.Authorize = func(principal.Principal) bool { return true }
+	var replica *Replica
+	replica = &Replica{
+		Client:   dispatchClient{server: server, client: *replicaName},
+		Database: kdb.NewDatabase("EXAMPLE.COM"),
+		Persist: func() error {
+			if replica.Cursor.LastSno != 0 {
+				t.Fatal("cursor advanced before persistence")
+			}
+			if _, ok, _ := replica.Database.Lookup(*mustPrincipal(t, "alice@EXAMPLE.COM")); !ok {
+				t.Fatal("database was not updated before persistence")
+			}
+			return nil
+		},
+	}
+	if status, err := replica.Poll(context.Background()); err != nil || status != UpdateOK {
+		t.Fatalf("poll = %v, %v", status, err)
+	}
+	if replica.Cursor.LastSno == 0 {
+		t.Fatal("cursor did not advance after persistence")
+	}
+}
+
 func mustPrincipal(t *testing.T, value string) *principal.Principal {
 	t.Helper()
 	result, err := principal.Parse(value)
