@@ -339,7 +339,7 @@ func TestKCMServerRejectsImpossibleReplaceCount(t *testing.T) {
 	var count [4]byte
 	binary.BigEndian.PutUint32(count[:], ^uint32(0))
 	args = append(args, count[:]...)
-	if _, code := server.dispatch(kcmRequest(kcmOpReplace, args)); code != kcmErrInternal {
+	if _, code := dispatch(server, kcmRequest(kcmOpReplace, args)); code != kcmErrInternal {
 		t.Fatalf("impossible replace count status = %d, want %d", code, kcmErrInternal)
 	}
 }
