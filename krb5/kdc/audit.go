@@ -223,14 +223,18 @@ func (s *AuditState) SuccessState(response []byte) {
 	s.OutputTicketID = ""
 	s.ErrorCode = 0
 	if isKRBErrorResponse(response) {
-		s.Status = "error"
+		if s.Status == "" {
+			s.Status = "error"
+		}
 		var failure protocol.KRBError
 		if err := asn1.Unmarshal(response, &failure); err == nil {
 			s.ErrorCode = failure.ErrorCode
 		}
 		return
 	}
-	s.Status = "success"
+	if s.Status == "" {
+		s.Status = "success"
+	}
 	var tgs protocol.TGSRep
 	if err := asn1.Unmarshal(response, &tgs); err == nil && tgs.MsgType == 13 {
 		s.OutputTicketID = auditID(marshalDER(tgs.Ticket))
