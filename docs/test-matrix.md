@@ -504,6 +504,38 @@ configuration gate. MIT reference points are
 `src/lib/gssapi/krb5/acquire_cred.c`, `init_sec_context.c`, and
 `accept_sec_context.c`.
 
+### GSS credential lifecycle and naming extensions
+
+The Go GSS credential-store surface maps MIT
+`gss_acquire_cred_from` to `gssapi.AcquireCredentialFrom`,
+`gss_store_cred` and `gss_store_cred_into` to
+`gssapi.StoreCredential` and `gssapi.StoreCredentialInto`, and
+`gss_export_cred`/`gss_import_cred` to `Credential.Export` and
+`ImportCredential`. Supported store keys are `ccache`, `client_keytab`,
+`keytab`, `rcache`, `password`, and `verify`; duplicate known keys are
+rejected while unknown keys are ignored like MIT.
+
+Accepted-context peer names expose `InquireName`, `GetNameAttribute`,
+`SetNameAttribute`, `DeleteNameAttribute`, and `ExportNameComposite` through
+`Context` and `NameAttributes`. These operations are backed by
+`krb5/authdata.Context`. `DisplayNameExt` is provided on the established
+context for Kerberos principal display names. Composite names use the exact
+MIT `naming_exts.c` framing (`04 02`, DER Kerberos mechanism OID, length
+prefixed principal, and length prefixed exported attributes).
+
+Credential transfer preserves MIT `export_cred.c`'s `["K5C1", cred]` JSON
+array shape, field ordering, ccache credential ordering, and base64 encoding.
+The resulting tokens are Go-library-scoped and are not promised to be
+portable across library versions, just as MIT's credential export tokens are
+not cross-version portable. `client_keytab` acquisition uses the existing
+client-keytab resolver, including `default_client_keytab_name`.
+
+The `rcache` store element is retained as acceptor metadata but is not yet
+connected to a persistent replay-cache constructor. Profile-driven
+`ignore_acceptor_hostname`, `enforce_ok_as_delegate`, and
+`client_aware_channel_bindings` remain deferred to the corresponding broader
+GSS acceptor/delegation slices.
+
 The integration harness uses the same profile-format KDC configuration with a
 disposable MIT KDC; DNS itself is intentionally not a live integration
 dependency.
