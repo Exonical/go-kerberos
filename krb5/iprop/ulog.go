@@ -253,6 +253,39 @@ func (u *Ulog) Reset() error {
 	return u.syncHeader()
 }
 
+// SetCursor resets the log contents while retaining a replica's last
+// successfully applied master cursor. The marker is represented by a dummy
+// entry, matching the fixed-block ulog layout used by MIT.
+func (u *Ulog) SetCursor(last Last) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.file == nil {
+		return errors.New("iprop: closed ulog")
+	}
+	if u.readOnly {
+		return errors.New("iprop: read-only ulog")
+	}
+	u.hdr = UlogHeader{
+		Version: ulogVersion, NumEntries: 1,
+		FirstTime: last.LastTime, LastTime: last.LastTime,
+		FirstSno: last.LastSno, LastSno: last.LastSno,
+		State: ulogStable, Block: ulogBlock,
+	}
+	if last.LastSno == 0 {
+		u.hdr.FirstSno = 1
+		u.hdr.LastSno = 1
+		u.hdr.FirstTime = Time{}
+		u.hdr.LastTime = Time{}
+	}
+	if err := u.file.Truncate(int64(ulogHeaderSize) + int64(u.capacity)*int64(u.hdr.Block)); err != nil {
+		return err
+	}
+	if err := u.writeDummy(u.hdr.LastSno); err != nil {
+		return err
+	}
+	return u.syncHeader()
+}
+
 func (u *Ulog) writeDummy(serial uint32) error {
 	block := make([]byte, u.hdr.Block)
 	binary.LittleEndian.PutUint32(block[0:4], ulogEntryMagic)

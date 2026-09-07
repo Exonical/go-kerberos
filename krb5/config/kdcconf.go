@@ -21,6 +21,12 @@ type KDCRealmConfig struct {
 	Values                      map[string][]string
 	KDCPorts                    []int
 	KDCTCPPorts                 []int
+	IpropEnabled                bool
+	IpropPort                   int
+	IpropPollTime               time.Duration
+	IpropResyncTimeout          time.Duration
+	IpropUlogSize               int
+	IpropLogfile                string
 	MaxLife                     time.Duration
 	MaxRenewableLife            time.Duration
 	DisablePAC                  bool
@@ -150,6 +156,41 @@ func parseKDCRealm(values map[string][]string) (KDCRealmConfig, error) {
 	settings.PKINITIndicators = splitList(firstValues(values, "pkinit_indicator"))
 	settings.PKINITDHMinBits = firstValues(values, "pkinit_dh_min_bits")
 	settings.OTPIndicators = splitList(firstValues(values, "otp_indicator"))
+	if raw := firstValues(values, "iprop_enable"); raw != "" {
+		settings.IpropEnabled = parseBool(raw)
+	}
+	if raw := firstValues(values, "iprop_port"); raw != "" {
+		settings.IpropPort, err = strconv.Atoi(raw)
+		if err != nil || settings.IpropPort < 1 || settings.IpropPort > 65535 {
+			return settings, fmt.Errorf("iprop_port: invalid port %q", raw)
+		}
+	}
+	rawPoll := firstValues(values, "iprop_replica_poll")
+	if rawPoll == "" {
+		rawPoll = firstValues(values, "iprop_slave_poll")
+	}
+	if rawPoll == "" {
+		rawPoll = firstValues(values, "iprop_poll")
+	}
+	if raw := rawPoll; raw != "" {
+		settings.IpropPollTime, err = ParseDuration(raw)
+		if err != nil {
+			return settings, fmt.Errorf("iprop_poll: %w", err)
+		}
+	}
+	if raw := firstValues(values, "iprop_resync_timeout"); raw != "" {
+		settings.IpropResyncTimeout, err = ParseDuration(raw)
+		if err != nil {
+			return settings, fmt.Errorf("iprop_resync_timeout: %w", err)
+		}
+	}
+	if raw := firstValues(values, "iprop_ulogsize"); raw != "" {
+		settings.IpropUlogSize, err = strconv.Atoi(raw)
+		if err != nil || settings.IpropUlogSize < 0 {
+			return settings, fmt.Errorf("iprop_ulogsize: invalid size %q", raw)
+		}
+	}
+	settings.IpropLogfile = firstValues(values, "iprop_logfile")
 	return settings, nil
 }
 

@@ -2,13 +2,51 @@ package iprop
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
+
+type dispatchClient struct {
+	server *Server
+	client principal.Principal
+	result IncrementalResult
+	err    error
+}
+
+func (c dispatchClient) GetUpdates(_ context.Context, last Last) (IncrementalResult, error) {
+	if c.server == nil {
+		return c.result, c.err
+	}
+	value, err := UnmarshalIncrementalResult(c.server.dispatch(c.client,
+		ProcGetUpdates, last.MarshalXDR()))
+	if err != nil {
+		return IncrementalResult{}, err
+	}
+	return value, nil
+}
+
+func TestReplicaPreservesBusyAndNilStatuses(t *testing.T) {
+	db := kdb.NewDatabase("EXAMPLE.COM")
+	replica := &Replica{
+		Client:   dispatchClient{result: IncrementalResult{Ret: UpdateBusy}},
+		Database: db,
+	}
+	status, err := replica.Poll(context.Background())
+	if err != nil || status != UpdateBusy {
+		t.Fatalf("busy poll = %v, %v", status, err)
+	}
+	replica.Client = dispatchClient{result: IncrementalResult{Ret: UpdateNil}}
+	status, err = replica.Poll(context.Background())
+	if err != nil || status != UpdateNil {
+		t.Fatalf("nil poll = %v, %v", status, err)
+	}
+}
 
 type failingEType struct{}
 
@@ -211,4 +249,67 @@ func TestReplicaAppliesCommittedAndDeletedUpdates(t *testing.T) {
 	if _, ok, _ := db.Lookup(*master); ok {
 		t.Fatal("deleted principal still present")
 	}
+}
+
+func TestReplicaPollPersistsCursorAcrossRestart(t *testing.T) {
+	master := kdb.NewDatabase("EXAMPLE.COM")
+	if err := master.CreatePrincipal("alice@EXAMPLE.COM", "password"); err != nil {
+		t.Fatal(err)
+	}
+	replicaName, err := principal.Parse("host/replica@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(master, nil)
+	server.Authorize = func(principal.Principal) bool { return true }
+	path := filepath.Join(t.TempDir(), "replica.ulog")
+	ulog, err := Create(path, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ulog.Close()
+	replicaDB := kdb.NewDatabase("EXAMPLE.COM")
+	replica := &Replica{
+		Client:   dispatchClient{server: server, client: *replicaName},
+		Database: replicaDB, Ulog: ulog,
+	}
+	status, err := replica.Poll(context.Background())
+	if err != nil || status != UpdateOK {
+		t.Fatalf("initial poll = %v, %v", status, err)
+	}
+	cursor := replica.Cursor
+	if cursor.LastSno == 0 {
+		t.Fatal("initial poll did not advance cursor")
+	}
+	if _, ok, _ := replicaDB.Lookup(*mustPrincipal(t, "alice@EXAMPLE.COM")); !ok {
+		t.Fatal("initial principal was not propagated")
+	}
+	if err := ulog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ulog, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ulog.Close()
+	persisted, err := ulog.Last()
+	if err != nil || persisted.LastSno != cursor.LastSno {
+		t.Fatalf("persisted cursor = %#v, want %#v", persisted, cursor)
+	}
+	restarted := &Replica{
+		Client:   dispatchClient{server: server, client: *replicaName},
+		Database: replicaDB, Cursor: persisted, Ulog: ulog,
+	}
+	if status, err := restarted.Poll(context.Background()); err != nil || status != UpdateNil {
+		t.Fatalf("restart poll = %v, %v", status, err)
+	}
+}
+
+func mustPrincipal(t *testing.T, value string) *principal.Principal {
+	t.Helper()
+	result, err := principal.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
