@@ -590,10 +590,12 @@ const (
 
 // Authorization-data type numbers used by RFC 7751 and RFC 4120.
 const (
-	ADIfRelevant    int32 = 1
-	ADKDCIssued     int32 = 4
-	ADCAMMAC        int32 = 96
-	ADAuthIndicator int32 = 97
+	ADIfRelevant      int32 = 1
+	ADMandatoryForKDC int32 = 8
+	ADMandatoryKDC    int32 = ADMandatoryForKDC
+	ADKDCIssued       int32 = 4
+	ADCAMMAC          int32 = 96
+	ADAuthIndicator   int32 = 97
 )
 
 // PKINIT padata types defined by RFC 4556.

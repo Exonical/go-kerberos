@@ -12,33 +12,54 @@ import (
 )
 
 func decryptTGSRequestAuthData(request protocol.TGSReq, sessionKey protocol.EncryptionKey,
-	subKey *protocol.EncryptionKey) protocol.AuthorizationData {
+	subKey *protocol.EncryptionKey) (protocol.AuthorizationData, error) {
 	encrypted := request.ReqBody.EncAuthorizationData
 	if encrypted == nil || len(encrypted.Cipher) == 0 {
-		return nil
+		return nil, nil
 	}
-	decrypt := func(key protocol.EncryptionKey, usage uint32) protocol.AuthorizationData {
+	decrypt := func(key protocol.EncryptionKey, usage uint32) (protocol.AuthorizationData, error) {
 		etype, err := crypto.NewRegistry().Get(key.KeyType)
-		if err != nil || len(key.KeyValue) == 0 {
-			return nil
+		if err != nil {
+			return nil, fmt.Errorf("TGS request authorization-data enctype: %w", err)
+		}
+		if len(key.KeyValue) == 0 {
+			return nil, fmt.Errorf("TGS request authorization-data key is empty")
 		}
 		plain, err := etype.Decrypt(key.KeyValue, usage, encrypted.Cipher)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("TGS request authorization-data decrypt: %w", err)
 		}
 		var result protocol.AuthorizationData
 		if err := asn1.Unmarshal(plain, &result); err != nil {
-			return nil
+			return nil, fmt.Errorf("TGS request authorization-data decode: %w", err)
 		}
-		return result
+		return result, nil
 	}
-	if result := decrypt(sessionKey, 4); result != nil {
-		return result
+	result, err := decrypt(sessionKey, 4)
+	if err == nil {
+		return result, nil
 	}
 	if subKey != nil {
 		return decrypt(*subKey, 5)
 	}
-	return nil
+	return nil, err
+}
+
+func hasMandatoryKDCAuthData(data protocol.AuthorizationData) bool {
+	for _, entry := range data {
+		if entry.ADType == protocol.ADMandatoryForKDC {
+			return true
+		}
+		if entry.ADType != protocol.ADIfRelevant {
+			continue
+		}
+		var inner protocol.AuthorizationData
+		if err := asn1.Unmarshal(entry.ADData, &inner); err == nil &&
+			hasMandatoryKDCAuthData(inner) {
+			return true
+		}
+	}
+	return false
 }
 
 // AuthDataASReq and AuthDataTGSReq identify the KDC request surface exposed
@@ -84,86 +105,4 @@ func (s *Server) handleAuthData(req *AuthDataRequest) {
 			s.Logger.Error("KDC authdata module %s: %v", module.Name(), err)
 		}
 	}
-}
-
-func authDataChecksumType(enctype int32) (int32, error) {
-	switch enctype {
-	case crypto.EnctypeAES128SHA1:
-		return crypto.ChecksumHMACSHA196AES128, nil
-	case crypto.EnctypeAES256SHA1:
-		return crypto.ChecksumHMACSHA196AES256, nil
-	case crypto.EnctypeAES128SHA256:
-		return crypto.ChecksumHMACSHA256128AES128, nil
-	case crypto.EnctypeAES256SHA384:
-		return crypto.ChecksumHMACSHA384192AES256, nil
-	case crypto.EnctypeCamellia128:
-		return crypto.ChecksumCMACCamellia128, nil
-	case crypto.EnctypeCamellia256:
-		return crypto.ChecksumCMACCamellia256, nil
-	default:
-		return 0, fmt.Errorf("unsupported authdata checksum enctype %d", enctype)
-	}
-}
-
-// GreetAuthDataModule is the MIT sample kdcauthdata module. It emits a
-// KDC-issued -42 authorization-data value for TGS requests.
-type GreetAuthDataModule struct{}
-
-func (GreetAuthDataModule) Name() string { return "greet" }
-
-func (GreetAuthDataModule) Handle(req *AuthDataRequest) error {
-	if req == nil || req.Reply == nil || req.Flags&AuthDataTGSReq == 0 {
-		return nil
-	}
-	if len(req.Reply.Key.KeyValue) == 0 {
-		return fmt.Errorf("greet: missing ticket session key")
-	}
-	value := []byte("Hello, KDC issued acceptor world!")
-	elements := protocol.AuthorizationData{{
-		ADType: -42,
-		ADData: value,
-	}}
-	encoded, err := asn1.Marshal(elements)
-	if err != nil {
-		return err
-	}
-	etype, err := crypto.NewRegistry().Get(req.Reply.Key.KeyType)
-	if err != nil {
-		return err
-	}
-	checksum, err := etype.Checksum(req.Reply.Key.KeyValue, 19, encoded)
-	if err != nil {
-		return err
-	}
-	checksumType, err := authDataChecksumType(req.Reply.Key.KeyType)
-	if err != nil {
-		return err
-	}
-	issuer := protocol.PrincipalName{
-		NameType:   int32(req.Server.NameType),
-		NameString: append([]string(nil), req.Server.Components...),
-	}
-	realm := req.Server.Realm
-	issued, err := asn1.Marshal(protocol.KDCIssued{
-		Checksum: protocol.Checksum{
-			ChecksumType: checksumType,
-			Checksum:     checksum,
-		},
-		IRealm:   &realm,
-		IName:    &issuer,
-		Elements: elements,
-	})
-	if err != nil {
-		return err
-	}
-	wrapped, err := asn1.Marshal(protocol.AuthorizationData{{
-		ADType: protocol.ADKDCIssued,
-		ADData: issued,
-	}})
-	if err != nil {
-		return err
-	}
-	req.Reply.AuthorizationData = append(req.Reply.AuthorizationData,
-		protocol.AuthorizationDataEntry{ADType: protocol.ADIfRelevant, ADData: wrapped})
-	return nil
 }

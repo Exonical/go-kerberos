@@ -2573,7 +2573,13 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if len(authenticatorSubKeys) > 0 {
 		authenticatorSubKey = authenticatorSubKeys[0]
 	}
-	requestAuthData := decryptTGSRequestAuthData(request, ticketPart.Key, authenticatorSubKey)
+	requestAuthData, err := decryptTGSRequestAuthData(request, ticketPart.Key, authenticatorSubKey)
+	if err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if hasMandatoryKDCAuthData(requestAuthData) {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+	}
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
