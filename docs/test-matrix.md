@@ -826,8 +826,8 @@ principal, selected enctype, FAST armor key, per-request state, and
 get/set-AS-key hooks. `PA_INFO` modules run before `PA_REAL` modules; a real
 module answer is sent before the built-in timestamp, SPAKE, OTP, encrypted
 challenge, and PKINIT mechanisms. Built-ins retain precedence for their
-registered PA types. `TryAgainer` is available as a separate optional
-interface for retry-specific module behavior.
+registered PA types. `TryAgainer` is exported as a separate optional interface
+for forward compatibility, but the AS retry loop does not invoke it yet.
 
 The KDC exposes `kdc.KDCPreauthModule` through `Server.PreauthModules`, with
 `PreauthRock` and `VerifyResult` modeled on

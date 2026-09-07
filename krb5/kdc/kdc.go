@@ -616,7 +616,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			KeyType: armor.etype.ID(), KeyValue: append([]byte(nil), armor.key...),
 		}
 	}
-	customResult, customModule, customPAType, customVerified, customErr :=
+	customResult, customSuccesses, customErr :=
 		s.verifyPreauthModules(rock, request.PAData)
 	if customErr != nil {
 		if armor != nil {
@@ -625,9 +625,19 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
-	if customVerified {
+	if customResult != nil && customResult.Authenticated {
 		if response := s.customPreauthFailure(rock, request, armor); response != nil {
 			return response
+		}
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		if clientKey.Enctype == 0 && customResult.ReplacedReplyKey == nil {
+			if armor != nil {
+				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+					nil, request.ReqBody.Nonce, armor)
+			}
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		s.recordPreauthSuccess(clientName, &clientRecord)
 		if auditState != nil {
@@ -636,8 +646,12 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			auditState.Stage = AuditIssueTicket
 		}
 		replyPAs := protocol.MethodData(nil)
-		if returner, ok := customModule.(ReturnPadata); ok {
-			data, err := returner.ReturnPadata(rock, customResult)
+		for _, success := range customSuccesses {
+			returner, ok := success.module.(ReturnPadata)
+			if !ok {
+				continue
+			}
+			data, err := returner.ReturnPadata(rock, success.result)
 			if err != nil {
 				if armor != nil {
 					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
@@ -649,14 +663,6 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		var replyKey *kdb.Key
 		if customResult.ReplacedReplyKey != nil {
-			if customModule == nil ||
-				customModule.Flags(customPAType)&PAReplacesKey == 0 {
-				if armor != nil {
-					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
-						nil, request.ReqBody.Nonce, armor)
-				}
-				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
-			}
 			key := *customResult.ReplacedReplyKey
 			replyKey = &key
 		}
@@ -1738,7 +1744,9 @@ func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName princi
 	replyKey := clientKey
 	if replyEncryptionKey != nil {
 		replyKey = *replyEncryptionKey
-		replyKey.Enctype = etypeID
+		if _, err := crypto.NewRegistry().Get(replyKey.Enctype); err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
 	}
 	replyCipher, err := encryptWithKey(replyKey, 3, replyPlain)
 	if err != nil {
@@ -1749,7 +1757,7 @@ func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName princi
 		CRealm:  clientName.Realm,
 		CName:   *protocolPrincipal(clientName),
 		Ticket:  ticket,
-		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
+		EncPart: protocol.EncryptedData{EType: replyKey.Enctype, Cipher: replyCipher},
 	}
 	if len(replyPAs) > 0 {
 		reply.PAData = replyPAs

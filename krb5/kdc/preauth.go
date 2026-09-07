@@ -1,6 +1,8 @@
 package kdc
 
 import (
+	"fmt"
+
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -41,11 +43,14 @@ type VerifyResult struct {
 	PreauthType           string
 }
 
+// KDCPreauthModule authenticates AS-REQ preauthentication data. Modules that
+// authenticate clients without a client key must advertise PA_REPLACES_KEY
+// and return ReplacedReplyKey so the KDC can encrypt a decryptable reply.
 type KDCPreauthModule interface {
 	Name() string
 	PATypes() []int32
 	Flags(paType int32) int
-	Edata(rock *PreauthRock) (protocol.PAData, error)
+	Edata(rock *PreauthRock, paType int32) (protocol.PAData, error)
 	Verify(rock *PreauthRock, pa protocol.PAData) (*VerifyResult, error)
 }
 
@@ -77,7 +82,7 @@ func (s *Server) preauthModuleHints(rock *PreauthRock) protocol.MethodData {
 			if kdcBuiltinPAType(paType) || module.Flags(paType)&PAPseudo != 0 {
 				continue
 			}
-			hint, err := module.Edata(rock)
+			hint, err := module.Edata(rock, paType)
 			if err == nil && hint.PADataType == paType {
 				result = append(result, hint)
 			}
@@ -86,8 +91,17 @@ func (s *Server) preauthModuleHints(rock *PreauthRock) protocol.MethodData {
 	return result
 }
 
+type preauthModuleSuccess struct {
+	module KDCPreauthModule
+	paType int32
+	result *VerifyResult
+}
+
 func (s *Server) verifyPreauthModules(rock *PreauthRock,
-	data protocol.MethodData) (*VerifyResult, KDCPreauthModule, int32, bool, error) {
+	data protocol.MethodData) (*VerifyResult, []preauthModuleSuccess, error) {
+	var aggregate VerifyResult
+	var successes []preauthModuleSuccess
+	replaced := false
 	for _, pa := range data {
 		if kdcBuiltinPAType(pa.PADataType) {
 			continue
@@ -98,7 +112,7 @@ func (s *Server) verifyPreauthModules(rock *PreauthRock,
 			}
 			result, err := module.Verify(rock, pa)
 			if err != nil {
-				return nil, nil, 0, false, err
+				return nil, nil, err
 			}
 			if result != nil && result.Authenticated {
 				flags := module.Flags(pa.PADataType)
@@ -108,6 +122,12 @@ func (s *Server) verifyPreauthModules(rock *PreauthRock,
 				if result.PreauthType == "" {
 					result.PreauthType = module.Name()
 				}
+				if result.ReplacedReplyKey != nil {
+					if flags&PAReplacesKey == 0 || replaced {
+						return nil, nil, fmt.Errorf("preauth module %q supplied an invalid replacement reply key", module.Name())
+					}
+					replaced = true
+				}
 				if flags&PARequired != 0 {
 					verified, _ := rock.State["verified-required-preauth"].(map[string]bool)
 					if verified == nil {
@@ -116,11 +136,27 @@ func (s *Server) verifyPreauthModules(rock *PreauthRock,
 					}
 					verified[module.Name()] = true
 				}
-				return result, module, pa.PADataType, true, nil
+				if !aggregate.Authenticated {
+					aggregate.PreauthType = result.PreauthType
+				}
+				aggregate.Authenticated = true
+				aggregate.HardwareAuthenticated =
+					aggregate.HardwareAuthenticated || result.HardwareAuthenticated
+				aggregate.AuthIndicators = append(aggregate.AuthIndicators, result.AuthIndicators...)
+				aggregate.AuthorizationData = append(aggregate.AuthorizationData, result.AuthorizationData...)
+				if result.ReplacedReplyKey != nil {
+					aggregate.ReplacedReplyKey = result.ReplacedReplyKey
+				}
+				successes = append(successes, preauthModuleSuccess{
+					module: module, paType: pa.PADataType, result: result,
+				})
 			}
 		}
 	}
-	return nil, nil, 0, false, nil
+	if !aggregate.Authenticated {
+		return nil, nil, nil
+	}
+	return &aggregate, successes, nil
 }
 
 func (s *Server) customPreauthFailure(rock *PreauthRock,

@@ -76,6 +76,8 @@ type ClientPreauthModule interface {
 	Process(ctx *ClientRequestContext, pa PAData, req ASReqInfo) ([]PAData, error)
 }
 
+// TryAgainer is exported for forward compatibility; the AS retry loop does
+// not invoke it yet.
 type TryAgainer interface {
 	TryAgain(ctx context.Context, pa PAData, req ASReqInfo, cause error) ([]PAData, error)
 }
