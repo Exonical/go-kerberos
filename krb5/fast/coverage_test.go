@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
@@ -55,7 +56,7 @@ func TestFASTValidationAndReplyKey(t *testing.T) {
 	if ChecksumType(999) != 0 {
 		t.Fatal("unknown checksum mapping accepted")
 	}
-	restore := crypto.SetRandomSource(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+	restore := random.SetSource(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
 	if got := randomNonce(); got != 0x7fffffff {
 		t.Fatalf("nonce = %08x", got)
 	}

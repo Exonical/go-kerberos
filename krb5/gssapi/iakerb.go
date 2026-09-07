@@ -14,6 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
@@ -519,7 +520,7 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 				return nil, err
 			}
 			subkey.KeyValue = make([]byte, etype.KeySize())
-			if _, err := io.ReadFull(crypto.RandomSource, subkey.KeyValue); err != nil {
+			if _, err := io.ReadFull(random.Reader(), subkey.KeyValue); err != nil {
 				return nil, err
 			}
 			finished, err := MarshalIAKERBFinished(subkey, i.conversation)

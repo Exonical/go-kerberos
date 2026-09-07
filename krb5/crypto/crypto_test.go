@@ -40,6 +40,18 @@ func TestPRFRFC8009Vectors(t *testing.T) {
 	}
 }
 
+func TestPRFPlusRejectsCounterOverflowBeforePRF(t *testing.T) {
+	etype, err := NewRegistry().Get(EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = prfPlus(etype, bytes.Repeat([]byte{0x11}, etype.KeySize()), nil,
+		256*PRFOutputSize(etype)+1)
+	if err == nil || err.Error() != "CF2: shared info too long" {
+		t.Fatalf("prfPlus error = %v, want counter-overflow error", err)
+	}
+}
+
 func TestCamelliaRegistry(t *testing.T) {
 	registry := NewRegistry()
 	for _, test := range []struct {

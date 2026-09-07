@@ -14,6 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -149,13 +150,13 @@ func BuildAPReqWithOptions(creds *client.Credentials, opts types.APOptions, now 
 		subkey = copyEncryptionKeyPointer(options.SubKey)
 	} else if !options.NoSubKey {
 		subkeyValue := make([]byte, etype.KeySize())
-		if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+		if _, err := io.ReadFull(random.Reader(), subkeyValue); err != nil {
 			return nil, nil, fmt.Errorf("build AP-REQ subkey: %w", err)
 		}
 		subkey = &protocol.EncryptionKey{KeyType: creds.Key.KeyType, KeyValue: subkeyValue}
 	}
 	var sequenceBytes [4]byte
-	if _, err := io.ReadFull(crypto.RandomSource, sequenceBytes[:]); err != nil {
+	if _, err := io.ReadFull(random.Reader(), sequenceBytes[:]); err != nil {
 		return nil, nil, fmt.Errorf("build AP-REQ sequence number: %w", err)
 	}
 	sequence := binary.BigEndian.Uint32(sequenceBytes[:]) & 0x7fffffff

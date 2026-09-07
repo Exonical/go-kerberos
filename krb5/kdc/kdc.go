@@ -23,6 +23,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/klog"
 	"github.com/Exonical/go-kerberos/krb5/krberr"
@@ -767,7 +768,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		methodData := protocol.MethodData{{PADataType: otp.PADataChallenge,
 			PADataValue: marshalDER(otp.Challenge{Nonce: nonce, TokenInfo: tokenInfo})}}
 		cookie := make([]byte, 16)
-		if _, err := io.ReadFull(crypto.RandomSource, cookie); err != nil {
+		if _, err := io.ReadFull(random.Reader(), cookie); err != nil {
 			return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 		}
 		methodData = append(methodData, protocol.PAData{
@@ -1681,7 +1682,7 @@ func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName princi
 		return s.errorResponse(14, request.ReqBody.SName)
 	}
 	sessionValue := make([]byte, etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, sessionValue); err != nil {
+	if _, err := io.ReadFull(random.Reader(), sessionValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	now := s.now().UTC().Truncate(time.Second)
@@ -1841,7 +1842,7 @@ func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName princi
 
 func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *fastContext, replyPAs protocol.MethodData) []byte {
 	strengthenValue := make([]byte, armor.etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
+	if _, err := io.ReadFull(random.Reader(), strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
 	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
@@ -1903,7 +1904,7 @@ func (s *Server) wrapFASTASRep(reply protocol.ASRep, clientKey kdb.Key, armor *f
 
 func (s *Server) wrapFASTTGSRep(reply protocol.TGSRep, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext) []byte {
 	strengthenValue := make([]byte, armor.etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, strengthenValue); err != nil {
+	if _, err := io.ReadFull(random.Reader(), strengthenValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, &reply.Ticket.SName)
 	}
 	replyEType, err := crypto.NewRegistry().Get(reply.EncPart.EType)
@@ -2726,7 +2727,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
 	}
 	sessionValue := make([]byte, etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, sessionValue); err != nil {
+	if _, err := io.ReadFull(random.Reader(), sessionValue); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
 	now := s.now().UTC().Truncate(time.Second)
@@ -3631,7 +3632,7 @@ func (s *Server) spakeKey() ([]byte, error) {
 	defer s.spakeCookieMu.Unlock()
 	if len(s.spakeCookieKey) == 0 {
 		s.spakeCookieKey = make([]byte, 32)
-		if _, err := io.ReadFull(crypto.RandomSource, s.spakeCookieKey); err != nil {
+		if _, err := io.ReadFull(random.Reader(), s.spakeCookieKey); err != nil {
 			s.spakeCookieKey = nil
 			return nil, err
 		}

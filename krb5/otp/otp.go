@@ -9,6 +9,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -66,7 +67,7 @@ func NewNonce(now time.Time, armorKeyLength int) ([]byte, error) {
 	}
 	value := make([]byte, 4+armorKeyLength)
 	binary.BigEndian.PutUint32(value, uint32(now.Unix()))
-	if _, err := io.ReadFull(crypto.RandomSource, value[4:]); err != nil {
+	if _, err := io.ReadFull(random.Reader(), value[4:]); err != nil {
 		return nil, err
 	}
 	return value, nil

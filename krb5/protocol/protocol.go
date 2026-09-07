@@ -8,18 +8,22 @@ type PrincipalName struct {
 	NameString []string `krb5:"tag:1"`
 }
 
+// HostAddress identifies a network address in a Kerberos request or ticket.
 type HostAddress struct {
 	AddrType int32  `krb5:"tag:0"`
 	Address  []byte `krb5:"tag:1"`
 }
 
+// HostAddresses is a sequence of network addresses.
 type HostAddresses []HostAddress
 
+// AuthorizationDataEntry carries one typed authorization-data element.
 type AuthorizationDataEntry struct {
 	ADType int32  `krb5:"tag:0"`
 	ADData []byte `krb5:"tag:1"`
 }
 
+// AuthorizationData is a sequence of authorization-data elements.
 type AuthorizationData []AuthorizationDataEntry
 
 // KDCIssued is the RFC 4120 AD-KDC-ISSUED authorization-data payload.
@@ -58,6 +62,7 @@ type SupportedKDF struct {
 	KDF types.ObjectIdentifier `krb5:"tag:0"`
 }
 
+// PAData carries one preauthentication or method-data value.
 type PAData struct {
 	PADataType  int32  `krb5:"tag:1"`
 	PADataValue []byte `krb5:"tag:2"`
@@ -66,6 +71,7 @@ type PAData struct {
 // TypedData is the RFC 4120 KRB-ERROR e-data container.
 type TypedData []TypedDataEntry
 
+// TypedDataEntry carries one typed KRB-ERROR extension value.
 type TypedDataEntry struct {
 	DataType  int32  `krb5:"tag:0"`
 	DataValue []byte `krb5:"tag:1,optional"`
@@ -159,12 +165,14 @@ type PASPAKE struct {
 	EncData   *EncryptedData  `krb5:"tag:3,choice"`
 }
 
+// EncryptedData identifies the enctype and ciphertext of an encrypted value.
 type EncryptedData struct {
 	EType  int32   `krb5:"tag:0"`
 	KVNO   *uint32 `krb5:"tag:1,optional,signed"`
 	Cipher []byte  `krb5:"tag:2"`
 }
 
+// EncryptionKey contains an enctype and its key material.
 type EncryptionKey struct {
 	KeyType  int32  `krb5:"tag:0"`
 	KeyValue []byte `krb5:"tag:1"`
@@ -177,11 +185,13 @@ type ChangePasswdData struct {
 	TargetRealm *string        `krb5:"tag:2,optional"`
 }
 
+// Checksum identifies the checksum type and checksum bytes.
 type Checksum struct {
 	ChecksumType int32  `krb5:"tag:0"`
 	Checksum     []byte `krb5:"tag:1"`
 }
 
+// Ticket is the RFC 4120 service ticket.
 type Ticket struct {
 	TktVNO  int32         `krb5:"tag:0"`
 	Realm   string        `krb5:"tag:1"`
@@ -191,6 +201,7 @@ type Ticket struct {
 
 func (Ticket) ApplicationTag() int { return TagTicket }
 
+// EncTicketPart is the encrypted portion of a service ticket.
 type EncTicketPart struct {
 	Flags             types.TicketFlags   `krb5:"tag:0"`
 	Key               EncryptionKey       `krb5:"tag:1"`
@@ -207,6 +218,7 @@ type EncTicketPart struct {
 
 func (EncTicketPart) ApplicationTag() int { return TagEncTicketPart }
 
+// Authenticator binds a client identity and timestamp to an AP request.
 type Authenticator struct {
 	AuthenticatorVNO  int32              `krb5:"tag:0"`
 	CRealm            string             `krb5:"tag:1"`
@@ -221,6 +233,7 @@ type Authenticator struct {
 
 func (Authenticator) ApplicationTag() int { return TagAuthenticator }
 
+// KDCReq is the common RFC 4120 KDC request body.
 type KDCReq struct {
 	PVNO    int32      `krb5:"tag:1"`
 	MsgType int32      `krb5:"tag:2"`
@@ -228,6 +241,7 @@ type KDCReq struct {
 	ReqBody KDCReqBody `krb5:"tag:4"`
 }
 
+// KDCReqBody contains the requested ticket parameters.
 type KDCReqBody struct {
 	KDCOptions           types.KDCOptions    `krb5:"tag:0"`
 	CName                *PrincipalName      `krb5:"tag:1,optional"`
@@ -243,6 +257,7 @@ type KDCReqBody struct {
 	AdditionalTickets    []Ticket            `krb5:"tag:11,optional"`
 }
 
+// ASReq is an initial-authentication request.
 type ASReq struct {
 	PVNO    int32      `krb5:"tag:1"`
 	MsgType int32      `krb5:"tag:2"`
@@ -252,6 +267,7 @@ type ASReq struct {
 
 func (ASReq) ApplicationTag() int { return TagASReq }
 
+// TGSReq is a ticket-granting request.
 type TGSReq struct {
 	PVNO    int32      `krb5:"tag:1"`
 	MsgType int32      `krb5:"tag:2"`
@@ -261,6 +277,7 @@ type TGSReq struct {
 
 func (TGSReq) ApplicationTag() int { return TagTGSReq }
 
+// KDCRep is the common RFC 4120 KDC reply structure.
 type KDCRep struct {
 	PVNO    int32         `krb5:"tag:0"`
 	MsgType int32         `krb5:"tag:1"`
@@ -271,6 +288,7 @@ type KDCRep struct {
 	EncPart EncryptedData `krb5:"tag:6"`
 }
 
+// ASRep is an initial-authentication reply.
 type ASRep struct {
 	PVNO    int32         `krb5:"tag:0"`
 	MsgType int32         `krb5:"tag:1"`
@@ -283,6 +301,7 @@ type ASRep struct {
 
 func (ASRep) ApplicationTag() int { return TagASRep }
 
+// TGSRep is a ticket-granting reply.
 type TGSRep struct {
 	PVNO    int32         `krb5:"tag:0"`
 	MsgType int32         `krb5:"tag:1"`
@@ -295,6 +314,7 @@ type TGSRep struct {
 
 func (TGSRep) ApplicationTag() int { return TagTGSRep }
 
+// EncASRepPart is the encrypted portion of an AS reply.
 type EncASRepPart struct {
 	Key           EncryptionKey       `krb5:"tag:0"`
 	LastReq       LastReq             `krb5:"tag:1"`
@@ -312,6 +332,7 @@ type EncASRepPart struct {
 
 func (EncASRepPart) ApplicationTag() int { return TagEncASRepPart }
 
+// EncTGSRepPart is the encrypted portion of a TGS reply.
 type EncTGSRepPart struct {
 	Key           EncryptionKey       `krb5:"tag:0"`
 	LastReq       LastReq             `krb5:"tag:1"`
@@ -329,6 +350,7 @@ type EncTGSRepPart struct {
 
 func (EncTGSRepPart) ApplicationTag() int { return TagEncTGSRepPart }
 
+// APReq is an application request carrying a ticket and authenticator.
 type APReq struct {
 	PVNO          int32           `krb5:"tag:0"`
 	MsgType       int32           `krb5:"tag:1"`
@@ -339,6 +361,7 @@ type APReq struct {
 
 func (APReq) ApplicationTag() int { return TagAPReq }
 
+// APRep is the application reply to an AP request.
 type APRep struct {
 	PVNO    int32         `krb5:"tag:0"`
 	MsgType int32         `krb5:"tag:1"`
@@ -347,6 +370,7 @@ type APRep struct {
 
 func (APRep) ApplicationTag() int { return TagAPRep }
 
+// KRBPriv carries encrypted private application data.
 type KRBPriv struct {
 	PVNO    int32         `krb5:"tag:0"`
 	MsgType int32         `krb5:"tag:1"`
@@ -355,6 +379,7 @@ type KRBPriv struct {
 
 func (KRBPriv) ApplicationTag() int { return TagKRBPriv }
 
+// KRBSafe carries integrity-protected application data.
 type KRBSafe struct {
 	PVNO     int32    `krb5:"tag:0"`
 	MsgType  int32    `krb5:"tag:1"`
@@ -364,6 +389,7 @@ type KRBSafe struct {
 
 func (KRBSafe) ApplicationTag() int { return TagKRBSafe }
 
+// SafeBody contains the data and addresses protected by a KRB-SAFE message.
 type SafeBody struct {
 	UserData  []byte              `krb5:"tag:0"`
 	Timestamp *types.KerberosTime `krb5:"tag:1,optional"`
@@ -373,6 +399,7 @@ type SafeBody struct {
 	RAddress  *HostAddress        `krb5:"tag:5,optional"`
 }
 
+// EncAPRepPart is the encrypted portion of an AP reply.
 type EncAPRepPart struct {
 	Ctime     types.KerberosTime `krb5:"tag:0"`
 	Cusec     int32              `krb5:"tag:1"`
@@ -382,6 +409,7 @@ type EncAPRepPart struct {
 
 func (EncAPRepPart) ApplicationTag() int { return TagEncAPRepPart }
 
+// EncKRBPrivPart is the encrypted portion of a KRB-PRIV message.
 type EncKRBPrivPart struct {
 	UserData  []byte              `krb5:"tag:0"`
 	Timestamp *types.KerberosTime `krb5:"tag:1,optional"`
@@ -430,6 +458,7 @@ type KrbCredInfo struct {
 	CAddr     HostAddresses       `krb5:"tag:10,optional"`
 }
 
+// KRBError is the RFC 4120 error reply.
 type KRBError struct {
 	PVNO      int32               `krb5:"tag:0"`
 	MsgType   int32               `krb5:"tag:1"`
@@ -448,6 +477,7 @@ type KRBError struct {
 
 func (KRBError) ApplicationTag() int { return TagKRBError }
 
+// MethodData is a sequence of preauthentication data values.
 type MethodData []PAData
 
 // Protocol transition padata types ([MS-SFU] section 2.2).
@@ -539,28 +569,35 @@ type KrbFastFinished struct {
 	TicketChecksum Checksum           `krb5:"tag:4"`
 }
 
+// ETypeInfoEntry describes a legacy enctype and salt.
 type ETypeInfoEntry struct {
 	EType int32   `krb5:"tag:0"`
 	Salt  *[]byte `krb5:"tag:1,optional"`
 }
 
+// ETypeInfo is a sequence of legacy enctype information entries.
 type ETypeInfo []ETypeInfoEntry
 
+// ETypeInfo2Entry describes an enctype, salt, and string-to-key parameters.
 type ETypeInfo2Entry struct {
 	EType     int32   `krb5:"tag:0"`
 	Salt      *string `krb5:"tag:1,optional"`
 	S2KParams []byte  `krb5:"tag:2,optional"`
 }
 
+// ETypeInfo2 is a sequence of modern enctype information entries.
 type ETypeInfo2 []ETypeInfo2Entry
 
+// LastReqEntry records the time of a previous request.
 type LastReqEntry struct {
 	LRType  int32              `krb5:"tag:0"`
 	LRValue types.KerberosTime `krb5:"tag:1"`
 }
 
+// LastReq is a sequence of previous-request records.
 type LastReq []LastReqEntry
 
+// TransitedEncoding records the transited-realm encoding in a ticket.
 type TransitedEncoding struct {
 	TrType   int32  `krb5:"tag:0"`
 	Contents []byte `krb5:"tag:1"`

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
@@ -140,7 +141,7 @@ func Keygen(group int32, w []byte, useM bool) (private, public []byte, err error
 		privateLen = nistGroupDefs[group].multLen
 	}
 	private = make([]byte, privateLen)
-	if _, err = io.ReadFull(crypto.RandomSource, private); err != nil {
+	if _, err = io.ReadFull(random.Reader(), private); err != nil {
 		return nil, nil, err
 	}
 	if group != GroupEdwards25519 {

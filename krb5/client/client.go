@@ -21,6 +21,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/hostrealm"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/kkdcp"
 	"github.com/Exonical/go-kerberos/krb5/krberr"
@@ -1403,7 +1404,7 @@ func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Pr
 		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, err
 	}
 	nonceBytes := make([]byte, 4)
-	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
+	if _, err := io.ReadFull(random.Reader(), nonceBytes); err != nil {
 		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange nonce: %w", err)
 	}
 	options := types.KDCRenewableOK | c.defaultKDCOptions(realm)
@@ -1435,7 +1436,7 @@ func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Pr
 	var subkey *protocol.EncryptionKey
 	if useFAST {
 		subkeyValue := make([]byte, etype.KeySize())
-		if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+		if _, err := io.ReadFull(random.Reader(), subkeyValue); err != nil {
 			return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("FAST TGS subkey: %w", err)
 		}
 		subkey = &protocol.EncryptionKey{KeyType: tgt.Key.KeyType, KeyValue: subkeyValue}
@@ -1928,7 +1929,7 @@ func (c *Client) newASReq(clientPrincipal principal.Principal, now time.Time) (p
 
 func (c *Client) newASReqForService(clientPrincipal, service principal.Principal, now time.Time) (protocol.ASReq, error) {
 	nonceBytes := make([]byte, 4)
-	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
+	if _, err := io.ReadFull(random.Reader(), nonceBytes); err != nil {
 		return protocol.ASReq{}, fmt.Errorf("AS exchange nonce: %w", err)
 	}
 	lifetime := 10 * time.Hour

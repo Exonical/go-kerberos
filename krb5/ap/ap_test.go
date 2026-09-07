@@ -11,6 +11,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -27,7 +28,7 @@ const (
 func TestAPReqRoundTripAndMutualAuth(t *testing.T) {
 	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x33}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x33}, 256)))
 	defer restore()
 
 	request, der, err := BuildAPReq(creds, types.APMutualRequired, now)
@@ -136,7 +137,7 @@ func TestVerifyAPReqWithSessionKeyRequiresOption(t *testing.T) {
 func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 	now := time.Date(2025, 2, 3, 4, 5, 6, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x44}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x44}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -155,7 +156,7 @@ func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 func TestVerifyAPReqRejectsExpiredTicket(t *testing.T) {
 	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(-6*time.Minute))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x55}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x55}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -292,7 +293,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 func TestVerifyAPReqRejectsClockSkew(t *testing.T) {
 	now := time.Date(2025, 4, 5, 6, 7, 8, 0, time.UTC)
 	creds, kt := apFixture(t, now.Add(-time.Hour), now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x66}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x66}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now.Add(-time.Hour))
 	if err != nil {
@@ -306,7 +307,7 @@ func TestVerifyAPReqRejectsClockSkew(t *testing.T) {
 func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 	now := time.Date(2025, 5, 6, 7, 8, 9, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x77}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x77}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -495,7 +496,7 @@ func TestVerifyAPReqReplayCacheRemainsBounded(t *testing.T) {
 func TestVerifyAPRepRejectsCTimeMismatch(t *testing.T) {
 	now := time.Date(2025, 6, 7, 8, 9, 10, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x88}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x88}, 256)))
 	defer restore()
 	request, der, err := BuildAPReq(creds, types.APMutualRequired, now)
 	if err != nil {
