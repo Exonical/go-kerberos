@@ -243,6 +243,44 @@ func TestConfigMalformedSection(t *testing.T) {
 	}
 }
 
+func TestParseUnifiedLegacyProfile(t *testing.T) {
+	cfg, err := Parse([]byte(`[libdefaults]
+default_realm = EXAMPLE.COM
+dns_lookup_kdc = true
+[realms]
+EXAMPLE.COM = {
+    kdc = kdc.example.com
+    admin_server = admin.example.com
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultRealm != "EXAMPLE.COM" || !cfg.DNSLookupKDC {
+		t.Fatalf("libdefaults = %#v", cfg)
+	}
+	if got := cfg.Realms["EXAMPLE.COM"]; len(got) != 2 ||
+		got[0] != "kdc.example.com" || got[1] != "admin.example.com" {
+		t.Fatalf("realm values = %#v", got)
+	}
+}
+
+func TestParseUnifiedLegacyNestedProfile(t *testing.T) {
+	cfg, err := Parse([]byte(`[realms]
+EXAMPLE.COM = {
+    auth_to_local_names = {
+        alice = admin
+    }
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RealmAuthToLocalNames["EXAMPLE.COM"]["alice"]; len(got) != 1 || got[0] != "admin" {
+		t.Fatalf("auth_to_local_names = %#v", cfg.RealmAuthToLocalNames)
+	}
+}
+
 func TestParseFileIncludesInPlaceAndNested(t *testing.T) {
 	dir := t.TempDir()
 	child := filepath.Join(dir, "child.conf")

@@ -12,12 +12,15 @@ import (
 
 	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/internal/binfmt"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
+// Version is the MIT FILE keytab format version.
 const Version uint16 = 0x0502
 const maxKeytabInput = 64 << 20
 
+// Entry mirrors an MIT keytab principal-key record.
 type Entry struct {
 	Principal principal.Principal
 	Timestamp int64
@@ -26,6 +29,7 @@ type Entry struct {
 	Key       []byte
 }
 
+// Keytab is a collection of MIT keytab entries.
 type Keytab struct {
 	Entries []Entry
 	mu      *sync.RWMutex
@@ -193,6 +197,7 @@ func entriesEqual(left, right Entry) bool {
 	return true
 }
 
+// Read decodes an MIT FILE keytab from r.
 func Read(r io.Reader) (*Keytab, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read keytab: nil reader")
@@ -244,6 +249,7 @@ func Read(r io.Reader) (*Keytab, error) {
 	return kt, nil
 }
 
+// Write encodes kt in the MIT FILE keytab format.
 func Write(w io.Writer, kt *Keytab) error {
 	if w == nil {
 		return fmt.Errorf("write keytab: nil writer")
@@ -277,6 +283,7 @@ func Write(w io.Writer, kt *Keytab) error {
 	return nil
 }
 
+// LookupPrincipal returns entries matching name.
 func (kt *Keytab) LookupPrincipal(name principal.Principal) ([]Entry, error) {
 	if kt == nil {
 		return nil, fmt.Errorf("lookup keytab principal: nil keytab")
@@ -290,6 +297,7 @@ func (kt *Keytab) LookupPrincipal(name principal.Principal) ([]Entry, error) {
 	return entries, nil
 }
 
+// LookupEnctype returns entries using enctype.
 func (kt *Keytab) LookupEnctype(enctype int32) ([]Entry, error) {
 	if kt == nil {
 		return nil, fmt.Errorf("lookup keytab enctype: nil keytab")
@@ -303,6 +311,7 @@ func (kt *Keytab) LookupEnctype(enctype int32) ([]Entry, error) {
 	return entries, nil
 }
 
+// LookupKVNO returns entries using kvno.
 func (kt *Keytab) LookupKVNO(kvno uint32) ([]Entry, error) {
 	if kt == nil {
 		return nil, fmt.Errorf("lookup keytab kvno: nil keytab")
@@ -316,101 +325,47 @@ func (kt *Keytab) LookupKVNO(kvno uint32) ([]Entry, error) {
 	return entries, nil
 }
 
-type keytabDecoder struct {
-	data []byte
-	off  int
-}
-
-func (d *keytabDecoder) remaining() int {
-	return len(d.data) - d.off
-}
-
-func (d *keytabDecoder) bytes(n int) ([]byte, error) {
-	if n < 0 || n > d.remaining() {
-		return nil, fmt.Errorf("truncated field")
-	}
-	value := d.data[d.off : d.off+n]
-	d.off += n
-	return value, nil
-}
-
-func (d *keytabDecoder) u8() (uint8, error) {
-	value, err := d.bytes(1)
-	if err != nil {
-		return 0, err
-	}
-	return value[0], nil
-}
-
-func (d *keytabDecoder) u16() (uint16, error) {
-	value, err := d.bytes(2)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint16(value), nil
-}
-
-func (d *keytabDecoder) u32() (uint32, error) {
-	value, err := d.bytes(4)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(value), nil
-}
-
-func (d *keytabDecoder) counted16() ([]byte, error) {
-	length, err := d.u16()
-	if err != nil {
-		return nil, err
-	}
-	value, err := d.bytes(int(length))
-	if err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
 func parseEntry(data []byte) (Entry, error) {
-	d := keytabDecoder{data: data}
-	count, err := d.u16()
+	d := binfmt.NewReader(data)
+	count, err := d.U16()
 	if err != nil {
 		return Entry{}, err
 	}
-	realm, err := d.counted16()
+	realm, err := d.Counted16()
 	if err != nil {
 		return Entry{}, err
 	}
 	components := make([]string, 0, int(count))
 	for i := uint16(0); i < count; i++ {
-		component, err := d.counted16()
+		component, err := d.Counted16()
 		if err != nil {
 			return Entry{}, err
 		}
 		components = append(components, string(component))
 	}
-	nameType, err := d.u32()
+	nameType, err := d.U32()
 	if err != nil {
 		return Entry{}, err
 	}
-	timestamp, err := d.u32()
+	timestamp, err := d.U32()
 	if err != nil {
 		return Entry{}, err
 	}
-	kvno8, err := d.u8()
+	kvno8, err := d.U8()
 	if err != nil {
 		return Entry{}, err
 	}
-	enctype, err := d.u16()
+	enctype, err := d.U16()
 	if err != nil {
 		return Entry{}, err
 	}
-	key, err := d.counted16()
+	key, err := d.Counted16()
 	if err != nil {
 		return Entry{}, err
 	}
 	kvno := uint32(kvno8)
-	if d.remaining() >= 4 {
-		kvno32, err := d.u32()
+	if d.Remaining() >= 4 {
+		kvno32, err := d.U32()
 		if err != nil {
 			return Entry{}, err
 		}
@@ -449,28 +404,23 @@ func marshalEntry(entry Entry) ([]byte, error) {
 	}
 	var body bytes.Buffer
 	_ = binary.Write(&body, binary.BigEndian, uint16(len(entry.Principal.Components)))
-	writeCounted16(&body, []byte(entry.Principal.Realm))
+	binfmt.WriteCounted16(&body, []byte(entry.Principal.Realm))
 	for _, component := range entry.Principal.Components {
 		if len(component) > int(^uint16(0)) {
 			return nil, fmt.Errorf("principal component is too long")
 		}
-		writeCounted16(&body, []byte(component))
+		binfmt.WriteCounted16(&body, []byte(component))
 	}
 	_ = binary.Write(&body, binary.BigEndian, uint32(entry.Principal.NameType))
 	_ = binary.Write(&body, binary.BigEndian, uint32(entry.Timestamp))
 	_ = body.WriteByte(byte(entry.KVNO))
 	_ = binary.Write(&body, binary.BigEndian, uint16(entry.Enctype))
-	writeCounted16(&body, entry.Key)
+	binfmt.WriteCounted16(&body, entry.Key)
 	_ = binary.Write(&body, binary.BigEndian, entry.KVNO)
 	if body.Len() > 1<<31-1 {
 		return nil, fmt.Errorf("keytab entry is too long")
 	}
 	return body.Bytes(), nil
-}
-
-func writeCounted16(w *bytes.Buffer, value []byte) {
-	_ = binary.Write(w, binary.BigEndian, uint16(len(value)))
-	_, _ = w.Write(value)
 }
 
 func principalEqual(left, right principal.Principal) bool {
