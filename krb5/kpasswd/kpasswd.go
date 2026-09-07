@@ -14,7 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/transport"
@@ -439,14 +439,14 @@ func (c *Client) clockSkew() time.Duration {
 	return 5 * time.Minute
 }
 
-func decodeKRBError(data []byte) (*krberrors.KRBError, bool) {
+func decodeKRBError(data []byte) (*krberr.KRBError, bool) {
 	var value protocol.KRBError
 	if err := asn1.Unmarshal(data, &value); err != nil {
 		return nil, false
 	}
 	server := append([]string(nil), value.SName.NameString...)
-	return krberrors.NewKRBError(
-		krberrors.ErrorCode(value.ErrorCode),
+	return krberr.NewKRBError(
+		krberr.ErrorCode(value.ErrorCode),
 		strings.Join(server, "/")+"@"+value.Realm,
 		value.Realm, value.STime.Time, value.Susec, value.EData,
 	), true

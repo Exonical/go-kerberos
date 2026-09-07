@@ -5,8 +5,8 @@ import (
 	stderrors "errors"
 	"time"
 
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -119,7 +119,7 @@ func constrainTicketTimes(now time.Time, result KDCPolicyResult,
 
 func policyErrorCode(err error) int32 {
 	code := int32(kdcErrPolicy)
-	var kerberosError *krberrors.KRBError
+	var kerberosError *krberr.KRBError
 	if stderrors.As(err, &kerberosError) {
 		candidate := int32(kerberosError.Code)
 		if candidate >= 0 && candidate <= 128 {

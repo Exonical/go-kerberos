@@ -142,6 +142,7 @@ func TestKeyringRetrieveMapsMITMatchFlags(t *testing.T) {
 	cache := resolveKeyringForTest(t, "process:"+name+":cache")
 	defer cache.Destroy()
 	value := testCache().Credentials[0]
+	value.EndTime = uint32(time.Now().Unix()) + 60
 	if err := storeKeyringForTest(t, cache, value); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +154,25 @@ func TestKeyringRetrieveMapsMITMatchFlags(t *testing.T) {
 	}
 	if got.Server.Realm != value.Server.Realm {
 		t.Fatalf("retrieved credential realm = %q, want %q", got.Server.Realm, value.Server.Realm)
+	}
+
+	now := uint32(time.Now().Unix())
+	value.AuthTime = now - 60
+	value.EndTime = now + 60
+	if err := writeKeyringForTest(t, cache, &Cache{
+		DefaultPrincipal: value.Client,
+		Credentials:      []Credential{value},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	match = value
+	match.AuthTime = now
+	got, err = cache.Retrieve(match, MITMatchTimes)
+	if err != nil {
+		t.Fatalf("Retrieve with MIT time flags: %v", err)
+	}
+	if got.EndTime != value.EndTime {
+		t.Fatalf("retrieved credential end time = %d, want %d", got.EndTime, value.EndTime)
 	}
 }
 

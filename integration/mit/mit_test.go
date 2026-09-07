@@ -17,9 +17,9 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/spake"
 )
@@ -72,7 +72,7 @@ func TestGoKeytabToMITKlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create Go keytab: %v", err)
 	}
-	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+	kt := keytab.New(keytab.Entry{
 		Principal: principal.Principal{
 			Realm:      testenv.RealmName,
 			NameType:   principal.NTSrvHst,
@@ -81,7 +81,7 @@ func TestGoKeytabToMITKlist(t *testing.T) {
 		KVNO:    1,
 		Enctype: 17,
 		Key:     []byte{1, 2, 3, 4},
-	}}}
+	})
 	if err := keytab.Write(output, kt); err != nil {
 		output.Close()
 		t.Fatalf("Go keytab writer: %v", err)
@@ -192,8 +192,8 @@ func TestGoClientCamelliaAgainstMITKDC(t *testing.T) {
 		Now:    func() time.Time { return time.Now().UTC().Truncate(time.Second) },
 	}).ASExchange(context.Background(), clientPrincipal, "alice-password")
 	if err != nil {
-		var kerberosError *krberrors.KRBError
-		if errors.As(err, &kerberosError) && kerberosError.Code == krberrors.KDCErrEtypeNosp {
+		var kerberosError *krberr.KRBError
+		if errors.As(err, &kerberosError) && kerberosError.Code == krberr.KDCErrEtypeNosupp {
 			t.Skipf("installed MIT KDC rejects Camellia AS requests with KDC_ERR_ETYPE_NOSUPP: %v", err)
 		}
 		t.Fatalf("Go Camellia AS exchange: %v", err)

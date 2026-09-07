@@ -31,7 +31,7 @@ type Entry struct {
 
 // Keytab is a collection of MIT keytab entries.
 type Keytab struct {
-	Entries []Entry
+	entries []Entry
 	mu      *sync.RWMutex
 }
 
@@ -87,6 +87,15 @@ func ResolveClientWithConfig(name string, cfg *config.Config) (*Keytab, error) {
 	return resolveWithConfig(name, cfg, true)
 }
 
+// New creates an in-memory keytab containing entries.
+func New(entries ...Entry) *Keytab {
+	kt := &Keytab{mu: &sync.RWMutex{}}
+	for _, entry := range entries {
+		kt.entries = append(kt.entries, cloneEntry(entry))
+	}
+	return kt
+}
+
 func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, error) {
 	expand := false
 	if name == "" {
@@ -130,7 +139,7 @@ func (kt *Keytab) AddEntry(entry Entry) error {
 	}
 	mu := kt.mutex()
 	mu.Lock()
-	kt.Entries = append(kt.Entries, cloneEntry(entry))
+	kt.entries = append(kt.entries, cloneEntry(entry))
 	mu.Unlock()
 	return nil
 }
@@ -143,13 +152,40 @@ func (kt *Keytab) RemoveEntry(entry Entry) error {
 	mu := kt.mutex()
 	mu.Lock()
 	defer mu.Unlock()
-	filtered := kt.Entries[:0]
-	for _, candidate := range kt.Entries {
+	filtered := kt.entries[:0]
+	for _, candidate := range kt.entries {
 		if !entriesEqual(candidate, entry) {
 			filtered = append(filtered, candidate)
 		}
 	}
-	kt.Entries = filtered
+	kt.entries = filtered
+	return nil
+}
+
+// Clear removes all entries from a keytab.
+func (kt *Keytab) Clear() error {
+	if kt == nil {
+		return fmt.Errorf("clear keytab: nil keytab")
+	}
+	mu := kt.mutex()
+	mu.Lock()
+	kt.entries = nil
+	mu.Unlock()
+	return nil
+}
+
+// SetEntry replaces the entry at index.
+func (kt *Keytab) SetEntry(index int, entry Entry) error {
+	if kt == nil {
+		return fmt.Errorf("set keytab entry: nil keytab")
+	}
+	mu := kt.mutex()
+	mu.Lock()
+	defer mu.Unlock()
+	if index < 0 || index >= len(kt.entries) {
+		return fmt.Errorf("set keytab entry: index out of range")
+	}
+	kt.entries[index] = cloneEntry(entry)
 	return nil
 }
 
@@ -176,11 +212,16 @@ func (kt *Keytab) EntriesSnapshot() []Entry {
 	mu := kt.mutex()
 	mu.RLock()
 	defer mu.RUnlock()
-	entries := make([]Entry, len(kt.Entries))
-	for i, entry := range kt.Entries {
+	entries := make([]Entry, len(kt.entries))
+	for i, entry := range kt.entries {
 		entries[i] = cloneEntry(entry)
 	}
 	return entries
+}
+
+// Entries returns a deep copy of the current keytab entries.
+func (kt *Keytab) Entries() []Entry {
+	return kt.EntriesSnapshot()
 }
 
 func entriesEqual(left, right Entry) bool {
@@ -244,7 +285,7 @@ func Read(r io.Reader) (*Keytab, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read keytab record: %w", err)
 		}
-		kt.Entries = append(kt.Entries, entry)
+		kt.entries = append(kt.entries, entry)
 	}
 	return kt, nil
 }
@@ -283,46 +324,43 @@ func Write(w io.Writer, kt *Keytab) error {
 	return nil
 }
 
-// LookupPrincipal returns entries matching name.
-func (kt *Keytab) LookupPrincipal(name principal.Principal) ([]Entry, error) {
+// LookupPrincipal returns the first entry matching name.
+func (kt *Keytab) LookupPrincipal(name principal.Principal) (Entry, bool) {
 	if kt == nil {
-		return nil, fmt.Errorf("lookup keytab principal: nil keytab")
+		return Entry{}, false
 	}
-	entries := make([]Entry, 0)
 	for _, entry := range kt.EntriesSnapshot() {
 		if principalEqual(entry.Principal, name) {
-			entries = append(entries, entry)
+			return entry, true
 		}
 	}
-	return entries, nil
+	return Entry{}, false
 }
 
-// LookupEnctype returns entries using enctype.
-func (kt *Keytab) LookupEnctype(enctype int32) ([]Entry, error) {
+// LookupEnctype returns the first entry using enctype.
+func (kt *Keytab) LookupEnctype(enctype int32) (Entry, bool) {
 	if kt == nil {
-		return nil, fmt.Errorf("lookup keytab enctype: nil keytab")
+		return Entry{}, false
 	}
-	entries := make([]Entry, 0)
 	for _, entry := range kt.EntriesSnapshot() {
 		if entry.Enctype == enctype {
-			entries = append(entries, entry)
+			return entry, true
 		}
 	}
-	return entries, nil
+	return Entry{}, false
 }
 
-// LookupKVNO returns entries using kvno.
-func (kt *Keytab) LookupKVNO(kvno uint32) ([]Entry, error) {
+// LookupKVNO returns the first entry using kvno.
+func (kt *Keytab) LookupKVNO(kvno uint32) (Entry, bool) {
 	if kt == nil {
-		return nil, fmt.Errorf("lookup keytab kvno: nil keytab")
+		return Entry{}, false
 	}
-	entries := make([]Entry, 0)
 	for _, entry := range kt.EntriesSnapshot() {
 		if entry.KVNO == kvno {
-			entries = append(entries, entry)
+			return entry, true
 		}
 	}
-	return entries, nil
+	return Entry{}, false
 }
 
 func parseEntry(data []byte) (Entry, error) {

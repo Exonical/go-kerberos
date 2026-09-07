@@ -113,15 +113,15 @@ func AcquireCredentialFrom(ctx context.Context, kclient *client.Client, name *pr
 			if err != nil {
 				return nil, fmt.Errorf("GSS acquire credential client keytab: %w", err)
 			}
-			entries, err := kt.LookupPrincipal(*name)
-			if err != nil || len(entries) == 0 {
+			entry, ok := kt.LookupPrincipal(*name)
+			if !ok {
 				return nil, fmt.Errorf("GSS acquire credential client keytab: principal not found")
 			}
 			service := principal.Principal{
 				Realm: name.Realm, NameType: principal.NTSrvInstance,
 				Components: []string{"krbtgt", name.Realm},
 			}
-			creds, err := kclient.ASExchangeServiceWithKey(ctx, *name, entries[0], service)
+			creds, err := kclient.ASExchangeServiceWithKey(ctx, *name, entry, service)
 			if err != nil {
 				return nil, fmt.Errorf("GSS acquire credential client keytab: %w", err)
 			}

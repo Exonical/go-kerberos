@@ -31,7 +31,7 @@ cryptographic implementation, file-format parser, or KDC implementation.
 | `krb5/preauth` | Preauthentication data and mechanisms, including encrypted timestamp. |
 | `krb5/client` | High-level password, keytab, and service-ticket client flows. |
 | `krb5/ap` | AP-REQ/AP-REP application exchange. |
-| `krb5/errors` | Sentinel and typed Kerberos errors with safe metadata. |
+| `krb5/krberr` | Sentinel and typed Kerberos errors with safe metadata. |
 | `internal/testenv` | Disposable, hermetic test realm and dependency helpers. |
 | `integration/mit` | MIT krb5 process and interoperability harness helpers. |
 | `integration/fixtures` | Reproducible synthetic fixture generation and metadata. |

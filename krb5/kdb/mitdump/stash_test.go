@@ -16,10 +16,10 @@ import (
 func TestParseStashKeytabSelectsHighestKVNO(t *testing.T) {
 	realm := "STASH.TEST"
 	name := principal.Principal{Realm: realm, NameType: principal.NTPrincipal, Components: []string{"K", "M"}}
-	entries := &keytab.Keytab{Entries: []keytab.Entry{
-		{Principal: name, KVNO: 3, Enctype: crypto.EnctypeAES256SHA1, Key: bytes.Repeat([]byte{3}, 32)},
-		{Principal: name, KVNO: 5, Enctype: crypto.EnctypeAES256SHA1, Key: bytes.Repeat([]byte{5}, 32)},
-	}}
+	entries := keytab.New(
+		keytab.Entry{Principal: name, KVNO: 3, Enctype: crypto.EnctypeAES256SHA1, Key: bytes.Repeat([]byte{3}, 32)},
+		keytab.Entry{Principal: name, KVNO: 5, Enctype: crypto.EnctypeAES256SHA1, Key: bytes.Repeat([]byte{5}, 32)},
+	)
 	var data bytes.Buffer
 	if err := keytab.Write(&data, entries); err != nil {
 		t.Fatal(err)
@@ -145,13 +145,13 @@ func TestParseStashRejectsMalformedLegacyData(t *testing.T) {
 }
 
 func TestParseStashRejectsMissingKeytabPrincipal(t *testing.T) {
-	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+	kt := keytab.New(keytab.Entry{
 		Principal: principal.Principal{
 			Realm: "STASH.TEST", NameType: principal.NTPrincipal,
 			Components: []string{"not", "K/M"},
 		},
 		KVNO: 1, Enctype: crypto.EnctypeAES256SHA1, Key: bytes.Repeat([]byte{1}, 32),
-	}}}
+	})
 	var data bytes.Buffer
 	if err := keytab.Write(&data, kt); err != nil {
 		t.Fatal(err)

@@ -179,10 +179,10 @@ func TestReadKeytabV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if len(kt.Entries) != 1 {
-		t.Fatalf("entries = %d, want 1", len(kt.Entries))
+	if len(kt.Entries()) != 1 {
+		t.Fatalf("entries = %d, want 1", len(kt.Entries()))
 	}
-	entry := kt.Entries[0]
+	entry := kt.Entries()[0]
 	if entry.Principal.Realm != "REALM" ||
 		entry.Principal.NameType != principal.NTPrincipal ||
 		len(entry.Principal.Components) != 1 ||
@@ -232,9 +232,9 @@ func TestReadKeytabMultiComponentAndUnknownEnctype(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if len(kt.Entries) != 1 || kt.Entries[0].Enctype != 999 ||
-		len(kt.Entries[0].Principal.Components) != 2 {
-		t.Fatalf("parsed entry = %#v", kt.Entries)
+	if len(kt.Entries()) != 1 || kt.Entries()[0].Enctype != 999 ||
+		len(kt.Entries()[0].Principal.Components) != 2 {
+		t.Fatalf("parsed entry = %#v", kt.Entries())
 	}
 }
 
@@ -260,31 +260,28 @@ func TestKeytabNegativeLengthHoleIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read with hole: %v", err)
 	}
-	if len(kt.Entries) != 1 {
-		t.Fatalf("entries after hole = %d, want 1", len(kt.Entries))
+	if len(kt.Entries()) != 1 {
+		t.Fatalf("entries after hole = %d, want 1", len(kt.Entries()))
 	}
 }
 
 func TestWriteKeytabAndLookups(t *testing.T) {
 	p := principal.Principal{Realm: "REALM", NameType: principal.NTPrincipal, Components: []string{"alice"}}
-	kt := &Keytab{Entries: []Entry{
-		{Principal: p, Timestamp: 100, KVNO: 7, Enctype: 17, Key: []byte{1, 2, 3, 4}},
-		{Principal: p, Timestamp: 101, KVNO: 8, Enctype: 18, Key: []byte{5, 6, 7, 8}},
-	}}
+	kt := New(
+		Entry{Principal: p, Timestamp: 100, KVNO: 7, Enctype: 17, Key: []byte{1, 2, 3, 4}},
+		Entry{Principal: p, Timestamp: 101, KVNO: 8, Enctype: 18, Key: []byte{5, 6, 7, 8}},
+	)
 	var out bytes.Buffer
 	if err := Write(&out, kt); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	for _, lookup := range []func() ([]Entry, error){
-		func() ([]Entry, error) { return kt.LookupPrincipal(p) },
-		func() ([]Entry, error) { return kt.LookupEnctype(18) },
-		func() ([]Entry, error) { return kt.LookupKVNO(8) },
+	for _, lookup := range []func() (Entry, bool){
+		func() (Entry, bool) { return kt.LookupPrincipal(p) },
+		func() (Entry, bool) { return kt.LookupEnctype(18) },
+		func() (Entry, bool) { return kt.LookupKVNO(8) },
 	} {
-		entries, err := lookup()
-		if err != nil {
-			t.Fatalf("lookup: %v", err)
-		}
-		if len(entries) == 0 {
+		_, ok := lookup()
+		if !ok {
 			t.Fatal("lookup returned no entries")
 		}
 	}
@@ -322,8 +319,10 @@ func TestMemoryKeytabResolveSharesEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Entries = nil
-	if len(first.Entries) != 0 {
+	if err := first.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries()) != 0 {
 		t.Fatal("new MEMORY keytab was not empty")
 	}
 	entry := Entry{
@@ -337,14 +336,14 @@ func TestMemoryKeytabResolveSharesEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || len(second.Entries) != 1 ||
-		!entriesEqual(second.Entries[0], entry) {
-		t.Fatalf("shared MEMORY keytab = %#v", second.Entries)
+	if first != second || len(second.Entries()) != 1 ||
+		!entriesEqual(second.Entries()[0], entry) {
+		t.Fatalf("shared MEMORY keytab = %#v", second.Entries())
 	}
 	if err := second.RemoveEntry(entry); err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Entries) != 0 {
+	if len(first.Entries()) != 0 {
 		t.Fatal("MEMORY keytab removal was not shared")
 	}
 }
@@ -403,16 +402,13 @@ func TestMemoryKeytabConcurrentReadersAndWriters(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	entries, err := kt.LookupPrincipal(entry.Principal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) == 0 {
+	found, ok := kt.LookupPrincipal(entry.Principal)
+	if !ok {
 		t.Fatal("concurrent readers observed no entries")
 	}
-	entries[0].Key[0] = 99
-	again, err := kt.LookupPrincipal(entry.Principal)
-	if err != nil || len(again) == 0 || again[0].Key[0] != 1 {
-		t.Fatalf("lookup did not return an isolated snapshot: %#v, %v", again, err)
+	found.Key[0] = 99
+	again, ok := kt.LookupPrincipal(entry.Principal)
+	if !ok || again.Key[0] != 1 {
+		t.Fatalf("lookup did not return an isolated snapshot: %#v, %v", again, ok)
 	}
 }

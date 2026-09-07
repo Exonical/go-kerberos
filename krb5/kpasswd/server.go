@@ -322,10 +322,12 @@ func (s *Server) verifyRequest(data []byte) (*ap.VerifiedAPReq, error) {
 	}
 	kt := &keytab.Keytab{}
 	for enctype, key := range record.Keys {
-		kt.Entries = append(kt.Entries, keytab.Entry{
+		if err := kt.AddEntry(keytab.Entry{
 			Principal: service, KVNO: key.KVNO, Enctype: enctype,
 			Key: append([]byte(nil), key.Key...),
-		})
+		}); err != nil {
+			return nil, err
+		}
 	}
 	return ap.VerifyAPReq(kt, data, s.now(), 5*time.Minute)
 }

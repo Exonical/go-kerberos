@@ -7,7 +7,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -85,12 +85,12 @@ func TestSafeTamperAndChecksumValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadSafe(tampered, messageOptions(false, false, nil, testSender, 0, testNow)); !errors.Is(err, krberrors.ErrIntegrity) {
+	if _, err := ReadSafe(tampered, messageOptions(false, false, nil, testSender, 0, testNow)); !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("tampered safe error = %v, want integrity error", err)
 	}
 	wrongKey := messageOptions(false, false, nil, testSender, 0, testNow)
 	wrongKey.Key.KeyValue = []byte("fedcba9876543210")
-	if _, err := ReadSafe(der, wrongKey); !errors.Is(err, krberrors.ErrIntegrity) {
+	if _, err := ReadSafe(der, wrongKey); !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("wrong-key safe error = %v, want integrity error", err)
 	}
 
@@ -103,9 +103,9 @@ func TestSafeTamperAndChecksumValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var typed *krberrors.KRBError
+	var typed *krberr.KRBError
 	if _, err := ReadSafe(unkeyed, messageOptions(false, false, nil, testSender, 0, testNow)); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrInappCksum {
+		typed.Code != krberr.KRBAPErrInappCksum {
 		t.Fatalf("unkeyed checksum error = %v, want KRB_AP_ERR_INAPP_CKSUM", err)
 	}
 }
@@ -126,12 +126,12 @@ func TestPrivTamperAndWrongKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	readOpts := messageOptions(false, false, nil, testSender, 0, testNow)
-	if _, err := ReadPriv(tampered, readOpts); !errors.Is(err, krberrors.ErrIntegrity) {
+	if _, err := ReadPriv(tampered, readOpts); !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("tampered priv error = %v, want integrity error", err)
 	}
 	wrong := *readOpts
 	wrong.Key.KeyValue = []byte("fedcba9876543210")
-	if _, err := ReadPriv(der, &wrong); !errors.Is(err, krberrors.ErrIntegrity) {
+	if _, err := ReadPriv(der, &wrong); !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("wrong-key priv error = %v, want integrity error", err)
 	}
 }
@@ -142,22 +142,22 @@ func TestReplayAndAddressValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var typed *krberrors.KRBError
+	var typed *krberr.KRBError
 	wrongAddress := messageOptions(true, true,
 		testReceiver, &protocol.HostAddress{AddrType: 2, Address: []byte{192, 0, 2, 9}},
 		7, testNow)
 	if _, err := ReadSafe(safe, wrongAddress); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrBadAddr {
+		typed.Code != krberr.KRBAPErrBadAddr {
 		t.Fatalf("address error = %v, want KRB_AP_ERR_BADADDR", err)
 	}
 	wrongSequence := messageOptions(true, true, testReceiver, testSender, 8, testNow)
 	if _, err := ReadSafe(safe, wrongSequence); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrBadOrder {
+		typed.Code != krberr.KRBAPErrBadOrder {
 		t.Fatalf("sequence error = %v, want KRB_AP_ERR_BADORDER", err)
 	}
 	skewed := messageOptions(true, true, testReceiver, testSender, 7, testNow.Add(10*time.Minute))
 	if _, err := ReadSafe(safe, skewed); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrSkew {
+		typed.Code != krberr.KRBAPErrSkew {
 		t.Fatalf("skew error = %v, want KRB_AP_ERR_SKEW", err)
 	}
 }
@@ -199,13 +199,13 @@ func TestPrivAcceptsKpasswdStyleMessage(t *testing.T) {
 
 func TestMakeRequiresLocalAddress(t *testing.T) {
 	opts := messageOptions(false, false, nil, nil, 0, testNow)
-	var typed *krberrors.KRBError
+	var typed *krberr.KRBError
 	if _, err := MakeSafe([]byte("payload"), opts); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrBadAddr {
+		typed.Code != krberr.KRBAPErrBadAddr {
 		t.Fatalf("MakeSafe error = %v, want KRB_AP_ERR_BADADDR", err)
 	}
 	if _, err := MakePriv([]byte("payload"), opts); !errors.As(err, &typed) ||
-		typed.Code != krberrors.KRBAPErrBadAddr {
+		typed.Code != krberr.KRBAPErrBadAddr {
 		t.Fatalf("MakePriv error = %v, want KRB_AP_ERR_BADADDR", err)
 	}
 }
@@ -245,9 +245,9 @@ func TestReplayCacheRejectsDuplicateSafeAndPriv(t *testing.T) {
 			if err := test.read(opts); err != nil {
 				t.Fatal(err)
 			}
-			var typed *krberrors.KRBError
+			var typed *krberr.KRBError
 			if err := test.read(opts); !errors.As(err, &typed) ||
-				typed.Code != krberrors.KRBAPErrRepeat {
+				typed.Code != krberr.KRBAPErrRepeat {
 				t.Fatalf("duplicate error = %v, want KRB_AP_ERR_REPEAT", err)
 			}
 		})

@@ -419,7 +419,7 @@ func serverTestCredentials(t *testing.T, realm string) (*keytab.Keytab, *client.
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &keytab.Keytab{Entries: []keytab.Entry{{Principal: service, KVNO: kvno, Enctype: etypeID, Key: serviceKey}}},
+	return keytab.New(keytab.Entry{Principal: service, KVNO: kvno, Enctype: etypeID, Key: serviceKey}),
 		&client.Credentials{Client: cli, Server: service, Key: protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionKey},
 			AuthTime: types.KerberosTime{Time: now, Present: true}, EndTime: types.KerberosTime{Time: end, Present: true}, Ticket: ticket}
 }

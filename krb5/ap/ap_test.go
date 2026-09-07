@@ -11,9 +11,9 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
@@ -65,8 +65,8 @@ func TestVerifyAPReqExposesVerifiedCAMMACElements(t *testing.T) {
 	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
 	ticket := decodeTicket(t, creds.Ticket)
-	part := decryptTicket(t, kt.Entries[0].Key, ticket)
-	key := protocol.EncryptionKey{KeyType: apEtype, KeyValue: kt.Entries[0].Key}
+	part := decryptTicket(t, kt.Entries()[0].Key, ticket)
+	key := protocol.EncryptionKey{KeyType: apEtype, KeyValue: kt.Entries()[0].Key}
 	elements := protocol.AuthorizationData{{
 		ADType: protocol.ADAuthIndicator, ADData: []byte("password"),
 	}}
@@ -75,7 +75,7 @@ func TestVerifyAPReqExposesVerifiedCAMMACElements(t *testing.T) {
 		t.Fatal(err)
 	}
 	part.AuthorizationData = protected
-	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries()[0].Key, part)
 	creds.Ticket = mustMarshalAP(t, ticket)
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -95,11 +95,11 @@ func TestVerifyAPReqRejectsMalformedCAMMAC(t *testing.T) {
 	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
 	ticket := decodeTicket(t, creds.Ticket)
-	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part := decryptTicket(t, kt.Entries()[0].Key, ticket)
 	part.AuthorizationData = protocol.AuthorizationData{{
 		ADType: protocol.ADIfRelevant, ADData: []byte{0x30, 0x01, 0x00},
 	}}
-	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries()[0].Key, part)
 	creds.Ticket = mustMarshalAP(t, ticket)
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestVerifyAPReqWithSessionKeyRequiresOption(t *testing.T) {
 	now := time.Date(2025, 1, 3, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
 	ticket := decodeTicket(t, creds.Ticket)
-	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part := decryptTicket(t, kt.Entries()[0].Key, ticket)
 	ticket.EncPart.KVNO = nil
 	ticket.EncPart.Cipher = encryptTicket(t, creds.Key.KeyValue, part)
 	creds.Ticket = mustMarshalAP(t, ticket)
@@ -143,8 +143,12 @@ func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kt.Entries[0].Key = bytes.Repeat([]byte{0x99}, 32)
-	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrIntegrity) {
+	entry := kt.Entries()[0]
+	entry.Key = bytes.Repeat([]byte{0x99}, 32)
+	if err := kt.SetEntry(0, entry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrIntegrity", err)
 	}
 }
@@ -158,7 +162,7 @@ func TestVerifyAPReqRejectsExpiredTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketExpired) {
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberr.ErrTicketExpired) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrTicketExpired", err)
 	}
 }
@@ -170,7 +174,7 @@ func TestVerifyAPReqRejectsNotYetValidTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketNotYetValid) {
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberr.ErrTicketNotYetValid) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrTicketNotYetValid", err)
 	}
 }
@@ -219,7 +223,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 				AuthTime: present(500), StartTime: kerberosTime(time.Unix(1400, 0).UTC()),
 				EndTime: present(1500),
 			},
-			want: krberrors.ErrTicketNotYetValid,
+			want: krberr.ErrTicketNotYetValid,
 		},
 		{
 			name: "end within clock skew",
@@ -241,7 +245,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 				AuthTime: present(500), StartTime: kerberosTime(time.Unix(500, 0).UTC()),
 				EndTime: present(600),
 			},
-			want: krberrors.ErrTicketExpired,
+			want: krberr.ErrTicketExpired,
 		},
 	}
 	for _, test := range tests {
@@ -270,7 +274,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 	if err := ticketValid(protocol.EncTicketPart{
 		AuthTime: present(boundary - 200), StartTime: start,
 		EndTime: present(boundary + 500),
-	}, boundaryNow, skew); !errors.Is(err, krberrors.ErrTicketNotYetValid) {
+	}, boundaryNow, skew); !errors.Is(err, krberr.ErrTicketNotYetValid) {
 		t.Fatalf("Y2038-boundary start result = %v, want ErrTicketNotYetValid", err)
 	}
 	boundaryNow = time.Unix(boundary+100, 0).UTC()
@@ -281,7 +285,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 	}
 	if err := ticketValid(protocol.EncTicketPart{
 		AuthTime: present(boundary - 1000), EndTime: present(boundary - 300),
-	}, boundaryNow, skew); !errors.Is(err, krberrors.ErrTicketExpired) {
+	}, boundaryNow, skew); !errors.Is(err, krberr.ErrTicketExpired) {
 		t.Fatalf("Y2038-boundary end result = %v, want ErrTicketExpired", err)
 	}
 }
@@ -295,7 +299,7 @@ func TestVerifyAPReqRejectsClockSkew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrClockSkew) {
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberr.ErrClockSkew) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrClockSkew", err)
 	}
 }
@@ -310,9 +314,9 @@ func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	ticket := decodeTicket(t, creds.Ticket)
-	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part := decryptTicket(t, kt.Entries()[0].Key, ticket)
 	part.CName.NameString[0] = "bob"
-	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries()[0].Key, part)
 	creds.Ticket = mustMarshalAP(t, ticket)
 	_, mismatchDER, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -348,7 +352,7 @@ func TestVerifyAPReqWithPersistentReplayCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := VerifyAPReqWithOptions(kt, der, now, 5*time.Minute,
-		VerifyAPReqOptions{ReplayCache: cache}); !errors.Is(err, krberrors.ErrReplay) {
+		VerifyAPReqOptions{ReplayCache: cache}); !errors.Is(err, krberr.ErrReplay) {
 		t.Fatalf("second verification error = %v, want replay", err)
 	}
 }
@@ -362,10 +366,12 @@ func TestVerifyAPReqReplayIdentityIncludesAuthenticatorCiphertext(t *testing.T) 
 		Realm: apRealm, NameType: principal.NTSrvHst,
 		Components: []string{"host", "other.test"},
 	}
-	kt.Entries = append(kt.Entries, keytab.Entry{
+	if err := kt.AddEntry(keytab.Entry{
 		Principal: otherService, KVNO: 1, Enctype: apEtype,
-		Key: append([]byte(nil), kt.Entries[0].Key...),
-	})
+		Key: append([]byte(nil), kt.Entries()[0].Key...),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	other := *creds
 	other.Server = otherService
 	ticket := decodeTicket(t, other.Ticket)
@@ -396,15 +402,15 @@ func TestVerifyAPReqRejectsInvalidTicket(t *testing.T) {
 	now := time.Date(2025, 5, 10, 7, 8, 9, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
 	ticket := decodeTicket(t, creds.Ticket)
-	part := decryptTicket(t, kt.Entries[0].Key, ticket)
+	part := decryptTicket(t, kt.Entries()[0].Key, ticket)
 	part.Flags |= types.TicketInvalid
-	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries[0].Key, part)
+	ticket.EncPart.Cipher = encryptTicket(t, kt.Entries()[0].Key, part)
 	creds.Ticket = mustMarshalAP(t, ticket)
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberrors.ErrTicketInvalid) {
+	if _, err := VerifyAPReq(kt, der, now, 5*time.Minute); !errors.Is(err, krberr.ErrTicketInvalid) {
 		t.Fatalf("VerifyAPReq error = %v, want ErrTicketInvalid", err)
 	}
 }
@@ -428,7 +434,7 @@ func TestVerifyAPReqExpiresReplayEntries(t *testing.T) {
 	replayCache.Unlock()
 
 	expiredAt := now.Add(10 * time.Minute)
-	if _, err := VerifyAPReq(kt, der, expiredAt, 5*time.Minute); !errors.Is(err, krberrors.ErrClockSkew) {
+	if _, err := VerifyAPReq(kt, der, expiredAt, 5*time.Minute); !errors.Is(err, krberr.ErrClockSkew) {
 		t.Fatalf("expired authenticator error = %v, want ErrClockSkew", err)
 	}
 	replayCache.Lock()
@@ -551,9 +557,9 @@ func apFixture(t *testing.T, start, end time.Time) (*client.Credentials, *keytab
 			Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
 			StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
 			Ticket: mustMarshalAP(t, ticket),
-		}, &keytab.Keytab{Entries: []keytab.Entry{{
+		}, keytab.New(keytab.Entry{
 			Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
-		}}}
+		})
 }
 
 func encryptTicket(t *testing.T, key []byte, part protocol.EncTicketPart) []byte {

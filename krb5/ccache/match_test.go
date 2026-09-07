@@ -128,6 +128,25 @@ func TestRetrieveDefaultsToNonUserToUserCredentials(t *testing.T) {
 	}
 }
 
+func TestMITMatcherDoesNotRequireAuthTimeForTimeMatch(t *testing.T) {
+	client := mustMatchPrincipal(t, "alice@EXAMPLE.COM")
+	server := mustMatchPrincipal(t, "host/server@EXAMPLE.COM")
+	value := Credential{
+		Client:   *client,
+		Server:   *server,
+		AuthTime: 10,
+		EndTime:  20,
+	}
+	tag := value
+	tag.AuthTime = 30
+	if !credentialMatchesMIT(value, tag, MITMatchTimes) {
+		t.Fatal("MIT matcher rejected a credential with a sufficient end time")
+	}
+	if credentialMatches(value, tag, MapTCFlags(MITMatchTimes)) {
+		t.Fatal("KCM matcher unexpectedly accepted the divergent time case")
+	}
+}
+
 func TestRetrieveServerNameOnlyIgnoresServerRealm(t *testing.T) {
 	client := mustMatchPrincipal(t, "alice@EXAMPLE.COM")
 	stored := mustMatchPrincipal(t, "host/server@OTHER.COM")

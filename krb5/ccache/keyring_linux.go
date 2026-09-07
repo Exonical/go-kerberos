@@ -456,7 +456,6 @@ func (h *keyringHandle) remove(match Credential, flags uint32) error {
 	if err != nil {
 		return fmt.Errorf("ccache: list KEYRING cache: %w", err)
 	}
-	wireFlags := MapTCFlags(flags)
 	found := false
 	for _, id := range ids {
 		description, err := keyringDescription(id)
@@ -475,7 +474,7 @@ func (h *keyringHandle) remove(match Credential, flags uint32) error {
 		if err != nil {
 			return fmt.Errorf("ccache: decode KEYRING credential: %w", err)
 		}
-		if !credentialMatches(credential, match, wireFlags) {
+		if !credentialMatchesMIT(credential, match, flags) {
 			continue
 		}
 		if _, err := unix.KeyctlInt(unix.KEYCTL_UNLINK, id, h.ring, 0, 0); err != nil {

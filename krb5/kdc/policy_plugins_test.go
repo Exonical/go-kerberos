@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -63,8 +63,8 @@ func TestKDCPolicyDenialUsesModuleCodeAndAuditStatus(t *testing.T) {
 	server.KDCPolicyModules = []KDCPolicyModule{
 		policyTestModule{name: "test", as: func(req *ASPolicyRequest) (KDCPolicyResult, error) {
 			if len(req.Client.Components) == 1 && req.Client.Components[0] == "alice" {
-				return KDCPolicyResult{Status: "LOCAL_POLICY"}, krberrors.NewKRBError(
-					krberrors.ErrorCode(12), "krbtgt/TEST.REALM", "TEST.REALM", now, 0, nil)
+				return KDCPolicyResult{Status: "LOCAL_POLICY"}, krberr.NewKRBError(
+					krberr.ErrorCode(12), "krbtgt/TEST.REALM", "TEST.REALM", now, 0, nil)
 			}
 			return KDCPolicyResult{}, nil
 		}},
@@ -164,7 +164,7 @@ func TestKDCPolicyTGSCanDenyAuthenticatedRequesterWithTicketContext(t *testing.T
 				req.HeaderTicketPart.EndTime.Present {
 				sawContext = true
 				return KDCPolicyResult{Status: "REQUESTER_POLICY"},
-					krberrors.NewKRBError(krberrors.ErrorCode(12),
+					krberr.NewKRBError(krberr.ErrorCode(12),
 						"host/service.test", "TEST.REALM", now, 0, nil)
 			}
 			return KDCPolicyResult{}, nil
@@ -202,8 +202,8 @@ func TestKDCPolicyAllowStatusDoesNotPersistIntoFailure(t *testing.T) {
 	}
 	server.KDCPolicyModules = append(server.KDCPolicyModules,
 		policyTestModule{name: "deny", as: func(*ASPolicyRequest) (KDCPolicyResult, error) {
-			return KDCPolicyResult{}, krberrors.NewKRBError(
-				krberrors.ErrorCode(12), "krbtgt/TEST.REALM", "TEST.REALM", now, 0, nil)
+			return KDCPolicyResult{}, krberr.NewKRBError(
+				krberr.ErrorCode(12), "krbtgt/TEST.REALM", "TEST.REALM", now, 0, nil)
 		}})
 	audit = AuditState{}
 	if err := server.applyASPolicies(protocol.ASReq{},

@@ -14,9 +14,9 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -86,7 +86,7 @@ func VerifyIAKERBFinished(key protocol.EncryptionKey, conv, finished []byte) err
 		return err
 	}
 	if value.Checksum.ChecksumType != checksumTypeForKey(key.KeyType) {
-		return fmt.Errorf("IAKERB finished: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("IAKERB finished: %w", krberr.ErrIntegrity)
 	}
 	if err := etype.VerifyChecksum(key.KeyValue, iakerbFinishedUsage, conv, value.Checksum.Checksum); err != nil {
 		return fmt.Errorf("IAKERB finished: %w", err)
@@ -389,7 +389,7 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 		var kerror protocol.KRBError
 		if asn1.Unmarshal(response, &kerror) == nil && kerror.ErrorCode != 0 {
 			if kerror.ErrorCode != 25 {
-				return nil, krberrors.NewKRBError(krberrors.ErrorCode(kerror.ErrorCode),
+				return nil, krberr.NewKRBError(krberr.ErrorCode(kerror.ErrorCode),
 					"", i.realm, kerror.STime.Time, kerror.Susec, kerror.EData)
 			}
 			methodData, err := preauth.ParseMethodData(kerror.EData)

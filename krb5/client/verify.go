@@ -9,8 +9,8 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -223,17 +223,17 @@ func verifyInitCredsTicket(creds *Credentials, server principal.Principal,
 			continue
 		}
 		if part.Flags&types.TicketInvalid != 0 {
-			lastErr = krberrors.ErrTicketInvalid
+			lastErr = krberr.ErrTicketInvalid
 			continue
 		}
 		if !verifyInitCredsTicketValid(part, now, skew) {
-			lastErr = krberrors.ErrTicketExpired
+			lastErr = krberr.ErrTicketExpired
 			continue
 		}
 		return nil
 	}
 	if lastErr == nil {
-		lastErr = krberrors.ErrIntegrity
+		lastErr = krberr.ErrIntegrity
 	}
 	return fmt.Errorf("verify initial credentials: decrypt service ticket: %w", lastErr)
 }

@@ -134,9 +134,9 @@ func TestUtilWriteFailurePreservesExistingKeytab(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = writeUtilKeytab(name, &keytab.Keytab{Entries: []keytab.Entry{{
+	err = writeUtilKeytab(name, keytab.New(keytab.Entry{
 		Timestamp: -1,
-	}}})
+	}))
 	if err == nil {
 		t.Fatal("invalid keytab unexpectedly written")
 	}

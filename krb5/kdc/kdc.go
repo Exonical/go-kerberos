@@ -22,11 +22,11 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/klog"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
@@ -2123,7 +2123,7 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 			protocol.EncryptionKey{KeyType: localKDCKey.Enctype, KeyValue: localKDCKey.Key})
 		if verifyErr == nil {
 			verifiedHeaderCAMMACElements = elements
-		} else if !stderrors.Is(verifyErr, krberrors.ErrIntegrity) {
+		} else if !stderrors.Is(verifyErr, krberr.ErrIntegrity) {
 			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 		} else if ticketPart.AuthorizationData, err = stripCAMMAC(ticketPart.AuthorizationData); err != nil {
 			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
@@ -3201,7 +3201,7 @@ func (s *Server) authorizationError(client, service principal.Principal, asExcha
 	if err := s.Authorize(client, service, asExchange); err != nil {
 		serviceName := protocolPrincipal(service)
 		code := int32(kdcErrPolicy)
-		var kerberosError *krberrors.KRBError
+		var kerberosError *krberr.KRBError
 		if stderrors.As(err, &kerberosError) {
 			code = int32(kerberosError.Code)
 			if code < 0 || code > 128 {

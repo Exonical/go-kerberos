@@ -7,7 +7,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -184,7 +184,7 @@ func verifyS4USelfReply(response []byte, user principal.Principal, etype crypto.
 		}
 		if value.Checksum.ChecksumType != checksumType(etype.ID()) {
 			return fmt.Errorf("S4U2Self: reply checksum type %d: %w",
-				value.Checksum.ChecksumType, krberrors.ErrIntegrity)
+				value.Checksum.ChecksumType, krberr.ErrIntegrity)
 		}
 		userIDDER, err := asn1.FieldContent(pa.PADataValue, 0)
 		if err != nil {
@@ -195,7 +195,7 @@ func verifyS4USelfReply(response []byte, user principal.Principal, etype crypto.
 			usage = s4uReplyChecksumUsage
 		}
 		if err := etype.VerifyChecksum(key, usage, userIDDER, value.Checksum.Checksum); err != nil {
-			return fmt.Errorf("S4U2Self reply checksum: %w", krberrors.ErrIntegrity)
+			return fmt.Errorf("S4U2Self reply checksum: %w", krberr.ErrIntegrity)
 		}
 		return nil
 	}

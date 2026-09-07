@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
@@ -22,7 +22,7 @@ type ASReqInfo struct {
 	Client        principal.Principal
 	Request       protocol.ASReq
 	RequestBody   []byte
-	PreviousError *krberrors.KRBError
+	PreviousError *krberr.KRBError
 }
 
 type ClientRequestContext struct {

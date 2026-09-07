@@ -19,12 +19,12 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/hostrealm"
 	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/kkdcp"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
@@ -139,7 +139,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		}
 	}
 	if initialEType == nil {
-		return nil, fmt.Errorf("AS exchange: %w", krberrors.ErrUnsupportedEType)
+		return nil, fmt.Errorf("AS exchange: %w", krberr.ErrUnsupportedEType)
 	}
 	initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
 	initialKey, err := initialEType.StringToKey([]byte(password), initialSalt, nil)
@@ -407,7 +407,7 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 		}
 	}
 	if initialEType == nil {
-		return nil, fmt.Errorf("AS service exchange: %w", krberrors.ErrUnsupportedEType)
+		return nil, fmt.Errorf("AS service exchange: %w", krberr.ErrUnsupportedEType)
 	}
 	var initialKey []byte
 	if entry.Key != nil {
@@ -535,7 +535,7 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		}
 	}
 	if initialEType == nil {
-		return nil, fmt.Errorf("FAST AS exchange: %w", krberrors.ErrUnsupportedEType)
+		return nil, fmt.Errorf("FAST AS exchange: %w", krberr.ErrUnsupportedEType)
 	}
 	initialSalt := []byte(clientPrincipal.Realm + strings.Join(clientPrincipal.Components, ""))
 	initialKey, err := initialEType.StringToKey([]byte(password), initialSalt, nil)
@@ -777,7 +777,7 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 	return c.decodeASRep(data, clientPrincipal, nonce, replyKey.KeyType, replyKey.KeyValue, now)
 }
 
-func errorMethodData(value *krberrors.KRBError) protocol.MethodData {
+func errorMethodData(value *krberr.KRBError) protocol.MethodData {
 	if value == nil || len(value.ErrorData()) == 0 {
 		return nil
 	}
@@ -791,7 +791,7 @@ func errorMethodData(value *krberrors.KRBError) protocol.MethodData {
 func (c *Client) processClientPreauthModules(request protocol.ASReq,
 	methodData protocol.MethodData, clientPrincipal principal.Principal,
 	etypeID int32, key []byte, armorKey *protocol.EncryptionKey,
-	previousError *krberrors.KRBError) (protocol.MethodData, bool, protocol.EncryptionKey, error) {
+	previousError *krberr.KRBError) (protocol.MethodData, bool, protocol.EncryptionKey, error) {
 	if c == nil || len(c.PreauthModules) == 0 {
 		return nil, false, protocol.EncryptionKey{
 			KeyType: etypeID, KeyValue: append([]byte(nil), key...),
@@ -879,7 +879,7 @@ func clientBuiltinPAType(typ int32) bool {
 	}
 }
 
-func freshnessTokenFromError(value *krberrors.KRBError) []byte {
+func freshnessTokenFromError(value *krberr.KRBError) []byte {
 	for _, pa := range errorMethodData(value) {
 		if pa.PADataType == pkinit.PADataASFreshness {
 			return append([]byte(nil), pa.PADataValue...)
@@ -888,8 +888,8 @@ func freshnessTokenFromError(value *krberrors.KRBError) []byte {
 	return nil
 }
 
-func findPKINITDHParameters(value *krberrors.KRBError) []byte {
-	if value == nil || value.Code != krberrors.KDCErrDHKeyParameters || len(value.ErrorData()) == 0 {
+func findPKINITDHParameters(value *krberr.KRBError) []byte {
+	if value == nil || value.Code != krberr.KDCErrDHKeyParameters || len(value.ErrorData()) == 0 {
 		return nil
 	}
 	var data protocol.TypedData
@@ -904,8 +904,8 @@ func findPKINITDHParameters(value *krberrors.KRBError) []byte {
 	return nil
 }
 
-func retryPKINITDHParameters(value *krberrors.KRBError, retries int, client *pkinit.Client) (bool, error) {
-	if value == nil || value.Code != krberrors.KDCErrDHKeyParameters {
+func retryPKINITDHParameters(value *krberr.KRBError, retries int, client *pkinit.Client) (bool, error) {
+	if value == nil || value.Code != krberr.KDCErrDHKeyParameters {
 		return false, nil
 	}
 	if retries >= 2 {
@@ -1551,7 +1551,7 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 		return nil, false, fmt.Errorf("TGS exchange: TGS-REP client principal mismatch")
 	}
 	if reply.EncPart.EType != keyType {
-		return nil, false, fmt.Errorf("TGS exchange TGS-REP enctype %d: %w", reply.EncPart.EType, krberrors.ErrUnsupportedEType)
+		return nil, false, fmt.Errorf("TGS exchange TGS-REP enctype %d: %w", reply.EncPart.EType, krberr.ErrUnsupportedEType)
 	}
 	etype, err := crypto.NewRegistry().Get(keyType)
 	if err != nil {
@@ -1584,7 +1584,7 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 		return nil, false, fmt.Errorf("TGS exchange: malformed referral service principal")
 	}
 	if !validTimes(part.AuthTime, part.StartTime, part.EndTime, now, c.clockSkew()) {
-		return nil, false, fmt.Errorf("TGS exchange: %w", krberrors.ErrClockSkew)
+		return nil, false, fmt.Errorf("TGS exchange: %w", krberr.ErrClockSkew)
 	}
 	ticket, err := asn1.Marshal(reply.Ticket)
 	if err != nil {
@@ -1899,13 +1899,13 @@ func (c *Client) serviceCandidates(ctx context.Context, service principal.Princi
 }
 
 func isUnknownServiceError(err error) bool {
-	var kerberosError *krberrors.KRBError
+	var kerberosError *krberr.KRBError
 	return errors.As(err, &kerberosError) &&
-		kerberosError.Code == krberrors.KDCErrSPrincipalUnknown
+		kerberosError.Code == krberr.KDCErrSPrincipalUnknown
 }
 
 func isKRBError(err error) bool {
-	var kerberosError *krberrors.KRBError
+	var kerberosError *krberr.KRBError
 	return errors.As(err, &kerberosError)
 }
 
@@ -2189,7 +2189,7 @@ func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service pri
 		return nil, fmt.Errorf("AS exchange: AS-REP client principal mismatch")
 	}
 	if reply.EncPart.EType != etypeID {
-		return nil, fmt.Errorf("AS exchange AS-REP enctype %d: %w", reply.EncPart.EType, krberrors.ErrUnsupportedEType)
+		return nil, fmt.Errorf("AS exchange AS-REP enctype %d: %w", reply.EncPart.EType, krberr.ErrUnsupportedEType)
 	}
 	etype, err := crypto.NewRegistry().Get(reply.EncPart.EType)
 	if err != nil {
@@ -2221,7 +2221,7 @@ func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service pri
 		return nil, fmt.Errorf("AS exchange: invalid ticket server principal")
 	}
 	if !validTimes(part.AuthTime, part.StartTime, part.EndTime, now, c.clockSkew()) {
-		return nil, fmt.Errorf("AS exchange: %w", krberrors.ErrClockSkew)
+		return nil, fmt.Errorf("AS exchange: %w", krberr.ErrClockSkew)
 	}
 	ticket, err := asn1.Marshal(reply.Ticket)
 	if err != nil {
@@ -2239,14 +2239,14 @@ func (c *Client) decodeASRepForService(data []byte, clientPrincipal, service pri
 	}, nil
 }
 
-func decodeKRBError(data []byte) (*krberrors.KRBError, bool) {
+func decodeKRBError(data []byte) (*krberr.KRBError, bool) {
 	var value protocol.KRBError
 	if err := asn1.Unmarshal(data, &value); err != nil {
 		return nil, false
 	}
 	server := principalFromProtocol(value.SName).String()
-	return krberrors.NewKRBError(
-		krberrors.ErrorCode(value.ErrorCode), server, value.Realm,
+	return krberr.NewKRBError(
+		krberr.ErrorCode(value.ErrorCode), server, value.Realm,
 		value.STime.Time, value.Susec, value.EData,
 	), true
 }
@@ -2586,7 +2586,7 @@ func requireAnonymousTicketFlag(credentials *Credentials) error {
 	if credentials == nil || credentials.Flags&types.TicketAnonymous == 0 {
 		return fmt.Errorf(
 			"anonymous PKINIT: AS-REP lacks anonymous ticket flag: %w",
-			krberrors.ErrIntegrity,
+			krberr.ErrIntegrity,
 		)
 	}
 	return nil
@@ -2606,33 +2606,33 @@ func verifyAnonymousReplyKX(reply protocol.ASRep, replyKey []byte) error {
 		}
 	}
 	if len(kxValue) == 0 {
-		return fmt.Errorf("anonymous PKINIT: missing PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT: missing PA-PKINIT-KX: %w", krberr.ErrIntegrity)
 	}
 	var encryptedKey protocol.EncryptedData
 	if err := asn1.Unmarshal(kxValue, &encryptedKey); err != nil {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX: %w", krberr.ErrIntegrity)
 	}
 	if encryptedKey.EType != reply.EncPart.EType {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype mismatch: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype mismatch: %w", krberr.ErrIntegrity)
 	}
 	etype, err := crypto.NewRegistry().Get(reply.EncPart.EType)
 	if err != nil {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX enctype: %w", krberr.ErrIntegrity)
 	}
 	plainKey, err := etype.Decrypt(replyKey, keyUsagePAPKINITKX, encryptedKey.Cipher)
 	if err != nil {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX decrypt: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX decrypt: %w", krberr.ErrIntegrity)
 	}
 	var kdcKey protocol.EncryptionKey
 	if err := asn1.Unmarshal(plainKey, &kdcKey); err != nil {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key: %w", krberr.ErrIntegrity)
 	}
 	if kdcKey.KeyType != reply.EncPart.EType {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key enctype mismatch: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX key enctype mismatch: %w", krberr.ErrIntegrity)
 	}
 	plainReply, err := etype.Decrypt(replyKey, 3, reply.EncPart.Cipher)
 	if err != nil {
-		return fmt.Errorf("anonymous PKINIT AS-REP decrypt: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT AS-REP decrypt: %w", krberr.ErrIntegrity)
 	}
 	if len(plainReply) > 0 && plainReply[0] == 0x7a {
 		plainReply = append([]byte(nil), plainReply...)
@@ -2640,19 +2640,19 @@ func verifyAnonymousReplyKX(reply protocol.ASRep, replyKey []byte) error {
 	}
 	var part protocol.EncASRepPart
 	if err := asn1.Unmarshal(plainReply, &part); err != nil {
-		return fmt.Errorf("anonymous PKINIT AS-REP: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT AS-REP: %w", krberr.ErrIntegrity)
 	}
 	expected, err := crypto.CF2(
 		etype, kdcKey.KeyValue, replyKey,
 		[]byte("PKINIT"), []byte("KEYEXCHANGE"),
 	)
 	if err != nil {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX derive: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX derive: %w", krberr.ErrIntegrity)
 	}
 	if part.Key.KeyType != reply.EncPart.EType ||
 		len(part.Key.KeyValue) != len(expected) ||
 		subtle.ConstantTimeCompare(part.Key.KeyValue, expected) != 1 {
-		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX session key mismatch: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("anonymous PKINIT PA-PKINIT-KX session key mismatch: %w", krberr.ErrIntegrity)
 	}
 	return nil
 }

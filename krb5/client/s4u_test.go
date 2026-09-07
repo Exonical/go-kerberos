@@ -11,8 +11,8 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -301,7 +301,7 @@ func TestS4U2SelfRejectsTamperedReplyChecksum(t *testing.T) {
 	}
 	_, err := (&Client{Now: func() time.Time { return now }, Exchange: exchange}).
 		S4U2Self(context.Background(), tgt, user)
-	if !errors.Is(err, krberrors.ErrIntegrity) {
+	if !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("tampered S4U reply checksum error = %v, want integrity failure", err)
 	}
 }

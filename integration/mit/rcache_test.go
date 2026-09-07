@@ -13,9 +13,9 @@ import (
 	"github.com/Exonical/go-kerberos/internal/testenv"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
 )
@@ -73,7 +73,7 @@ func TestMITFile2ReplayCacheAgainstGo(t *testing.T) {
 	}
 	cache := &rcache.File2{Path: cachePath}
 	acceptor := gssapi.NewAcceptorWithOptions(kt, gssapi.AcceptorOptions{ReplayCache: cache})
-	if _, _, err := acceptor.Accept(token, now); !errors.Is(err, krberrors.ErrReplay) {
+	if _, _, err := acceptor.Accept(token, now); !errors.Is(err, krberr.ErrReplay) {
 		t.Fatalf("Go accepted MIT-consumed AP token: %v", err)
 	}
 }

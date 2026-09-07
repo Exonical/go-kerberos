@@ -279,9 +279,9 @@ func TestServeOneGoToGoTransfer(t *testing.T) {
 	payload := []byte("small MIT dump")
 	var loaded []byte
 	server := &kprop.Server{
-		Keytab: &keytab.Keytab{Entries: []keytab.Entry{{
+		Keytab: keytab.New(keytab.Entry{
 			Principal: service, KVNO: 1, Enctype: etype.ID(), Key: serviceKey,
-		}}},
+		}),
 		Realm: realm,
 		Authorize: func(got principal.Principal, _ int32) error {
 			if got.String() != user.String() {

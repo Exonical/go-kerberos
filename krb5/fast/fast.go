@@ -9,8 +9,8 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/internal/random"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -207,7 +207,7 @@ func (a *Armor) UnwrapReply(padata protocol.MethodData, ticket []byte, nonce uin
 		return nil, fmt.Errorf("FAST reply armor: %w", err)
 	}
 	if wrapper.ArmoredData.EncFastRep.EType != a.EType.ID() {
-		return nil, fmt.Errorf("FAST reply enctype %d: %w", wrapper.ArmoredData.EncFastRep.EType, krberrors.ErrUnsupportedEType)
+		return nil, fmt.Errorf("FAST reply enctype %d: %w", wrapper.ArmoredData.EncFastRep.EType, krberr.ErrUnsupportedEType)
 	}
 	plaintext, err := a.EType.Decrypt(a.Key, UsageRep, wrapper.ArmoredData.EncFastRep.Cipher)
 	if err != nil {

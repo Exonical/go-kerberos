@@ -7,7 +7,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -110,7 +110,7 @@ func SelectEType(methodData protocol.MethodData, realm string, name principal.Pr
 			return entry.EType, append([]byte(nil), salt...), append([]byte(nil), entry.S2KParams...), nil
 		}
 	}
-	return 0, nil, nil, fmt.Errorf("select preauthentication enctype: %w", krberrors.ErrUnsupportedEType)
+	return 0, nil, nil, fmt.Errorf("select preauthentication enctype: %w", krberr.ErrUnsupportedEType)
 }
 
 func entrySalt(value *[]byte) []byte {
