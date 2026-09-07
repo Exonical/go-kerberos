@@ -521,7 +521,9 @@ func TestECSPKIAndExchangeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s reply: %v", GroupName(group), err)
 		}
-		derived, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+		roots := x509.NewCertPool()
+		roots.AddCert(kdcCert)
+		derived, err := client.VerifyPAASRep(pa.PADataValue, roots, crypto.EnctypeAES256SHA1, 42)
 		if err != nil {
 			t.Fatalf("%s verify: %v", GroupName(group), err)
 		}
@@ -713,6 +715,9 @@ func TestVerifyPAASRepRejectsDegenerateServerPublicValues(t *testing.T) {
 	client, err := NewClient(clientCert, clientKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := client.VerifyPAASRep(nil, nil, crypto.EnctypeAES256SHA1, 42); err == nil {
+		t.Fatal("KDC reply verification accepted missing trust anchors")
 	}
 	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
 		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
@@ -916,7 +921,9 @@ func TestBuildPAASRepRoundTrip(t *testing.T) {
 	if pa.PADataType != PADataASRep || len(replyKey) == 0 {
 		t.Fatalf("PA-PK-AS-REP = %#v, key length %d", pa, len(replyKey))
 	}
-	derivedKey, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+	roots := x509.NewCertPool()
+	roots.AddCert(kdcCert)
+	derivedKey, err := client.VerifyPAASRep(pa.PADataValue, roots, crypto.EnctypeAES256SHA1, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1077,8 +1084,11 @@ func TestValidateKDCSAN(t *testing.T) {
 		Id:    asn1.ObjectIdentifier{2, 5, 29, 17},
 		Value: derSeq(otherName),
 	}}}
-	if err := validateKDCSAN(cert); err != nil {
+	if err := validateKDCSAN(cert, realm); err != nil {
 		t.Fatalf("validate KDC SAN: %v", err)
+	}
+	if err := validateKDCSAN(cert, "OTHER.REALM"); err == nil {
+		t.Fatal("KDC SAN with mismatched realm accepted")
 	}
 
 	invalid := *cert
@@ -1095,7 +1105,7 @@ func TestValidateKDCSAN(t *testing.T) {
 			))...,
 		))),
 	}}
-	if err := validateKDCSAN(&invalid); err == nil {
+	if err := validateKDCSAN(&invalid, realm); err == nil {
 		t.Fatal("non-krbtgt KDC SAN accepted")
 	}
 }
@@ -1104,15 +1114,15 @@ func TestValidateKDCEKU(t *testing.T) {
 	cert := &x509.Certificate{UnknownExtKeyUsage: []asn1.ObjectIdentifier{
 		{1, 3, 6, 1, 5, 2, 3, 5},
 	}}
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("KDC certificate without SAN accepted")
 	}
 	cert.UnknownExtKeyUsage = []asn1.ObjectIdentifier{{1, 2, 3}}
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("certificate with incorrect EKU accepted")
 	}
 	cert.UnknownExtKeyUsage = nil
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("certificate without EKU accepted")
 	}
 }

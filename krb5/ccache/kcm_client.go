@@ -145,6 +145,9 @@ func (h *kcmHandle) read() (*Cache, error) {
 			return nil, errors.New("kcm: malformed credential list")
 		}
 		count := binary.BigEndian.Uint32(value[:4])
+		if uint64(count) > uint64(len(value)-4)/4 {
+			return nil, errors.New("kcm: credential count exceeds payload")
+		}
 		off := 4
 		for i := uint32(0); i < count; i++ {
 			if off+4 > len(value) {

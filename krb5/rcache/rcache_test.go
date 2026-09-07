@@ -64,6 +64,33 @@ func TestTagFromCiphertextUsesChecksumTrailer(t *testing.T) {
 	}
 }
 
+func TestTagFromChecksumTruncatesToFile2TagLength(t *testing.T) {
+	checksum := make([]byte, 16)
+	for i := range checksum {
+		checksum[i] = byte(i)
+	}
+	if got := TagFromChecksum(checksum); !bytes.Equal(got, checksum[:12]) {
+		t.Fatalf("tag = %x, want %x", got, checksum[:12])
+	}
+}
+
+func TestMemoryReplayCacheExpiresEntriesOnInsertion(t *testing.T) {
+	var cache Memory
+	start := time.Unix(1000, 0).UTC()
+	if err := cache.Store([]byte("old"), start, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Store([]byte("new"), start.Add(2*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Store([]byte("old"), start.Add(2*time.Minute), time.Minute); err != nil {
+		t.Fatalf("expired tag was not accepted: %v", err)
+	}
+	if err := cache.Store([]byte("new"), start.Add(2*time.Minute), time.Minute); !errors.Is(err, ErrReplay) {
+		t.Fatalf("duplicate new tag error = %v, want ErrReplay", err)
+	}
+}
+
 func TestFile2SeedAndExactRecordLayout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "replay.rcache2")
 	seed := make([]byte, hashSeedLen)

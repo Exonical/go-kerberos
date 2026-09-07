@@ -3,6 +3,7 @@ package ccache
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -12,6 +13,7 @@ import (
 
 // Version is the MIT FILE credential-cache format version.
 const Version uint16 = 0x0504
+const maxCacheInput = 64 << 20
 
 // Header mirrors the MIT FILE ccache header's time-offset fields.
 type Header struct {
@@ -61,9 +63,12 @@ func Read(r io.Reader) (*Cache, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read ccache: nil reader")
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxCacheInput+1))
 	if err != nil {
 		return nil, fmt.Errorf("read ccache: %w", err)
+	}
+	if len(data) > maxCacheInput {
+		return nil, errors.New("read ccache: input too large")
 	}
 	d := ccacheDecoder{Reader: binfmt.NewReader(data)}
 	version, err := d.U16()

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Config mirrors the MIT libkrb5 profile-derived client configuration.
@@ -434,12 +435,14 @@ func ParseDuration(value string) (time.Duration, error) {
 }
 
 func stripComment(line string) string {
-	for i, r := range line {
-		if r == '#' || r == ';' {
-			if i == 0 || line[i-1] != '\\' {
-				return line[:i]
-			}
+	for _, r := range line {
+		if unicode.IsSpace(r) {
+			continue
 		}
+		if r == '#' || r == ';' {
+			return ""
+		}
+		break
 	}
 	return line
 }

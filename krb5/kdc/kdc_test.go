@@ -138,6 +138,7 @@ func TestGSSPasswordCredentialAgainstServer(t *testing.T) {
 func TestGSSImpersonatedCredentialAgainstServer(t *testing.T) {
 	now := time.Unix(2000000003, 0).UTC()
 	server, kclient := testServer(t, now)
+	server.EnablePAC = true
 	server.CheckAllowedToDelegate = func(_ *principal.Principal, _ principal.Principal, _ *principal.Principal) error {
 		return nil
 	}
@@ -1176,6 +1177,33 @@ func TestServerS4U2SelfPolicyAndProxy(t *testing.T) {
 	}
 	if self.Flags&types.TicketForwardable == 0 {
 		t.Fatalf("S4U2Self with policy is not forwardable: %#x", self.Flags)
+	}
+	var forgedTicket protocol.Ticket
+	if err := asn1.Unmarshal(self.Ticket, &forgedTicket); err != nil {
+		t.Fatal(err)
+	}
+	forgedPlain, err := evidenceEType.Decrypt(evidenceKey.Key, 2, forgedTicket.EncPart.Cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forgedPart protocol.EncTicketPart
+	if err := asn1.Unmarshal(forgedPlain, &forgedPart); err != nil {
+		t.Fatal(err)
+	}
+	if len(forgedPart.AuthorizationData) == 0 ||
+		len(forgedPart.AuthorizationData[0].ADData) == 0 {
+		t.Fatal("S4U2Self evidence has no PAC authorization data")
+	}
+	forgedPart.AuthorizationData[0].ADData[0] ^= 0xff
+	forgedTicket.EncPart.Cipher, err = evidenceEType.Encrypt(evidenceKey.Key, 2, mustMarshal(t, forgedPart))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := *self
+	forged.Ticket = mustMarshal(t, forgedTicket)
+	current = current.Add(time.Second)
+	if _, err := kclient.S4U2Proxy(context.Background(), tgt, &forged, backend); err == nil {
+		t.Fatal("S4U2Proxy accepted forged evidence PAC")
 	}
 	current = current.Add(time.Second)
 	proxy, err := kclient.S4U2Proxy(context.Background(), tgt, self, backend)

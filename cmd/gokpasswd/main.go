@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strings"
 
+	"github.com/Exonical/go-kerberos/cmd/internal/secretinput"
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -40,16 +41,19 @@ func runPasswd(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	reader := bufio.NewReader(stdin)
-	current, err := promptPassword(reader, stderr, fmt.Sprintf("Password for %s: ", target.String()))
+	interactive := false
+	if file, ok := stdin.(*os.File); ok {
+		interactive = secretinput.IsTerminal(file)
+	}
+	current, err := secretinput.Read(stdin, stderr, fmt.Sprintf("Password for %s: ", target.String()), interactive)
 	if err != nil {
 		return err
 	}
-	newPassword, err := promptPassword(reader, stderr, "Enter new password: ")
+	newPassword, err := secretinput.Read(stdin, stderr, "Enter new password: ", interactive)
 	if err != nil {
 		return err
 	}
-	again, err := promptPassword(reader, stderr, "Enter it again: ")
+	again, err := secretinput.Read(stdin, stderr, "Enter it again: ", interactive)
 	if err != nil {
 		return err
 	}
@@ -73,6 +77,10 @@ func validatePasswordConfirmation(password, confirmation string) error {
 		return fmt.Errorf("passwords do not match")
 	}
 	return nil
+}
+
+func promptPassword(reader *bufio.Reader, stderr io.Writer, prompt string) (string, error) {
+	return secretinput.Read(reader, stderr, prompt, false)
 }
 
 func loadPasswdConfig() (*config.Config, error) {
@@ -118,17 +126,4 @@ func defaultPasswdPrincipal(cfg *config.Config) (principal.Principal, error) {
 		return principal.Principal{}, fmt.Errorf("unable to identify user from password file")
 	}
 	return parsePasswdPrincipal(current.Username, cfg)
-}
-
-func promptPassword(reader *bufio.Reader, stderr io.Writer, prompt string) (string, error) {
-	fmt.Fprint(stderr, prompt)
-	value, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", fmt.Errorf("reading password: %w", err)
-	}
-	value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "\r")
-	if value == "" {
-		return "", fmt.Errorf("empty password")
-	}
-	return value, nil
 }

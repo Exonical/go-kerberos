@@ -3,12 +3,14 @@ package keytab
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 	"sync"
 
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/internal/binfmt"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -16,6 +18,7 @@ import (
 
 // Version is the MIT FILE keytab format version.
 const Version uint16 = 0x0502
+const maxKeytabInput = 64 << 20
 
 // Entry mirrors an MIT keytab principal-key record.
 type Entry struct {
@@ -88,9 +91,9 @@ func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, e
 	expand := false
 	if name == "" {
 		if client {
-			name = os.Getenv("KRB5_CLIENT_KTNAME")
+			name = secureenv.Get("KRB5_CLIENT_KTNAME")
 		} else {
-			name = os.Getenv("KRB5_KTNAME")
+			name = secureenv.Get("KRB5_KTNAME")
 		}
 	}
 	if name == "" && cfg != nil {
@@ -199,9 +202,12 @@ func Read(r io.Reader) (*Keytab, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read keytab: nil reader")
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxKeytabInput+1))
 	if err != nil {
 		return nil, fmt.Errorf("read keytab: %w", err)
+	}
+	if len(data) > maxKeytabInput {
+		return nil, errors.New("read keytab: input too large")
 	}
 	if len(data) < 2 {
 		return nil, fmt.Errorf("read keytab: truncated version")

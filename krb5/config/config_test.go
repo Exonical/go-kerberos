@@ -589,3 +589,16 @@ func TestDNSURIEnabledMITDefault(t *testing.T) {
 		t.Fatal("MIT default dns_uri_lookup should be enabled")
 	}
 }
+
+func TestStripCommentOnlyRecognizesLeadingDelimiters(t *testing.T) {
+	for _, line := range []string{"# comment", "   ; comment", "\t# comment"} {
+		if got := stripComment(line); got != "" {
+			t.Fatalf("stripComment(%q) = %q, want empty", line, got)
+		}
+	}
+	for _, line := range []string{"FILE:/etc/pki/ca#1.pem", "value;still-data", `value\#escaped`} {
+		if got := stripComment(line); got != line {
+			t.Fatalf("stripComment(%q) = %q, want unchanged", line, got)
+		}
+	}
+}

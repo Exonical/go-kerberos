@@ -39,7 +39,7 @@ type incrementalState struct {
 }
 
 func runIncremental(ctx context.Context, options propdOptions, cfg *config.Config,
-	realm string, kt *keytab.Keytab, authorize func(principal.Principal) error,
+	realm string, kt *keytab.Keytab, authorize func(principal.Principal, int32) error,
 	out, errOut io.Writer) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -110,7 +110,8 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 	state := &incrementalState{replica: replica, ulog: ulog,
 		fullResync: make(chan error, 1)}
 	replica.Persist = func() error {
-		data, err := mitdump.DumpWithMasterKey(replica.Database,
+		database := replica.Database
+		data, err := mitdump.DumpWithMasterKey(database,
 			replica.MasterEnctype, replica.MasterKey)
 		if err != nil {
 			return err
@@ -155,8 +156,8 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 					return err
 				}
 			}
-			state.replica.Database = database
 			state.mu.Lock()
+			state.replica.Database = database
 			pending := state.pending
 			state.mu.Unlock()
 			if pending {
@@ -181,6 +182,13 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 					state.mu.Lock()
 					pending := state.pending
 					state.mu.Unlock()
+					var classified *kprop.ServeConnError
+					if errors.As(serveErr, &classified) && !classified.Authenticated {
+						if options.Debug {
+							fmt.Fprintln(errOut, serveErr)
+						}
+						return
+					}
 					if pending {
 						select {
 						case state.fullResync <- serveErr:
@@ -200,7 +208,9 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 
 	backoff := 0
 	for {
+		state.mu.Lock()
 		status, pollErr := replica.Poll(ctx)
+		state.mu.Unlock()
 		if pollErr != nil {
 			if options.RunOnce {
 				return pollErr

@@ -210,10 +210,30 @@ func DialAndSend(ctx context.Context, address string, creds *client.Credentials,
 type Server struct {
 	Keytab    *keytab.Keytab
 	Realm     string
-	Authorize func(principal.Principal) error
+	Authorize func(principal.Principal, int32) error
 	Load      func(io.Reader, uint64) error
 	Now       func() time.Time
 	ErrorLog  func(error)
+}
+
+// ServeConnError describes a failed single-connection transfer.
+type ServeConnError struct {
+	Err           error
+	Authenticated bool
+}
+
+func (e *ServeConnError) Error() string {
+	if e == nil || e.Err == nil {
+		return "kprop connection failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *ServeConnError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // Serve accepts kpropd connections until listener failure.
@@ -236,9 +256,19 @@ func (s *Server) Serve(listener net.Listener) error {
 
 // ServeConn handles one kprop connection.
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
+	return s.serveConn(ctx, conn)
+}
+
+func (s *Server) serveConn(ctx context.Context, conn net.Conn) (err error) {
 	if s == nil || s.Keytab == nil || s.Load == nil || conn == nil {
 		return errors.New("kprop: incomplete server configuration")
 	}
+	authenticated := false
+	defer func() {
+		if err != nil {
+			err = &ServeConnError{Err: err, Authenticated: authenticated}
+		}
+	}()
 	defer conn.Close()
 	first, err := readContextFrame(ctx, conn)
 	if err != nil {
@@ -272,12 +302,13 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		_ = s.writeError(ctx, conn, 60, err.Error())
 		return fmt.Errorf("kprop AP-REQ: %w", err)
 	}
+	authenticated = true
 	if request.APOptions&types.APMutualRequired == 0 {
 		_ = s.writeError(ctx, conn, 60, "mutual authentication required")
 		return errors.New("kprop: AP-REQ did not request mutual authentication")
 	}
 	if s.Authorize != nil {
-		if err := s.Authorize(request.Client); err != nil {
+		if err := s.Authorize(request.Client, request.SessionKey.KeyType); err != nil {
 			_ = s.writeError(ctx, conn, 45, err.Error())
 			return fmt.Errorf("kprop authorization: %w", err)
 		}

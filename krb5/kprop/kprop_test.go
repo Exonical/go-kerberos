@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -18,6 +19,29 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
+
+func TestServeConnClassifiesUnauthenticatedErrors(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	server := &Server{Keytab: &keytab.Keytab{}, Load: func(io.Reader, uint64) error { return nil }}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.ServeConn(context.Background(), right)
+	}()
+	if err := writeContextFrame(context.Background(), left, []byte("garbage")); err != nil {
+		t.Fatal(err)
+	}
+	_ = left.Close()
+	err := <-done
+	var classified *ServeConnError
+	if !errors.As(err, &classified) {
+		t.Fatalf("ServeConn error = %T %v, want classification", err, err)
+	}
+	if classified.Authenticated {
+		t.Fatal("unauthenticated connection classified as authenticated")
+	}
+}
 
 func TestDatabaseSizeEncoding(t *testing.T) {
 	tests := []struct {
@@ -166,7 +190,7 @@ func TestGoClientServerTransfer(t *testing.T) {
 	server := &Server{
 		Keytab: &keytab.Keytab{Entries: []keytab.Entry{{Principal: service, KVNO: 1, Enctype: etype.ID(), Key: serviceKey}}},
 		Realm:  realm,
-		Authorize: func(got principal.Principal) error {
+		Authorize: func(got principal.Principal, _ int32) error {
 			if got.String() != user.String() {
 				t.Fatalf("authorized principal = %s", got)
 			}

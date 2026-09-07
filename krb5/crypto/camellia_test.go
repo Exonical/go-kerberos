@@ -2,6 +2,8 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 )
@@ -37,13 +39,47 @@ func TestCamelliaStringToKeyVectors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := etype.StringToKey([]byte(tt.password), []byte(tt.salt), tt.iterations)
+		etypeName := "camellia128-cts-cmac"
+		if tt.etype == EnctypeCamellia256 {
+			etypeName = "camellia256-cts-cmac"
+		}
+		salt := append([]byte(etypeName), 0)
+		salt = append(salt, []byte(tt.salt)...)
+		raw, err := pbkdf2Key(sha1.New, []byte(tt.password), salt,
+			int(binary.BigEndian.Uint32(tt.iterations)), etype.KeySize())
+		var got []byte
+		if err == nil {
+			got, err = camelliaDerive(raw, []byte("kerberos"), etype.KeySize())
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(got, mustHex(t, tt.want)) {
 			t.Errorf("etype %d string-to-key = %x, want %s", tt.etype, got, tt.want)
 		}
+	}
+}
+
+func TestPBKDF2IterationBounds(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		n    uint32
+		ok   bool
+	}{
+		{"zero", 0, false},
+		{"below default", 32767, false},
+		{"default", 32768, true},
+		{"maximum", maxPBKDF2Iterations - 1, true},
+		{"too large", maxPBKDF2Iterations, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			params := make([]byte, 4)
+			binary.BigEndian.PutUint32(params, test.n)
+			_, err := parseIterations(params, 32768)
+			if (err == nil) != test.ok {
+				t.Fatalf("parseIterations(%d) error = %v, want ok=%v", test.n, err, test.ok)
+			}
+		})
 	}
 }
 

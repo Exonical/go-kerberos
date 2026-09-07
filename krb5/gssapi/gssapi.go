@@ -95,6 +95,7 @@ type Context struct {
 	prfFull              protocol.EncryptionKey
 	initiator            bool
 	flags                uint32
+	ticketFlags          types.TicketFlags
 	dceStyle             bool
 	DelegatedCredentials []*client.Credentials
 	acceptorSubkey       bool
@@ -105,6 +106,11 @@ type Context struct {
 	sendSeq              uint64
 	recvSeq              uint64
 	nameAttributes       *authdata.Context
+}
+
+// InitialTicket reports whether the accepted AP-REQ used an initial ticket.
+func (c *Context) InitialTicket() bool {
+	return c != nil && c.ticketFlags&types.TicketInitial != 0
 }
 
 // NewInitiator creates an initiator for the supplied service credentials.
@@ -316,7 +322,7 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		return nil, fmt.Errorf("GSS initial AP-REQ: %w", err)
 	}
 	i.state = state
-	i.ctx = &Context{
+	securityContext := &Context{
 		key:        contextKey(state.SessionKey, state.SubKey),
 		prfPartial: contextKey(state.SessionKey, state.SubKey),
 		prfFull:    contextKey(state.SessionKey, state.SubKey),
@@ -326,6 +332,9 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		source:     i.creds.Client,
 		target:     i.creds.Server,
 		endtime:    i.creds.EndTime.Time,
+	}
+	if i.flags&GSSMutualFlag == 0 {
+		i.ctx = securityContext
 	}
 	if legacy {
 		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
@@ -345,6 +354,19 @@ func (i *Initiator) VerifyToken(token []byte) error {
 	details, err := ap.VerifyAPRepWithDetails(i.state, inner)
 	if err != nil {
 		return fmt.Errorf("GSS AP-REP: %w", err)
+	}
+	if i.ctx == nil {
+		i.ctx = &Context{
+			key:        contextKey(i.state.SessionKey, i.state.SubKey),
+			prfPartial: contextKey(i.state.SessionKey, i.state.SubKey),
+			prfFull:    contextKey(i.state.SessionKey, i.state.SubKey),
+			initiator:  true,
+			flags:      i.flags &^ GSSChannelBoundFlag,
+			sendSeq:    sequenceValue(i.state.SeqNumber),
+			source:     i.creds.Client,
+			target:     i.creds.Server,
+			endtime:    i.creds.EndTime.Time,
+		}
 	}
 	if details.SubKey != nil {
 		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
@@ -460,14 +482,15 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 		}
 	}
 	ctx := &Context{
-		key:        contextKey(verified.SessionKey, verified.SubKey),
-		prfPartial: contextKey(verified.SessionKey, verified.SubKey),
-		prfFull:    contextKey(verified.SessionKey, verified.SubKey),
-		flags:      flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
-		recvSeq:    sequenceValue(verified.SeqNumber),
-		source:     verified.Client,
-		target:     verified.Server,
-		endtime:    verified.EndTime.Time,
+		key:         contextKey(verified.SessionKey, verified.SubKey),
+		prfPartial:  contextKey(verified.SessionKey, verified.SubKey),
+		prfFull:     contextKey(verified.SessionKey, verified.SubKey),
+		ticketFlags: verified.Flags,
+		flags:       flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
+		recvSeq:     sequenceValue(verified.SeqNumber),
+		source:      verified.Client,
+		target:      verified.Server,
+		endtime:     verified.EndTime.Time,
 	}
 	if len(a.authDataModules) != 0 {
 		ctx.nameAttributes = authdata.NewContext(a.authDataModules...)
@@ -630,6 +653,14 @@ func (c *Context) Flags() uint32 {
 		return 0
 	}
 	return c.flags
+}
+
+// TargetName returns the service principal authenticated by the context.
+func (c *Context) TargetName() principal.Principal {
+	if c == nil {
+		return principal.Principal{}
+	}
+	return c.target
 }
 
 // MIC creates an RFC 4121 integrity token.

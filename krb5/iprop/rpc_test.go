@@ -7,6 +7,24 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
+func TestServicePrincipalValidation(t *testing.T) {
+	realm := "EXAMPLE.COM"
+	if !validIpropService(principal.Principal{
+		Realm: realm, Components: []string{"kiprop", "master"},
+	}, realm) {
+		t.Fatal("valid iprop service rejected")
+	}
+	for _, service := range []principal.Principal{
+		{Realm: realm, Components: []string{"kiprop"}},
+		{Realm: realm, Components: []string{"host", "master"}},
+		{Realm: "OTHER.COM", Components: []string{"kiprop", "master"}},
+	} {
+		if validIpropService(service, realm) {
+			t.Fatalf("invalid iprop service accepted: %v", service)
+		}
+	}
+}
+
 func TestDispatchAuthorizationAndUpdates(t *testing.T) {
 	db := kdb.NewDatabase("EXAMPLE.COM")
 	if err := db.CreatePrincipal("host/replica@EXAMPLE.COM", "secret"); err != nil {

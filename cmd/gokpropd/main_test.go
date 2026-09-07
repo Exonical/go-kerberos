@@ -109,7 +109,9 @@ func TestDefaultIncrementalStashPathUsesProfile(t *testing.T) {
 
 func TestLoadACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kpropd.acl")
-	if err := os.WriteFile(path, []byte("# comment\nmaster@EXAMPLE.COM aes256-cts\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("# comment\nmaster@EXAMPLE.COM aes256-cts-hmac-sha1-96\n"+
+		"master@EXAMPLE.COM 17\n"+
+		"bad@EXAMPLE.COM not-an-enctype\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	authorize, err := loadACL(path)
@@ -117,11 +119,17 @@ func TestLoadACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"master"}}
-	if err := authorize(allowed); err != nil {
+	if err := authorize(allowed, 18); err != nil {
 		t.Fatalf("authorized principal rejected: %v", err)
 	}
+	if err := authorize(allowed, 17); err != nil {
+		t.Fatalf("second authorized enctype rejected: %v", err)
+	}
+	if err := authorize(allowed, 23); err == nil {
+		t.Fatal("unauthorized enctype accepted")
+	}
 	denied := principal.Principal{Realm: "EXAMPLE.COM", Components: []string{"other"}}
-	if err := authorize(denied); err == nil {
+	if err := authorize(denied, 18); err == nil {
 		t.Fatal("unauthorized principal accepted")
 	}
 }
@@ -275,7 +283,7 @@ func TestServeOneGoToGoTransfer(t *testing.T) {
 			Principal: service, KVNO: 1, Enctype: etype.ID(), Key: serviceKey,
 		}}},
 		Realm: realm,
-		Authorize: func(got principal.Principal) error {
+		Authorize: func(got principal.Principal, _ int32) error {
 			if got.String() != user.String() {
 				t.Fatalf("authorized principal = %s", got)
 			}

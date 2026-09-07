@@ -15,16 +15,16 @@ import (
 
 type KCMServer struct {
 	Socket string
-	// IsolatePeers scopes all cache state to the Unix peer UID. When false,
-	// the server retains the shared namespace used by the test daemon and
-	// existing callers.
-	IsolatePeers bool
-	mu           sync.Mutex
-	shared       *kcmNamespace
-	namespaces   map[uint32]*kcmNamespace
-	peerUID      func(net.Conn) (uint32, error)
-	listener     net.Listener
-	conns        map[net.Conn]struct{}
+	// SharedNamespace disables per-peer-UID cache isolation and restricts the
+	// socket to its owner. Isolated multi-user daemons use a world-connectable
+	// socket and enforce access through peer-UID namespaces.
+	SharedNamespace bool
+	mu              sync.Mutex
+	shared          *kcmNamespace
+	namespaces      map[uint32]*kcmNamespace
+	peerUID         func(net.Conn) (uint32, error)
+	listener        net.Listener
+	conns           map[net.Conn]struct{}
 }
 
 type kcmNamespace struct {
@@ -70,6 +70,14 @@ func (s *KCMServer) Serve() error {
 	if err != nil {
 		return err
 	}
+	mode := os.FileMode(0666)
+	if s.SharedNamespace {
+		mode = 0600
+	}
+	if err := os.Chmod(s.Socket, mode); err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("kcm: set socket permissions: %w", err)
+	}
 	defer os.Remove(s.Socket)
 	return s.ServeListener(listener)
 }
@@ -101,7 +109,7 @@ func (s *KCMServer) ServeListener(listener net.Listener) error {
 			s.conns = make(map[net.Conn]struct{})
 		}
 		uid := uint32(0)
-		if s.IsolatePeers {
+		if !s.SharedNamespace {
 			lookup := s.peerUID
 			if lookup == nil {
 				lookup = kcmPeerUID
@@ -178,7 +186,7 @@ func (s *KCMServer) namespace(uid uint32) *kcmNamespace {
 			defaultName: "default",
 		}
 	}
-	if !s.IsolatePeers {
+	if s.SharedNamespace {
 		return s.shared
 	}
 	if s.namespaces == nil {
@@ -442,6 +450,9 @@ func (s *KCMServer) replace(ns *kcmNamespace, cache *kcmServerCache, rest []byte
 	}
 	count := binary.BigEndian.Uint32(rest[:4])
 	rest = rest[4:]
+	if uint64(count) > uint64(len(rest))/4 {
+		return nil, kcmErrInternal
+	}
 	creds := make([][]byte, 0, count)
 	for i := uint32(0); i < count; i++ {
 		if len(rest) < 4 {

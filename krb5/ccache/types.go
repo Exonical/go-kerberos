@@ -293,7 +293,10 @@ func (h *Handle) Write(cache *Cache) error {
 	if h.typ == TypeMSLSA {
 		return ErrMSLSAReadOnly
 	}
-	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err := os.Remove(h.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}

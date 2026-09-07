@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/kprop"
@@ -222,12 +223,12 @@ func defaultDatabasePath(cfg *config.Config, realm string) string {
 	return filepath.Join("/var/lib/krb5kdc", "principal")
 }
 
-func loadACL(path string) (func(principal.Principal) error, error) {
+func loadACL(path string) (func(principal.Principal, int32) error, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read ACL %q: %w", path, err)
 	}
-	allowed := make(map[string]bool)
+	allowed := make(map[string]map[int32]bool)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -235,15 +236,48 @@ func loadACL(path string) (func(principal.Principal) error, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) > 0 {
-			allowed[fields[0]] = true
+			if len(fields) > 2 {
+				continue
+			}
+			if allowed[fields[0]] == nil {
+				allowed[fields[0]] = make(map[int32]bool)
+			}
+			if len(fields) == 1 {
+				allowed[fields[0]][0] = true
+				continue
+			}
+			enctype, err := parseACLEnctype(fields[1])
+			if err != nil {
+				continue
+			}
+			allowed[fields[0]][enctype] = true
 		}
 	}
-	return func(client principal.Principal) error {
-		if !allowed[client.String()] {
+	return func(client principal.Principal, enctype int32) error {
+		rules := allowed[client.String()]
+		if len(rules) == 0 || (!rules[0] && !rules[enctype]) {
 			return fmt.Errorf("principal %s is not authorized", client)
 		}
 		return nil
 	}, nil
+}
+
+func parseACLEnctype(value string) (int32, error) {
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err == nil {
+		return int32(parsed), nil
+	}
+	normalized := strings.ToLower(value)
+	for _, candidate := range []int32{
+		crypto.EnctypeAES128SHA1, crypto.EnctypeAES256SHA1,
+		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
+		crypto.EnctypeCamellia128, crypto.EnctypeCamellia256,
+	} {
+		if normalized == strings.ToLower(crypto.EnctypeName(candidate)) {
+			return candidate, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid enctype %q", value)
 }
 
 func loadReceivedDump(reader io.Reader, size uint64, options propdOptions) error {

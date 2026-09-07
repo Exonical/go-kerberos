@@ -40,6 +40,7 @@ func TestFormatPrincipalEscaping(t *testing.T) {
 		{"slash", Principal{Realm: "REALM", Components: []string{"service", "a/b"}}, `service/a\/b@REALM`},
 		{"at", Principal{Realm: "REALM", Components: []string{`user@name`}}, `user\@name@REALM`},
 		{"backslash", Principal{Realm: "REALM", Components: []string{`a\b`}}, `a\\b@REALM`},
+		{"controls", Principal{Realm: "REALM", Components: []string{"a\t\n\b\x00"}}, `a\t\n\b\0@REALM`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,6 +52,16 @@ func TestFormatPrincipalEscaping(t *testing.T) {
 				t.Fatalf("Format() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseMITControlAndUnknownEscapes(t *testing.T) {
+	got, err := Parse(`a\t\n\b\0\q@REALM`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Components[0] != "a\t\n\b\x00q" {
+		t.Fatalf("component = %q", got.Components[0])
 	}
 }
 

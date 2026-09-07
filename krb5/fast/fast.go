@@ -219,10 +219,12 @@ func (a *Armor) UnwrapReply(padata protocol.MethodData, ticket []byte, nonce uin
 	if response.Nonce != nonce {
 		return nil, fmt.Errorf("FAST reply: nonce mismatch")
 	}
-	if response.Finished != nil {
-		if err := a.EType.VerifyChecksum(a.Key, UsageFinished, ticket, response.Finished.TicketChecksum.Checksum); err != nil {
-			return nil, fmt.Errorf("FAST reply finished: %w", err)
+	if response.Finished == nil {
+		if len(ticket) > 0 {
+			return nil, fmt.Errorf("FAST reply: missing finished message")
 		}
+	} else if err := a.EType.VerifyChecksum(a.Key, UsageFinished, ticket, response.Finished.TicketChecksum.Checksum); err != nil {
+		return nil, fmt.Errorf("FAST reply finished: %w", err)
 	}
 	return &Reply{
 		PAData: response.PAData, StrengthenKey: response.StrengthenKey,

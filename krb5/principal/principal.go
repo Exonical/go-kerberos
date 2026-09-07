@@ -57,14 +57,31 @@ func Parse(name string) (*Principal, error) {
 			}
 			i++
 			switch name[i] {
-			case '/', '@', '\\':
+			case '/', '@', '\\', 't', 'n', 'b', '0':
+				var value byte
+				switch name[i] {
+				case 't':
+					value = '\t'
+				case 'n':
+					value = '\n'
+				case 'b':
+					value = '\b'
+				case '0':
+					value = 0
+				default:
+					value = name[i]
+				}
+				if inRealm {
+					realm.WriteByte(value)
+				} else {
+					component.WriteByte(value)
+				}
+			default:
 				if inRealm {
 					realm.WriteByte(name[i])
 				} else {
 					component.WriteByte(name[i])
 				}
-			default:
-				return nil, fmt.Errorf("parse principal: unsupported escape \\%c", name[i])
 			}
 		case '/':
 			if inRealm {
@@ -140,6 +157,18 @@ func writeEscaped(out *strings.Builder, value string) {
 		switch value[i] {
 		case '/', '@', '\\':
 			out.WriteByte('\\')
+		case '\t':
+			out.WriteString(`\t`)
+			continue
+		case '\n':
+			out.WriteString(`\n`)
+			continue
+		case '\b':
+			out.WriteString(`\b`)
+			continue
+		case 0:
+			out.WriteString(`\0`)
+			continue
 		}
 		out.WriteByte(value[i])
 	}

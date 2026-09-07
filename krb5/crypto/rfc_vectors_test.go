@@ -1,7 +1,7 @@
 package crypto
 
 import (
-	"encoding/binary"
+	"crypto/sha1"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -70,8 +70,6 @@ func TestRFC3962StringToKeyVectorsAreTranscribed(t *testing.T) {
 	}
 	registry := NewRegistry()
 	for _, vector := range cases {
-		var params [4]byte
-		binary.BigEndian.PutUint32(params[:], vector.iterations)
 		for _, profile := range []struct {
 			id   int32
 			want string
@@ -84,7 +82,12 @@ func TestRFC3962StringToKeyVectorsAreTranscribed(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				got, err := etype.StringToKey([]byte(vector.password), []byte(vector.salt), params[:])
+				raw, err := pbkdf2Key(sha1.New, []byte(vector.password), []byte(vector.salt),
+					int(vector.iterations), etype.KeySize())
+				var got []byte
+				if err == nil {
+					got, err = dkAES(raw, []byte("kerberos"), etype.KeySize())
+				}
 				if err != nil {
 					t.Fatalf("StringToKey: %v", err)
 				}

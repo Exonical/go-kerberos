@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 )
@@ -77,18 +79,27 @@ func TagFromCiphertext(ciphertext []byte, trailerLen int) []byte {
 		trailerLen = len(ciphertext)
 	}
 	ciphertext = ciphertext[len(ciphertext)-trailerLen:]
-	if len(ciphertext) > tagLen {
-		ciphertext = ciphertext[:tagLen]
+	return normalizeTag(ciphertext)
+}
+
+// TagFromChecksum returns the replay tag used by MIT for a KRB-SAFE checksum.
+func TagFromChecksum(checksum []byte) []byte {
+	return normalizeTag(checksum)
+}
+
+func normalizeTag(tag []byte) []byte {
+	if len(tag) > tagLen {
+		tag = tag[:tagLen]
 	}
-	return append([]byte(nil), ciphertext...)
+	return append([]byte(nil), tag...)
 }
 
 // Default resolves the MIT-style default replay cache name.
 func Default(cfg *config.Config) (Cache, error) {
-	if value, ok := os.LookupEnv("KRB5RCACHENAME"); ok {
+	if value, ok := secureenv.Lookup("KRB5RCACHENAME"); ok {
 		return Resolve(value)
 	}
-	if kind, ok := os.LookupEnv("KRB5RCACHETYPE"); ok {
+	if kind, ok := secureenv.Lookup("KRB5RCACHETYPE"); ok {
 		return Resolve(kind + ":")
 	}
 	if cfg != nil && cfg.DefaultRCacheName != "" {
@@ -243,10 +254,48 @@ type noneCache struct{}
 
 func (noneCache) Store([]byte, time.Time, time.Duration) error { return nil }
 
+// Memory is a process-local replay cache with MIT memrcache semantics.
+//
+// The zero value is ready for use. Entries older than the supplied clock skew
+// are discarded when a new tag is stored.
+type Memory struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+var _ Cache = (*Memory)(nil)
+
+// Store records a tag and reports ErrReplay if it is already present.
+func (c *Memory) Store(tag []byte, now time.Time, skew time.Duration) error {
+	if c == nil {
+		return errors.New("replay cache: nil memory cache")
+	}
+	if skew < 0 {
+		skew = -skew
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]time.Time)
+	}
+	key := string(tag)
+	if _, ok := c.entries[key]; ok {
+		return ErrReplay
+	}
+	expiry := now.Add(-skew)
+	for storedTag, timestamp := range c.entries {
+		if timestamp.Before(expiry) {
+			delete(c.entries, storedTag)
+		}
+	}
+	c.entries[key] = now
+	return nil
+}
+
 func defaultPath() string {
-	dir := os.Getenv("KRB5RCACHEDIR")
+	dir := secureenv.Get("KRB5RCACHEDIR")
 	if dir == "" {
-		dir = os.Getenv("TMPDIR")
+		dir = secureenv.Get("TMPDIR")
 	}
 	if dir == "" {
 		for _, candidate := range []string{"/var/tmp", "/usr/tmp", "/var/usr/tmp", "/tmp"} {

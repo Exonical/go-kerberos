@@ -192,6 +192,22 @@ func TestReadKeytabV2(t *testing.T) {
 	}
 }
 
+type keytabOversizeReader struct{}
+
+func (keytabOversizeReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+func TestKeytabReadRejectsOversizeInput(t *testing.T) {
+	_, err := Read(keytabOversizeReader{})
+	if err == nil || err.Error() != "read keytab: input too large" {
+		t.Fatalf("oversize keytab error = %v", err)
+	}
+}
+
 func TestReadKeytabMultiComponentAndUnknownEnctype(t *testing.T) {
 	p := principal.Principal{
 		Realm:      "EXAMPLE.COM",
