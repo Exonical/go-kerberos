@@ -428,11 +428,34 @@ func (s *Server) DumpWithMasterPassword(password string) ([]byte, error) {
 	return mitdump.DumpWithMasterPassword(s.Database, password)
 }
 
+// DumpWithMasterKey serializes the current database for a kprop full-resync
+// transfer using an already recovered database master key.
+func (s *Server) DumpWithMasterKey() ([]byte, error) {
+	if s == nil || s.Database == nil {
+		return nil, errors.New("iprop: nil database")
+	}
+	if s.MasterEnctype == 0 || len(s.MasterKey) == 0 {
+		return nil, errors.New("iprop: master key is not configured")
+	}
+	return mitdump.DumpWithMasterKey(s.Database, s.MasterEnctype, s.MasterKey)
+}
+
 // PushFullResync serializes the current database and transfers it to a
 // connected replica kprop server.
 func (s *Server) PushFullResync(ctx context.Context, conn net.Conn,
 	credentials *client.Credentials, password string) error {
 	dump, err := s.DumpWithMasterPassword(password)
+	if err != nil {
+		return err
+	}
+	return kprop.Send(ctx, conn, credentials, bytes.NewReader(dump), uint64(len(dump)))
+}
+
+// PushFullResyncWithMasterKey transfers a dump encrypted with the configured
+// database master key to a connected replica kprop server.
+func (s *Server) PushFullResyncWithMasterKey(ctx context.Context, conn net.Conn,
+	credentials *client.Credentials) error {
+	dump, err := s.DumpWithMasterKey()
 	if err != nil {
 		return err
 	}
@@ -778,17 +801,25 @@ func writeRecord(conn net.Conn, data []byte) error {
 	return err
 }
 
-// Replica applies incremental updates to a local Database and persists its
-// cursor in memory. Seed the database and cursor from a dump before polling.
+// Replica applies incremental updates to a local Database and optionally
+// persists its cursor in a MIT-compatible Ulog. Seed the database and cursor
+// from a dump before polling.
 type Replica struct {
-	Client        *Client
+	Client        ReplicaClient
 	Database      *kdb.Database
 	Cursor        Last
+	Ulog          *Ulog
 	MasterEnctype int32
 	MasterKey     []byte
 	// LoadDump, when set, applies a received kprop full-resync dump and updates
 	// the local store. It is invoked by the kprop server integration.
 	LoadDump func(io.Reader, uint64) error
+}
+
+// ReplicaClient is the authenticated subset of Client needed by a replica.
+// It also permits deterministic status and restart tests without a network.
+type ReplicaClient interface {
+	GetUpdates(context.Context, Last) (IncrementalResult, error)
 }
 
 // KpropServer returns a kprop receiver which delegates loaded dumps to
@@ -816,8 +847,27 @@ func (r *Replica) Poll(ctx context.Context) (UpdateStatus, error) {
 	if err := r.apply(result.Updates); err != nil {
 		return UpdateError, err
 	}
+	if r.Ulog != nil {
+		for _, update := range result.Updates {
+			if err := r.Ulog.AddUpdate(update); err != nil {
+				return UpdateError, err
+			}
+		}
+	}
 	r.Cursor = result.LastEntry
 	return result.Ret, nil
+}
+
+// SetCursor records the cursor established by a completed full resync.
+func (r *Replica) SetCursor(last Last) error {
+	if r == nil {
+		return errors.New("iprop: nil replica")
+	}
+	r.Cursor = last
+	if r.Ulog != nil {
+		return r.Ulog.SetCursor(last)
+	}
+	return nil
 }
 
 func (r *Replica) apply(updates []Update) error {

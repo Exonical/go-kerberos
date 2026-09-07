@@ -47,6 +47,26 @@ func TestUlogRoundTripAndReset(t *testing.T) {
 	}
 }
 
+func TestUlogSetCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "principal.ulog")
+	log, err := Create(path, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	want := Last{LastSno: 42, LastTime: Time{Seconds: 7, Useconds: 9}}
+	if err := log.SetCursor(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := log.Last()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("cursor = %#v, want %#v", got, want)
+	}
+}
+
 func TestUlogHeaderBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "principal.ulog")
 	log, err := Create(path, 4)

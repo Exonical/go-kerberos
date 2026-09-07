@@ -113,6 +113,31 @@ EXAMPLE.COM = {
 	}
 }
 
+func TestParseKDCConfigIPROPRelations(t *testing.T) {
+	profile, err := ParseKDCConf([]byte(`[kdcdefaults]
+ iprop_replica_poll = 1m 30s
+ iprop_port = 2121
+ iprop_enable = true
+[realms]
+ EXAMPLE.COM = {
+   iprop_logfile = /var/lib/krb5kdc/replica.ulog
+   iprop_ulogsize = 4096
+ }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, ok := profile.Realm("EXAMPLE.COM")
+	if !ok {
+		t.Fatal("realm settings missing")
+	}
+	if !settings.IpropEnabled || settings.IpropPort != 2121 ||
+		settings.IpropPollTime != 90*time.Second ||
+		settings.IpropUlogSize != 4096 ||
+		settings.IpropLogfile != "/var/lib/krb5kdc/replica.ulog" {
+		t.Fatalf("iprop settings = %#v", settings)
+	}
+}
+
 func TestParseHostRealmOptions(t *testing.T) {
 	cfg, err := Parse([]byte(`[libdefaults]
 qualify_shortname = EXAMPLE.TEST

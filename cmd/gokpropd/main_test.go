@@ -14,6 +14,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/iprop"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
@@ -81,6 +82,41 @@ func TestBuildLoadArgs(t *testing.T) {
 	want := []string{"-r", "EXAMPLE.COM", "load", "-d", "db", "-x", "a", "-x", "b", "replica"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("load args = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenReplicaUlogPersistsCursor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replica.ulog")
+	ulog, cursor, err := openReplicaUlog(path, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != (iprop.Last{}) {
+		t.Fatalf("initial cursor = %#v", cursor)
+	}
+	if err := ulog.AddUpdate(iprop.Update{
+		PrincipalName: "alice@EXAMPLE.COM", EntrySno: 7,
+		Time: iprop.Time{Seconds: 12}, Commit: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ulog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ulog, cursor, err = openReplicaUlog(path, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ulog.Close()
+	if cursor.LastSno != 7 || cursor.LastTime.Seconds != 12 {
+		t.Fatalf("reopened cursor = %#v", cursor)
+	}
+}
+
+func TestReplicaBackoffMatchesMITInitialBusyDelay(t *testing.T) {
+	count := 1
+	if got := ipropBackoff(&count); got != 4*time.Second {
+		t.Fatalf("backoff = %s, want 4s", got)
 	}
 }
 

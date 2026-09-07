@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
+	"github.com/Exonical/go-kerberos/krb5/iprop"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/klog"
@@ -160,6 +161,21 @@ func (s *Server) Serve(listener net.Listener) error {
 			_ = s.serveConn(conn)
 		}()
 	}
+}
+
+// ServeWithIPROP serves kadm5 and the separately registered MIT KIPROP
+// service. MIT kadmind uses distinct listeners and ports for these RPC
+// programs, so the listeners must be configured from kadm5_port and
+// iprop_port respectively.
+func (s *Server) ServeWithIPROP(kadmListener, ipropListener net.Listener,
+	ipropServer *iprop.Server) error {
+	if ipropServer == nil {
+		return errors.New("kadm5: nil iprop server")
+	}
+	errs := make(chan error, 2)
+	go func() { errs <- s.Serve(kadmListener) }()
+	go func() { errs <- ipropServer.Serve(ipropListener) }()
+	return <-errs
 }
 
 type serverSession struct {

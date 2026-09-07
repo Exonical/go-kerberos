@@ -80,3 +80,10 @@ func TestDispatchFullResyncStatus(t *testing.T) {
 		t.Fatalf("full resync status = %v, want OK", result.Ret)
 	}
 }
+
+func TestDumpWithMasterKeyRequiresConfiguredKey(t *testing.T) {
+	server := NewServer(kdb.NewDatabase("EXAMPLE.COM"), nil)
+	if _, err := server.DumpWithMasterKey(); err == nil {
+		t.Fatal("dump unexpectedly succeeded without master key")
+	}
+}

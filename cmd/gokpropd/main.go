@@ -70,7 +70,7 @@ func parsePropdArgs(args []string) (propdOptions, error) {
 	fs.Var((*stringList)(&options.DBArgs), "x", "database argument")
 	fs.StringVar(&options.Port, "P", options.Port, "port")
 	fs.StringVar(&options.ACL, "a", options.ACL, "ACL file")
-	fs.StringVar(&options.AdminServer, "A", "", "admin server")
+	fs.StringVar(&options.AdminServer, "A", "", "admin server for incremental iprop")
 	fs.StringVar(&options.PIDFile, "pid-file", "", "pid file")
 	fs.BoolVar(&options.RunOnce, "t", false, "run once")
 	if err := fs.Parse(args); err != nil {
@@ -113,9 +113,6 @@ func run(args []string, out, errOut io.Writer) error {
 	if options.Database == "" {
 		options.Database = defaultDatabasePath(cfg, realm)
 	}
-	if options.AdminServer != "" && options.Debug {
-		fmt.Fprintln(errOut, "iprop incremental mode is not implemented; accepting full resync transfers")
-	}
 	kt, err := keytab.ResolveWithConfig(options.Keytab, cfg)
 	if err != nil {
 		return fmt.Errorf("resolve keytab: %w", err)
@@ -128,6 +125,10 @@ func run(args []string, out, errOut io.Writer) error {
 		if err := writePID(options.PIDFile); err != nil {
 			return err
 		}
+	}
+	if options.AdminServer != "" || profileIpropEnabled(realm) {
+		return runIncremental(context.Background(), options, cfg, realm, kt,
+			authorize, out, errOut)
 	}
 	listener, err := net.Listen("tcp", net.JoinHostPort("", options.Port))
 	if err != nil {

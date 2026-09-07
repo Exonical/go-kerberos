@@ -814,14 +814,32 @@ PID-file settings. The Go receiver always runs in the foreground, so `-D` is
 an accepted no-op, and `-t` handles one transfer. This follows
 `src/kprop/kprop.c` and `src/kprop/kpropd.c` from MIT Kerberos 1.22.2.
 
-MIT's `kpropd` incremental iprop polling mode is intentionally not enabled by
-the standalone command in this slice. The existing Go `krb5/iprop` APIs
-support authenticated updates and full-resync adapters, but do not provide a
-complete profile-driven `kiprop` RPC polling daemon. `-A` is accepted for
-option compatibility and does not claim incremental behavior; use the
-full-resync path above. No MIT live command gate is enabled when a disposable
-MIT kpropd fixture is unavailable; protocol interoperability is covered by
-the existing `krb5/kprop` gates.
+`gokpropd -A` implements the MIT `kpropd` incremental polling loop. It uses
+the `kiprop/REALM@REALM` client principal from the configured `-s` keytab,
+requests a TGT, obtains the `kiprop/<admin_server>@REALM` service ticket, and
+persists its cursor in the MIT-compatible fixed-block ulog. The `kdc.conf`
+relations `iprop_enable`,
+`iprop_port`, `iprop_replica_poll` (and legacy `iprop_slave_poll`),
+`iprop_resync_timeout`, `iprop_ulogsize`, and
+`iprop_logfile` are parsed; an unset poll interval defaults to ten seconds as
+in MIT. `UPDATE_BUSY` uses the MIT `2 << count` backoff capped at five
+minutes, while `UPDATE_NIL` resets the backoff. Full-resync extension version
+1 is attempted first and falls back to the legacy procedure when the RPC
+procedure is unavailable; the dump is received by the concurrent kprop
+listener and the local ulog cursor is reseeded from the master's last entry.
+`-t` performs one poll cycle, waiting for a requested full-resync transfer.
+
+The Go `iprop.Server` is already a separate authenticated KIPROP RPC service,
+matching MIT's separate `iprop_port` listener. `kadm5.Server.ServeWithIPROP`
+can serve it alongside kadm5; no standalone `gokadmind` process currently
+owns listener setup. The existing ACL callback can enforce the `iprop`
+operation.
+
+Hermetic coverage exercises cursor persistence, status handling, full-resync
+cursor reseeding, and the kadm5/iprop dual-service API. A live MIT incremental
+daemon gate remains skipped because the repository harness does not provide a
+disposable non-interactive MIT kadmind/kpropd pair with a synchronized dump
+and keytab; existing MIT iprop and kprop protocol gates remain enabled.
 
 ## Authorization-data plugin parity
 
