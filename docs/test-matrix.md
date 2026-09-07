@@ -561,10 +561,11 @@ cover the available behavior.
 
 ## Go command-line tools
 
-`cmd/gokdestroy`, `cmd/gokswitch`, `cmd/gokpasswd`, and `cmd/gokutil` provide
+`cmd/gokdestroy`, `cmd/gokswitch`, `cmd/gokpasswd`, `cmd/gokutil`,
+`cmd/gokcpytkt`, and `cmd/gokdeltkt` provide
 the supported non-interactive Go command surfaces for cache destruction and
 selection, RFC 3244 password changes, and keytab editing. DIR and FILE cache
-operations, password changes against the disposable MIT KDC, and keytabs
+operations, ticket copying/deletion, password changes against the disposable MIT KDC, and keytabs
 consumed by MIT `klist` and `ktutil` are covered by the integration suite.
 The ccache package also supports MEMORY, KCM, and Linux KEYRING handles where
 the corresponding runtime service is available; collection-wide operations
@@ -580,6 +581,10 @@ with these limitations documented rather than silently emulated. `gokutil`
 editing currently accepts only FILE keytabs. Destroying a MEMORY ccache marks
 all existing handles empty; a subsequent write through an old handle creates a
 new cache for that name, while other old handles remain destroyed.
+`gokcpytkt` and `gokdeltkt` implement MIT service-ticket copy and deletion,
+including server-name-only and supported-enctype matching. MSLSA caches remain
+read-only, so using one as a destination for `gokcpytkt` reports the documented
+read-only store error.
 
 ## MIT fuzz seed corpora
 

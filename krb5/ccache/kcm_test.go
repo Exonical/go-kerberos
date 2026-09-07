@@ -124,7 +124,7 @@ func TestKCMWireFramingAndFlagMapping(t *testing.T) {
 	if err != nil || !bytes.Equal(decoded, reply) {
 		t.Fatalf("decoded reply = %x, %v", decoded, err)
 	}
-	flags := MITMatchTimes | MITMatchIsSKey | MITMatchServerName | MITMatchKeyType
+	flags := MITMatchTimes | MITMatchIsSKey | MITMatchServerName | MITMatchKeyType | MITMatchSupportedKTypes
 	want := KCMMatchTimes | KCMMatchIsSKey | KCMMatchServerName | KCMMatchKeyType
 	if got := MapTCFlags(flags); got != want {
 		t.Fatalf("MapTCFlags = %#x, want %#x", got, want)

@@ -33,6 +33,7 @@ type Handle struct {
 	name           string
 	path           string
 	dir            string
+	cfg            *config.Config
 	memory         *memoryCache
 	memoryHandleMu sync.RWMutex
 	kcm            *kcmHandle
@@ -101,10 +102,20 @@ func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
 			return nil, err
 		}
 	}
+	var (
+		handle *Handle
+		err    error
+	)
 	if strings.HasPrefix(name, "KCM:") && cfg != nil {
-		return ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
+		handle, err = ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
+	} else {
+		handle, err = Resolve(name)
 	}
-	return Resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	handle.cfg = cfg
+	return handle, nil
 }
 
 // SetDefaultName stores the user's platform default credential-cache name.

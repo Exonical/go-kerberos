@@ -61,15 +61,16 @@ const (
 // KCM retrieval and removal matching flags, using the Heimdal wire values.
 const (
 	// MIT credential-cache matching flags.
-	MITMatchTimes        uint32 = 0x00000001
-	MITMatchIsSKey       uint32 = 0x00000002
-	MITMatchFlags        uint32 = 0x00000004
-	MITMatchTimesExact   uint32 = 0x00000008
-	MITMatchFlagsExact   uint32 = 0x00000010
-	MITMatchAuthData     uint32 = 0x00000020
-	MITMatchServerName   uint32 = 0x00000040
-	MITMatchSecondTicket uint32 = 0x00000080
-	MITMatchKeyType      uint32 = 0x00000100
+	MITMatchTimes           uint32 = 0x00000001
+	MITMatchIsSKey          uint32 = 0x00000002
+	MITMatchFlags           uint32 = 0x00000004
+	MITMatchTimesExact      uint32 = 0x00000008
+	MITMatchFlagsExact      uint32 = 0x00000010
+	MITMatchAuthData        uint32 = 0x00000020
+	MITMatchServerName      uint32 = 0x00000040
+	MITMatchSecondTicket    uint32 = 0x00000080
+	MITMatchKeyType         uint32 = 0x00000100
+	MITMatchSupportedKTypes uint32 = 0x00000200
 )
 
 const (
@@ -553,8 +554,16 @@ func (h *Handle) Store(credential Credential) error {
 	if h != nil && h.typ == TypeKeyring {
 		return h.keyring.store(credential)
 	}
-	if h == nil || h.typ != TypeKCM {
-		return errors.New("ccache: store requires a KCM cache")
+	if h == nil {
+		return errors.New("ccache: store requires a cache")
+	}
+	if h.typ != TypeKCM {
+		cache, err := h.Read()
+		if err != nil {
+			return err
+		}
+		cache.Credentials = append(cache.Credentials, credential)
+		return h.Write(cache)
 	}
 	value, err := marshalCredentialBytes(credential)
 	if err != nil {
@@ -573,6 +582,9 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 		if err != nil {
 			return Credential{}, err
 		}
+		if flags&MITMatchSupportedKTypes != 0 {
+			return retrieveCredentialsWithOrder(cache.Credentials, match, flags, supportedEnctypeOrder(h))
+		}
 		wireFlags := MapTCFlags(flags)
 		for _, candidate := range cache.Credentials {
 			if credentialMatches(candidate, match, wireFlags) {
@@ -581,8 +593,22 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 		}
 		return Credential{}, errors.New("ccache: KEYRING credential not found")
 	}
-	if h == nil || h.typ != TypeKCM {
-		return Credential{}, errors.New("ccache: retrieve requires a KCM cache")
+	if h == nil {
+		return Credential{}, errors.New("ccache: retrieve requires a cache")
+	}
+	if h.typ != TypeKCM {
+		cache, err := h.Read()
+		if err != nil {
+			return Credential{}, err
+		}
+		return retrieveCredentialsWithOrder(cache.Credentials, match, flags, supportedEnctypeOrder(h))
+	}
+	if flags&MITMatchSupportedKTypes != 0 {
+		cache, err := h.Read()
+		if err != nil {
+			return Credential{}, err
+		}
+		return retrieveCredentialsWithOrder(cache.Credentials, match, flags, supportedEnctypeOrder(h))
 	}
 	value, err := marshalMatchCredential(match)
 	if err != nil {
@@ -623,10 +649,40 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 // Remove removes the first credential matching match and flags.
 func (h *Handle) Remove(match Credential, flags uint32) error {
 	if h != nil && h.typ == TypeKeyring {
+		if flags&MITMatchSupportedKTypes != 0 {
+			cache, err := h.Read()
+			if err != nil {
+				return err
+			}
+			if err := removeCredentials(cache, match, flags); err != nil {
+				return err
+			}
+			return h.Write(cache)
+		}
 		return h.keyring.remove(match, flags)
 	}
-	if h == nil || h.typ != TypeKCM {
-		return errors.New("ccache: remove requires a KCM cache")
+	if h == nil {
+		return errors.New("ccache: remove requires a cache")
+	}
+	if h.typ != TypeKCM {
+		cache, err := h.Read()
+		if err != nil {
+			return err
+		}
+		if err := removeCredentials(cache, match, flags); err != nil {
+			return err
+		}
+		return h.Write(cache)
+	}
+	if flags&MITMatchSupportedKTypes != 0 {
+		cache, err := h.Read()
+		if err != nil {
+			return err
+		}
+		if err := removeCredentials(cache, match, flags); err != nil {
+			return err
+		}
+		return h.Write(cache)
 	}
 	value, err := marshalMatchCredential(match)
 	if err != nil {
