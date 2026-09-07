@@ -12,6 +12,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/hostrealm"
 	"github.com/Exonical/go-kerberos/krb5/iprop"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
@@ -41,12 +42,12 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 	}
 	adminHost, adminPort := ipropAdminAddress(cfg, realm, options.AdminServer)
 	entries := kt.EntriesSnapshot()
+	clientPrincipal, err := localIpropPrincipal(ctx, cfg, realm)
+	if err != nil {
+		return err
+	}
 	var entry keytab.Entry
 	found := false
-	clientPrincipal := principal.Principal{
-		Realm: realm, NameType: principal.NTSrvHst,
-		Components: []string{"kiprop", realm},
-	}
 	for _, candidate := range entries {
 		if candidate.Principal.String() == clientPrincipal.String() {
 			entry, found = candidate, true
@@ -243,6 +244,29 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 			return fmt.Errorf("iprop unknown update status %d", status)
 		}
 	}
+}
+
+func localIpropPrincipal(ctx context.Context, cfg *config.Config,
+	realm string) (principal.Principal, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return principal.Principal{}, fmt.Errorf("get local hostname: %w", err)
+	}
+	return localIpropPrincipalForHost(ctx, cfg, realm, hostname)
+}
+
+func localIpropPrincipalForHost(ctx context.Context, cfg *config.Config,
+	realm, hostname string) (principal.Principal, error) {
+	p := principal.Principal{
+		Realm: realm, NameType: principal.NTSrvHst,
+		Components: []string{"kiprop", hostname},
+	}
+	var err error
+	p, err = hostrealm.CanonicalizePrincipal(ctx, cfg, p, hostrealm.Options{})
+	if err != nil {
+		return principal.Principal{}, fmt.Errorf("canonicalize local hostname: %w", err)
+	}
+	return p, nil
 }
 
 func requestFullResync(ctx context.Context, c *iprop.Client) (iprop.FullResyncResult, error) {

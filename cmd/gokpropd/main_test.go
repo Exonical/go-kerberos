@@ -13,6 +13,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
+	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/iprop"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
@@ -82,6 +83,23 @@ func TestBuildLoadArgs(t *testing.T) {
 	want := []string{"-r", "EXAMPLE.COM", "load", "-d", "db", "-x", "a", "-x", "b", "replica"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("load args = %#v, want %#v", got, want)
+	}
+}
+
+func TestLocalIpropPrincipalCanonicalizesHostname(t *testing.T) {
+	cfg := &config.Config{
+		DNSCanonicalizeHostname: "false",
+		QualifyShortname:        "example.test",
+		QualifyShortnameSet:     true,
+	}
+	p, err := localIpropPrincipalForHost(context.Background(), cfg,
+		"EXAMPLE.COM", "Replica")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "kiprop/replica.example.test@EXAMPLE.COM"
+	if got := p.String(); got != want {
+		t.Fatalf("principal = %q, want %q", got, want)
 	}
 }
 

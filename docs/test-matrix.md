@@ -815,9 +815,10 @@ an accepted no-op, and `-t` handles one transfer. This follows
 `src/kprop/kprop.c` and `src/kprop/kpropd.c` from MIT Kerberos 1.22.2.
 
 `gokpropd -A` implements the MIT `kpropd` incremental polling loop. It uses
-the `kiprop/REALM@REALM` client principal from the configured `-s` keytab,
-requests a TGT, obtains the `kiprop/<admin_server>@REALM` service ticket, and
-persists its cursor in the MIT-compatible fixed-block ulog. The `kdc.conf`
+the `kiprop/<canonical-local-hostname>@REALM` client principal from the
+configured `-s` keytab, requests a TGT, obtains the
+`kiprop/<admin_server>@REALM` service ticket, and persists its cursor in the
+MIT-compatible fixed-block ulog. The `kdc.conf`
 relations `iprop_enable`,
 `iprop_port`, `iprop_replica_poll` (and legacy `iprop_slave_poll`),
 `iprop_resync_timeout`, `iprop_ulogsize`, and
