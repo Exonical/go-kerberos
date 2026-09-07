@@ -13,6 +13,26 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestKeyringTimeoutCalculations(t *testing.T) {
+	if timeout, ok := keyringCredentialTimeout(110, 100); !ok || timeout != 10 {
+		t.Fatalf("credential timeout = %d, %v", timeout, ok)
+	}
+	if _, ok := keyringCredentialTimeout(100, 100); ok {
+		t.Fatal("expired credential received a timeout")
+	}
+	cache := &Cache{Credentials: []Credential{
+		{EndTime: 90},
+		{EndTime: 140},
+	}}
+	if timeout, ok := keyringExpirationTimeout(cache, 100); !ok || timeout != 40 {
+		t.Fatalf("cache timeout = %d, %v", timeout, ok)
+	}
+	cache.Credentials[1].EndTime = 99
+	if timeout, ok := keyringExpirationTimeout(cache, 100); !ok || timeout != 1 {
+		t.Fatalf("expired cache timeout = %d, %v", timeout, ok)
+	}
+}
+
 func TestKeyringCacheReadWrite(t *testing.T) {
 	name := fmt.Sprintf("go-keyring-test-%d", time.Now().UnixNano())
 	cache := resolveKeyringForTest(t, "process:"+name)

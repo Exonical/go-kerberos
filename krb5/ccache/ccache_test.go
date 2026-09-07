@@ -240,6 +240,22 @@ func TestCCacheMalformedInput(t *testing.T) {
 	}
 }
 
+type ccacheOversizeReader struct{}
+
+func (ccacheOversizeReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+func TestCCacheReadRejectsOversizeInput(t *testing.T) {
+	_, err := Read(ccacheOversizeReader{})
+	if err == nil || err.Error() != "read ccache: input too large" {
+		t.Fatalf("oversize ccache error = %v", err)
+	}
+}
+
 func TestReadMITGeneratedCCacheFixture(t *testing.T) {
 	data, err := os.ReadFile("../../testdata/ccaches/mit-alice.ccache")
 	if os.IsNotExist(err) {
