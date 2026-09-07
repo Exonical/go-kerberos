@@ -1,6 +1,7 @@
 package otp
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -160,9 +161,13 @@ func TestRADIUSVerifierAbortsOnTransportError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix-domain RADIUS sockets are unavailable on Windows")
 	}
-	dir := t.TempDir()
-	first := filepath.Join(dir, "missing.sock")
-	second := filepath.Join(dir, "second.sock")
+	dir := os.TempDir()
+	first := filepath.Join(dir, fmt.Sprintf("gk-radius-%d-a", os.Getpid()))
+	second := filepath.Join(dir, fmt.Sprintf("gk-radius-%d-b", os.Getpid()))
+	t.Cleanup(func() {
+		_ = os.Remove(first)
+		_ = os.Remove(second)
+	})
 	listener, err := net.Listen("unix", second)
 	if err != nil {
 		t.Fatal(err)

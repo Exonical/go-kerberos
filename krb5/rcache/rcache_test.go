@@ -313,7 +313,7 @@ func TestDefaultReplayCacheExpandsMITPathTokens(t *testing.T) {
 	}
 	want := filepath.Join(os.TempDir(), "krb5_"+strconv.Itoa(os.Geteuid())+"_"+strconv.Itoa(os.Getuid())+
 		"_"+strconv.Itoa(os.Getuid())+"_"+current.Username)
-	if file2.Path != want {
+	if filepath.Clean(file2.Path) != want {
 		t.Fatalf("expanded cache path = %q, want %q", file2.Path, want)
 	}
 	cfg.DefaultRCacheName = "file2:%{unknown}"
