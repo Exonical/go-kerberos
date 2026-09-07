@@ -123,6 +123,12 @@ func TestKDCPolicyTGSRequestIncludesHeaderAndIndicators(t *testing.T) {
 	now := time.Unix(2000000002, 0).UTC()
 	server := &Server{}
 	header := protocol.Ticket{Realm: "TEST.REALM"}
+	headerPart := protocol.EncTicketPart{
+		Flags:   types.TicketForwardable,
+		CRealm:  "TEST.REALM",
+		CName:   protocol.PrincipalName{NameString: []string{"alice"}},
+		EndTime: types.KerberosTime{Time: now.Add(time.Hour), Present: true},
+	}
 	var got *TGSPolicyRequest
 	server.KDCPolicyModules = []KDCPolicyModule{policyTestModule{
 		name: "capture",
@@ -133,11 +139,79 @@ func TestKDCPolicyTGSRequestIncludesHeaderAndIndicators(t *testing.T) {
 	}}
 	request := protocol.TGSReq{ReqBody: protocol.KDCReqBody{Realm: "TEST.REALM"}}
 	if err := server.applyTGSPolicies(request, principal.Principal{}, kdb.PrincipalRecord{},
-		header, []string{"ONE_HOUR"}, now, nil, nil, nil); err != nil {
+		header, headerPart, []string{"ONE_HOUR"}, now, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got == nil || len(got.AuthIndicators) != 1 ||
-		got.AuthIndicators[0] != "ONE_HOUR" || got.HeaderTicket.Realm != header.Realm {
+		got.AuthIndicators[0] != "ONE_HOUR" || got.HeaderTicket.Realm != header.Realm ||
+		got.Client.Components[0] != "alice" ||
+		got.HeaderTicketPart.Flags != headerPart.Flags ||
+		!got.HeaderTicketPart.EndTime.Present {
 		t.Fatalf("request = %#v", got)
+	}
+}
+
+func TestKDCPolicyTGSCanDenyAuthenticatedRequesterWithTicketContext(t *testing.T) {
+	now := time.Unix(2000000004, 0).UTC()
+	server, kclient := testServer(t, now)
+	var sawContext bool
+	server.KDCPolicyModules = []KDCPolicyModule{policyTestModule{
+		name: "requester",
+		tgs: func(req *TGSPolicyRequest) (KDCPolicyResult, error) {
+			if len(req.Client.Components) == 1 &&
+				req.Client.Components[0] == "alice" &&
+				req.HeaderTicketPart.Flags&types.TicketForwardable != 0 &&
+				req.HeaderTicketPart.EndTime.Present {
+				sawContext = true
+				return KDCPolicyResult{Status: "REQUESTER_POLICY"},
+					krberrors.NewKRBError(krberrors.ErrorCode(12),
+						"host/service.test", "TEST.REALM", now, 0, nil)
+			}
+			return KDCPolicyResult{}, nil
+		},
+	}}
+	user := principalForKDC("alice")
+	tgt, err := kclient.ASExchange(context.Background(), user, "alice-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = kclient.TGSExchange(context.Background(), tgt, principalForKDC("host", "service.test"))
+	if err == nil || !hasKRBCode(err, 12) {
+		t.Fatalf("TGSExchange error = %v, want policy code 12", err)
+	}
+	if !sawContext {
+		t.Fatal("TGS policy did not receive authenticated requester context")
+	}
+}
+
+func TestKDCPolicyAllowStatusDoesNotPersistIntoFailure(t *testing.T) {
+	now := time.Unix(2000000005, 0).UTC()
+	server := &Server{KDCPolicyModules: []KDCPolicyModule{
+		policyTestModule{name: "allow", as: func(*ASPolicyRequest) (KDCPolicyResult, error) {
+			return KDCPolicyResult{Status: "ALLOW_STATUS"}, nil
+		}},
+	}}
+	var audit AuditState
+	if err := server.applyASPolicies(protocol.ASReq{},
+		principal.Principal{}, principal.Principal{}, kdb.PrincipalRecord{},
+		kdb.PrincipalRecord{}, nil, now, nil, nil, &audit); err != nil {
+		t.Fatalf("allowing applyASPolicies: %v", err)
+	}
+	if audit.Status != "" {
+		t.Fatalf("successful audit status = %q, want empty", audit.Status)
+	}
+	server.KDCPolicyModules = append(server.KDCPolicyModules,
+		policyTestModule{name: "deny", as: func(*ASPolicyRequest) (KDCPolicyResult, error) {
+			return KDCPolicyResult{}, krberrors.NewKRBError(
+				krberrors.ErrorCode(12), "krbtgt/TEST.REALM", "TEST.REALM", now, 0, nil)
+		}})
+	audit = AuditState{}
+	if err := server.applyASPolicies(protocol.ASReq{},
+		principal.Principal{}, principal.Principal{}, kdb.PrincipalRecord{},
+		kdb.PrincipalRecord{}, nil, now, nil, nil, &audit); err == nil {
+		t.Fatal("denying applyASPolicies unexpectedly succeeded")
+	}
+	if audit.Status != "" {
+		t.Fatalf("failed audit status = %q, want empty", audit.Status)
 	}
 }

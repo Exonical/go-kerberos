@@ -88,7 +88,8 @@ type OTPVerifier interface {
 type Server struct {
 	Realm string
 	DB    kdb.Store
-	// Trace receives MIT-style diagnostic messages when non-nil.
+	// Trace is invoked synchronously from concurrent request goroutines;
+	// callbacks must be safe for concurrent use.
 	Trace         trace.Callback
 	Logger        *klog.Logger
 	Now           func() time.Time
@@ -2780,7 +2781,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		flags &^= types.TicketRenewable
 		renewTill = nil
 	}
-	if err := s.applyTGSPolicies(request, serviceName, serviceRecord, headerTicket,
+	if err := s.applyTGSPolicies(request, serviceName, serviceRecord, headerTicket, ticketPart,
 		authIndicators, now, &endTime, &renewTill, auditState); err != nil {
 		code := policyErrorCode(err)
 		if armor != nil {

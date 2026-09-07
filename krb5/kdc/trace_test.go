@@ -23,6 +23,7 @@ func TestTraceASAndTGSExchange(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := principalForKDC("host", "service.test")
+	service.Realm = ""
 	if _, err := kclient.TGSExchange(context.Background(), creds, service); err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +32,7 @@ func TestTraceASAndTGSExchange(t *testing.T) {
 	assertTraceContains(t, serverMessages, "TGS-REQ: service host/service.test@TEST.REALM")
 	assertTraceContains(t, serverMessages, "TGS-REQ: issuing ticket")
 	assertTraceContains(t, clientMessages, "Getting initial credentials for alice@TEST.REALM")
+	assertTraceContains(t, clientMessages, "Requesting tickets for host/service.test@TEST.REALM")
 	assertTraceContains(t, clientMessages, "Sending request (")
 	assertTraceContains(t, clientMessages, "Received answer (")
 }

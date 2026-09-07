@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -32,6 +33,58 @@ func TestFromEnv(t *testing.T) {
 		callback, err := FromEnv()
 		if err != nil || callback != nil {
 			t.Fatalf("FromEnv = %v, %v", callback, err)
+		}
+	})
+	t.Run("shared path", func(t *testing.T) {
+		file, err := os.CreateTemp("", "go-kerberos-trace-shared-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := file.Name()
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" {
+			defer os.Remove(path)
+		}
+		path, err = filepath.Abs(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileCallbacks.Lock()
+		before := len(fileCallbacks.values)
+		fileCallbacks.Unlock()
+		t.Setenv("KRB5_TRACE", path)
+		first, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileCallbacks.Lock()
+		afterFirst := len(fileCallbacks.values)
+		fileCallbacks.Unlock()
+		second, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fileCallbacks.Lock()
+		afterSecond := len(fileCallbacks.values)
+		fileCallbacks.Unlock()
+		if afterFirst != before+1 || afterSecond != afterFirst {
+			t.Fatalf("cached callbacks = %d, want one new callback", afterSecond)
+		}
+		first("first")
+		second("second")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(string(data), "\n") != 2 ||
+			!strings.Contains(string(data), ": first\n") ||
+			!strings.Contains(string(data), ": second\n") {
+			t.Fatalf("shared trace file = %q", data)
 		}
 	})
 	t.Run("file", func(t *testing.T) {

@@ -31,11 +31,13 @@ type ASPolicyRequest struct {
 
 // TGSPolicyRequest contains the validated TGS request and ticket context.
 type TGSPolicyRequest struct {
-	Request        protocol.TGSReq
-	Server         principal.Principal
-	ServerRecord   kdb.PrincipalRecord
-	HeaderTicket   protocol.Ticket
-	AuthIndicators []string
+	Request          protocol.TGSReq
+	Client           principal.Principal
+	Server           principal.Principal
+	ServerRecord     kdb.PrincipalRecord
+	HeaderTicket     protocol.Ticket
+	HeaderTicketPart protocol.EncTicketPart
+	AuthIndicators   []string
 }
 
 // KDCPolicyResult contains optional ticket lifetime constraints and audit
@@ -60,10 +62,10 @@ func (s *Server) applyASPolicies(request protocol.ASReq, client, server principa
 			continue
 		}
 		result, err := module.CheckAS(context.Background(), policyRequest)
-		if result.Status != "" && auditState != nil {
-			auditState.Status = result.Status
-		}
 		if err != nil {
+			if result.Status != "" && auditState != nil {
+				auditState.Status = result.Status
+			}
 			return err
 		}
 		constrainTicketTimes(now, result, endTime, renewTill)
@@ -73,11 +75,14 @@ func (s *Server) applyASPolicies(request protocol.ASReq, client, server principa
 
 func (s *Server) applyTGSPolicies(request protocol.TGSReq, server principal.Principal,
 	serverRecord kdb.PrincipalRecord, headerTicket protocol.Ticket,
+	headerTicketPart protocol.EncTicketPart,
 	indicators []string, now time.Time, endTime *types.KerberosTime,
 	renewTill **types.KerberosTime, auditState *AuditState) error {
 	policyRequest := &TGSPolicyRequest{
-		Request: request, Server: server, ServerRecord: serverRecord,
-		HeaderTicket:   headerTicket,
+		Request: request,
+		Client:  principalFromProtocol(headerTicketPart.CName, headerTicketPart.CRealm),
+		Server:  server, ServerRecord: serverRecord,
+		HeaderTicket: headerTicket, HeaderTicketPart: headerTicketPart,
 		AuthIndicators: append([]string(nil), indicators...),
 	}
 	for _, module := range s.KDCPolicyModules {
@@ -85,10 +90,10 @@ func (s *Server) applyTGSPolicies(request protocol.TGSReq, server principal.Prin
 			continue
 		}
 		result, err := module.CheckTGS(context.Background(), policyRequest)
-		if result.Status != "" && auditState != nil {
-			auditState.Status = result.Status
-		}
 		if err != nil {
+			if result.Status != "" && auditState != nil {
+				auditState.Status = result.Status
+			}
 			return err
 		}
 		constrainTicketTimes(now, result, endTime, renewTill)
