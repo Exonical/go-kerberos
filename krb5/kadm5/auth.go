@@ -107,10 +107,6 @@ type AuthListPols interface {
 	AuthListPols(client principal.Principal) AuthDecision
 }
 
-type AuthIPop interface {
-	AuthIPop(client principal.Principal) AuthDecision
-}
-
 type AuthIprop interface {
 	AuthIprop(client principal.Principal) AuthDecision
 }
@@ -194,7 +190,7 @@ func (m ACLAuthModule) AuthGetPol(c principal.Principal, _, _ string) AuthDecisi
 func (m ACLAuthModule) AuthListPols(c principal.Principal) AuthDecision {
 	return m.check(c, "list-policy", principal.Principal{})
 }
-func (m ACLAuthModule) AuthIPop(c principal.Principal) AuthDecision {
+func (m ACLAuthModule) AuthIprop(c principal.Principal) AuthDecision {
 	return m.check(c, "iprop", principal.Principal{})
 }
 func (m ACLAuthModule) AuthAddAlias(c, alias, target principal.Principal) AuthDecision {
@@ -314,9 +310,6 @@ func authDecision(m AuthModule, req authRequest) (AuthDecision, *AuthRestriction
 			return v.AuthListPols(req.client), nil
 		}
 	case "iprop":
-		if v, ok := m.(AuthIPop); ok {
-			return v.AuthIPop(req.client), nil
-		}
 		if v, ok := m.(AuthIprop); ok {
 			return v.AuthIprop(req.client), nil
 		}
@@ -412,8 +405,7 @@ func (s *Server) authorizePrincipal(client principal.Principal, operation string
 		return s.authorize(client, operation, entry.Principal)
 	}
 	req := authRequest{operation: operation, client: client, target: entry.Principal, entry: entry, mask: int64(*mask)}
-	authorized := true
-	authorized = s.authorizeRequest(req)
+	authorized := s.authorizeRequest(req)
 	*mask = int32(req.mask)
 	return authorized
 }
