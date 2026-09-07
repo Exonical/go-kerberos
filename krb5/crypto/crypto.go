@@ -83,6 +83,8 @@ var RandomSource types.RandomSource = cryptorand.Reader
 // changing the process-wide Go FIPS setting.
 var fipsEnabled = fips140.Enabled
 
+const maxPBKDF2Iterations uint32 = 0x1000000
+
 // SetRandomSource replaces the confounder source and returns a restore hook.
 func SetRandomSource(source types.RandomSource) func() {
 	previous := RandomSource
@@ -851,14 +853,17 @@ func parseIterations(params []byte, defaultValue uint32) (int, error) {
 		return 0, fmt.Errorf("invalid string-to-key parameters length %d", len(params))
 	}
 	n := binary.BigEndian.Uint32(params)
-	if n == 0 {
-		return 0, fmt.Errorf("string-to-key iteration count is zero")
+	if n == 0 || n < defaultValue {
+		return 0, fmt.Errorf("invalid string-to-key iteration count %d", n)
+	}
+	if n >= maxPBKDF2Iterations {
+		return 0, fmt.Errorf("string-to-key iteration count %d exceeds maximum", n)
 	}
 	return int(n), nil
 }
 
 func pbkdf2Key(newHash func() hash.Hash, password, salt []byte, iterations, length int) ([]byte, error) {
-	if iterations <= 0 || length < 0 {
+	if iterations <= 0 || uint64(iterations) >= uint64(maxPBKDF2Iterations) || length < 0 {
 		return nil, fmt.Errorf("invalid PBKDF2 parameters")
 	}
 	h := newHash()

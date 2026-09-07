@@ -1385,6 +1385,43 @@ func makeTGSReplyForClient(t *testing.T, profile crypto.EType, decryptKey []byte
 	})
 }
 
+func TestTGSReplyUsesAuthenticatedServiceIdentity(t *testing.T) {
+	profile, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1700000100, 0).UTC()
+	key := bytes.Repeat([]byte{0x31}, profile.KeySize())
+	service := principal.Principal{
+		Realm: testRealm, NameType: principal.NTSrvInstance,
+		Components: []string{"host", "service.test"},
+	}
+	wire := makeTGSReplyForClient(t, profile, key, 17, now,
+		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		testRealm, service)
+	var reply protocol.TGSRep
+	if err := asn1.Unmarshal(wire, &reply); err != nil {
+		t.Fatal(err)
+	}
+	reply.Ticket.SName = protocol.PrincipalName{
+		NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", "OTHER.REALM"},
+	}
+	wire = mustMarshal(t, reply)
+	credentials, referral, err := (&Client{}).decodeTGSRepForExchange(wire,
+		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},
+		service, service, true, 17, crypto.EnctypeAES256SHA1, key, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if referral {
+		t.Fatal("outer ticket identity caused referral routing")
+	}
+	if credentials.Server.Realm != service.Realm ||
+		!reflect.DeepEqual(credentials.Server.Components, service.Components) {
+		t.Fatalf("server = %#v, want %#v", credentials.Server, service)
+	}
+}
+
 func kerberosTime(value time.Time) types.KerberosTime {
 	return types.KerberosTime{Time: value, Present: true}
 }

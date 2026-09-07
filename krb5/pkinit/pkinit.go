@@ -669,7 +669,7 @@ func BuildPAASRepWithKDFAndMinBits(clientPublic []byte, enctype int32, nonce uin
 	if cert == nil || signer == nil {
 		return protocol.PAData{}, nil, errors.New("pkinit: certificate and signer are required")
 	}
-	if err := validateKDC(nil, cert); err != nil {
+	if err := validateKDC(nil, cert, server.Realm); err != nil {
 		return protocol.PAData{}, nil, err
 	}
 	if _, ok := signer.Public().(*rsa.PublicKey); !ok {
@@ -840,7 +840,7 @@ func (c *Client) VerifyPAASRepWithContext(data []byte, anchors *x509.CertPool,
 	if err != nil {
 		return nil, err
 	}
-	if err := validateKDC(certificateRoots(cert, anchors), cert); err != nil {
+	if err := validateKDC(certificateRoots(cert, anchors), cert, server.Realm); err != nil {
 		return nil, err
 	}
 	fields, err := sequenceFields(content)
@@ -1465,7 +1465,7 @@ func hashBytes(hash crypto.Hash, data []byte) []byte {
 
 func certificateRoots(_ *x509.Certificate, anchors *x509.CertPool) *x509.CertPool { return anchors }
 
-func validateKDC(_ *x509.CertPool, cert *x509.Certificate) error {
+func validateKDC(_ *x509.CertPool, cert *x509.Certificate, realm string) error {
 	if cert == nil {
 		return errors.New("pkinit: missing KDC certificate")
 	}
@@ -1480,10 +1480,10 @@ func validateKDC(_ *x509.CertPool, cert *x509.Certificate) error {
 	if !hasKDCEKU {
 		return errors.New("pkinit: KDC certificate lacks id-pkinit-KPKdc EKU")
 	}
-	return validateKDCSAN(cert)
+	return validateKDCSAN(cert, realm)
 }
 
-func validateKDCSAN(cert *x509.Certificate) error {
+func validateKDCSAN(cert *x509.Certificate, realm string) error {
 	const sanOID = "1.3.6.1.5.2.2"
 	const extensionOID = "2.5.29.17"
 	for _, ext := range cert.Extensions {
@@ -1518,6 +1518,9 @@ func validateKDCSAN(cert *x509.Certificate) error {
 			}
 			if len(principal) < 2 || principal[0] != "krbtgt" || principal[1] != principal[len(principal)-1] {
 				return errors.New("pkinit: KDC certificate SAN is not a krbtgt principal")
+			}
+			if realm != "" && principal[1] != realm {
+				return fmt.Errorf("pkinit: KDC certificate SAN realm %q does not match %q", principal[1], realm)
 			}
 			return nil
 		}

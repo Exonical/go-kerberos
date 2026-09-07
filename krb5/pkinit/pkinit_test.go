@@ -1084,8 +1084,11 @@ func TestValidateKDCSAN(t *testing.T) {
 		Id:    asn1.ObjectIdentifier{2, 5, 29, 17},
 		Value: derSeq(otherName),
 	}}}
-	if err := validateKDCSAN(cert); err != nil {
+	if err := validateKDCSAN(cert, realm); err != nil {
 		t.Fatalf("validate KDC SAN: %v", err)
+	}
+	if err := validateKDCSAN(cert, "OTHER.REALM"); err == nil {
+		t.Fatal("KDC SAN with mismatched realm accepted")
 	}
 
 	invalid := *cert
@@ -1102,7 +1105,7 @@ func TestValidateKDCSAN(t *testing.T) {
 			))...,
 		))),
 	}}
-	if err := validateKDCSAN(&invalid); err == nil {
+	if err := validateKDCSAN(&invalid, realm); err == nil {
 		t.Fatal("non-krbtgt KDC SAN accepted")
 	}
 }
@@ -1111,15 +1114,15 @@ func TestValidateKDCEKU(t *testing.T) {
 	cert := &x509.Certificate{UnknownExtKeyUsage: []asn1.ObjectIdentifier{
 		{1, 3, 6, 1, 5, 2, 3, 5},
 	}}
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("KDC certificate without SAN accepted")
 	}
 	cert.UnknownExtKeyUsage = []asn1.ObjectIdentifier{{1, 2, 3}}
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("certificate with incorrect EKU accepted")
 	}
 	cert.UnknownExtKeyUsage = nil
-	if err := validateKDC(nil, cert); err == nil {
+	if err := validateKDC(nil, cert, ""); err == nil {
 		t.Fatal("certificate without EKU accepted")
 	}
 }

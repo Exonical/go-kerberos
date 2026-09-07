@@ -167,7 +167,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			return nil, fmt.Errorf("AS exchange preauthentication: %w", err)
 		}
 		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
-		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -438,7 +438,7 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 			return nil, fmt.Errorf("AS service exchange preauthentication: %w", err)
 		}
 		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
-		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -559,7 +559,7 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
 		}
 		fastReply.PAData = c.sortPreferredPadata(clientPrincipal.Realm, fastReply.PAData)
-		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -1571,13 +1571,11 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 	if part.Nonce != nonce {
 		return nil, false, fmt.Errorf("TGS exchange: TGS-REP nonce mismatch")
 	}
-	referral := isReferralPrincipal(reply.Ticket.SName, requestedService)
+	referral := isReferralPrincipal(part.SName, requestedService)
 	if !referral {
-		serviceNameMatches := sameProtocolPrincipal(reply.Ticket.SName, service) &&
-			sameProtocolPrincipal(part.SName, service)
-		canonicalizedService := c.canonicalizeEnabled() &&
-			sameProtocolPrincipal(reply.Ticket.SName, principalFromProtocol(part.SName))
-		if (serviceRealmKnown && (reply.Ticket.Realm != service.Realm || part.SRealm != service.Realm)) ||
+		serviceNameMatches := sameProtocolPrincipal(part.SName, service)
+		canonicalizedService := c.canonicalizeEnabled()
+		if (serviceRealmKnown && part.SRealm != service.Realm) ||
 			(!serviceNameMatches && !canonicalizedService) {
 			return nil, false, fmt.Errorf("TGS exchange: service principal mismatch")
 		}
@@ -1591,8 +1589,8 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 	if err != nil {
 		return nil, false, fmt.Errorf("TGS exchange ticket: %w", err)
 	}
-	server := principalFromProtocol(reply.Ticket.SName)
-	server.Realm = reply.Ticket.Realm
+	server := principalFromProtocol(part.SName)
+	server.Realm = part.SRealm
 	return &Credentials{
 		Client: clientPrincipal, Server: server, Key: part.Key, Flags: part.Flags,
 		AuthTime: part.AuthTime, StartTime: part.StartTime, EndTime: part.EndTime,
@@ -1789,6 +1787,11 @@ func (c *Client) asRequestEnctypes() []int32 {
 		candidates = defaultRequestEnctypes
 	}
 	return c.supportedRequestEnctypes(candidates)
+}
+
+// RequestEnctypes returns the client's ordered AS request enctype list.
+func (c *Client) RequestEnctypes() []int32 {
+	return append([]int32(nil), c.asRequestEnctypes()...)
 }
 
 func (c *Client) tgsRequestEnctypes() []int32 {

@@ -224,6 +224,18 @@ func validateKeyringName(kind, name string) error {
 	return nil
 }
 
+func validateCredentialPrincipal(p principal.Principal) error {
+	if strings.IndexByte(p.Realm, 0) >= 0 {
+		return errors.New("ccache: KEYRING credential name contains NUL")
+	}
+	for _, component := range p.Components {
+		if strings.IndexByte(component, 0) >= 0 {
+			return errors.New("ccache: KEYRING credential name contains NUL")
+		}
+	}
+	return nil
+}
+
 func keyringRead(id int) ([]byte, error) {
 	size, err := unix.KeyctlBuffer(keyctlRead, id, nil, 0)
 	if err != nil {
@@ -331,6 +343,9 @@ func (h *keyringHandle) write(cache *Cache) error {
 		if err != nil {
 			return err
 		}
+		if err := validateCredentialPrincipal(credential.Server); err != nil {
+			return err
+		}
 		description := credential.Server.String()
 		if err := validateKeyringName("credential", description); err != nil {
 			return err
@@ -361,6 +376,9 @@ func (h *keyringHandle) store(credential Credential) error {
 	}
 	payload, err := marshalCredentialBytes(credential)
 	if err != nil {
+		return err
+	}
+	if err := validateCredentialPrincipal(credential.Server); err != nil {
 		return err
 	}
 	description := credential.Server.String()

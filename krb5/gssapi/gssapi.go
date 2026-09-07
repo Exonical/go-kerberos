@@ -322,7 +322,7 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		return nil, fmt.Errorf("GSS initial AP-REQ: %w", err)
 	}
 	i.state = state
-	i.ctx = &Context{
+	securityContext := &Context{
 		key:        contextKey(state.SessionKey, state.SubKey),
 		prfPartial: contextKey(state.SessionKey, state.SubKey),
 		prfFull:    contextKey(state.SessionKey, state.SubKey),
@@ -332,6 +332,9 @@ func (i *Initiator) initialToken(ctx context.Context, now time.Time, legacy bool
 		source:     i.creds.Client,
 		target:     i.creds.Server,
 		endtime:    i.creds.EndTime.Time,
+	}
+	if i.flags&GSSMutualFlag == 0 {
+		i.ctx = securityContext
 	}
 	if legacy {
 		return frameTokenWithOID(kerberosOldOID, []byte{0x01, 0x00}, apDER), nil
@@ -351,6 +354,19 @@ func (i *Initiator) VerifyToken(token []byte) error {
 	details, err := ap.VerifyAPRepWithDetails(i.state, inner)
 	if err != nil {
 		return fmt.Errorf("GSS AP-REP: %w", err)
+	}
+	if i.ctx == nil {
+		i.ctx = &Context{
+			key:        contextKey(i.state.SessionKey, i.state.SubKey),
+			prfPartial: contextKey(i.state.SessionKey, i.state.SubKey),
+			prfFull:    contextKey(i.state.SessionKey, i.state.SubKey),
+			initiator:  true,
+			flags:      i.flags &^ GSSChannelBoundFlag,
+			sendSeq:    sequenceValue(i.state.SeqNumber),
+			source:     i.creds.Client,
+			target:     i.creds.Server,
+			endtime:    i.creds.EndTime.Time,
+		}
 	}
 	if details.SubKey != nil {
 		i.ctx.key = contextKey(i.state.SessionKey, details.SubKey)
