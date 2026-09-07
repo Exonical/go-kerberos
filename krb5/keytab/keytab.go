@@ -3,6 +3,7 @@ package keytab
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 )
 
 const Version uint16 = 0x0502
+const maxKeytabInput = 64 << 20
 
 type Entry struct {
 	Principal principal.Principal
@@ -194,9 +196,12 @@ func Read(r io.Reader) (*Keytab, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read keytab: nil reader")
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxKeytabInput+1))
 	if err != nil {
 		return nil, fmt.Errorf("read keytab: %w", err)
+	}
+	if len(data) > maxKeytabInput {
+		return nil, errors.New("read keytab: input too large")
 	}
 	if len(data) < 2 {
 		return nil, fmt.Errorf("read keytab: truncated version")

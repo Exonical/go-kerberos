@@ -237,7 +237,6 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 
 func TestKCMServerPeerNamespaces(t *testing.T) {
 	server := NewKCMServer("")
-	server.IsolatePeers = true
 	cacheName := "shared-name"
 	cache := testCache()
 	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
@@ -321,6 +320,62 @@ func TestKCMServerPeerNamespaces(t *testing.T) {
 	defaultName, _ := server.dispatchPeer(kcmRequest(kcmOpGetDefaultCache), 1002)
 	if string(defaultName) != "default\x00" {
 		t.Fatalf("cross-peer default = %q", defaultName)
+	}
+}
+
+func TestKCMServerRejectsImpossibleReplaceCount(t *testing.T) {
+	server := NewKCMServer("")
+	cache := testCache()
+	principalBytes, err := marshalPrincipalBytes(cache.DefaultPrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := append(cstring("impossible"), make([]byte, 4)...)
+	args = append(args, principalBytes...)
+	var count [4]byte
+	binary.BigEndian.PutUint32(count[:], ^uint32(0))
+	args = append(args, count[:]...)
+	if _, code := server.dispatch(kcmRequest(kcmOpReplace, args)); code != kcmErrInternal {
+		t.Fatalf("impossible replace count status = %d, want %d", code, kcmErrInternal)
+	}
+}
+
+func TestKCMServerSocketPermissions(t *testing.T) {
+	skipWindowsUnixSocket(t)
+	for _, test := range []struct {
+		name   string
+		shared bool
+		want   os.FileMode
+	}{
+		{name: "isolated", want: 0600},
+		{name: "shared", shared: true, want: 0666},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			socket := shortKCMSocket(t)
+			server := NewKCMServer(socket)
+			server.SharedNamespace = test.shared
+			done := make(chan error, 1)
+			go func() { done <- server.Serve() }()
+			t.Cleanup(func() {
+				_ = server.Close()
+				<-done
+			})
+			var info os.FileInfo
+			var err error
+			for i := 0; i < 100; i++ {
+				info, err = os.Stat(socket)
+				if err == nil {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err != nil {
+				t.Fatalf("stat KCM socket: %v", err)
+			}
+			if got := info.Mode().Perm(); got != test.want {
+				t.Fatalf("socket mode = %o, want %o", got, test.want)
+			}
+		})
 	}
 }
 
@@ -428,12 +483,12 @@ func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
 	}
 }
 
-func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
+func startKCMTestServer(t *testing.T, shared bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
 	t.Helper()
 	skipWindowsUnixSocket(t)
 	socket := shortKCMSocket(t)
 	server := NewKCMServer(socket)
-	server.IsolatePeers = isolate
+	server.SharedNamespace = shared
 	if peerUID != nil {
 		server.peerUID = peerUID
 	}
@@ -475,7 +530,7 @@ func shortKCMSocket(t *testing.T) string {
 }
 
 func TestKCMServerSamePeerClientsShareNamespace(t *testing.T) {
-	_, socket := startKCMTestServer(t, true, func(net.Conn) (uint32, error) {
+	_, socket := startKCMTestServer(t, false, func(net.Conn) (uint32, error) {
 		return 4242, nil
 	})
 	first, err := ResolveKCM("peer-shared", socket)
@@ -517,7 +572,7 @@ func TestKCMServerLinuxPeerCredentials(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("SO_PEERCRED is Linux-specific")
 	}
-	_, socket := startKCMTestServer(t, true, nil)
+	_, socket := startKCMTestServer(t, false, nil)
 	first, err := ResolveKCM("linux-peer", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +592,7 @@ func TestKCMServerLinuxPeerCredentials(t *testing.T) {
 }
 
 func TestKCMServerConcurrentPeerClients(t *testing.T) {
-	_, socket := startKCMTestServer(t, true, func(net.Conn) (uint32, error) {
+	_, socket := startKCMTestServer(t, false, func(net.Conn) (uint32, error) {
 		return 777, nil
 	})
 	const clients = 8
@@ -588,7 +643,6 @@ func TestKCMServerRefusesUnavailablePeerCredentials(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	server := NewKCMServer("")
-	server.IsolatePeers = true
 	server.peerUID = func(net.Conn) (uint32, error) {
 		return 0, errKCMPeerCredentialsUnavailable
 	}

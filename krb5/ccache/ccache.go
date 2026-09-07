@@ -3,6 +3,7 @@ package ccache
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -10,6 +11,7 @@ import (
 )
 
 const Version uint16 = 0x0504
+const maxCacheInput = 64 << 20
 
 type Header struct {
 	TimeOffset int32
@@ -53,9 +55,12 @@ func Read(r io.Reader) (*Cache, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read ccache: nil reader")
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxCacheInput+1))
 	if err != nil {
 		return nil, fmt.Errorf("read ccache: %w", err)
+	}
+	if len(data) > maxCacheInput {
+		return nil, errors.New("read ccache: input too large")
 	}
 	d := ccacheDecoder{data: data}
 	version, err := d.u16()
