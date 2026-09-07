@@ -11,6 +11,36 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
+func decryptTGSRequestAuthData(request protocol.TGSReq, sessionKey protocol.EncryptionKey,
+	subKey *protocol.EncryptionKey) protocol.AuthorizationData {
+	encrypted := request.ReqBody.EncAuthorizationData
+	if encrypted == nil || len(encrypted.Cipher) == 0 {
+		return nil
+	}
+	decrypt := func(key protocol.EncryptionKey, usage uint32) protocol.AuthorizationData {
+		etype, err := crypto.NewRegistry().Get(key.KeyType)
+		if err != nil || len(key.KeyValue) == 0 {
+			return nil
+		}
+		plain, err := etype.Decrypt(key.KeyValue, usage, encrypted.Cipher)
+		if err != nil {
+			return nil
+		}
+		var result protocol.AuthorizationData
+		if err := asn1.Unmarshal(plain, &result); err != nil {
+			return nil
+		}
+		return result
+	}
+	if result := decrypt(sessionKey, 4); result != nil {
+		return result
+	}
+	if subKey != nil {
+		return decrypt(*subKey, 5)
+	}
+	return nil
+}
+
 // AuthDataASReq and AuthDataTGSReq identify the KDC request surface exposed
 // to an authorization-data module.
 const (

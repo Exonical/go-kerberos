@@ -2335,7 +2335,7 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		}
 		auditState.Stage = AuditIssueTicket
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey, authenticator.SubKey)
 }
 
 func samePrincipalIdentity(left, right principal.Principal) bool {
@@ -2481,7 +2481,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key, authenticatorSubKeys ...*protocol.EncryptionKey) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -2568,13 +2568,19 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		addresses = append(protocol.HostAddresses(nil), request.ReqBody.Addresses...)
 	}
 	tgtPart := ticketPart
+	tgtAuthData := append(protocol.AuthorizationData(nil), ticketPart.AuthorizationData...)
+	var authenticatorSubKey *protocol.EncryptionKey
+	if len(authenticatorSubKeys) > 0 {
+		authenticatorSubKey = authenticatorSubKeys[0]
+	}
+	requestAuthData := decryptTGSRequestAuthData(request, ticketPart.Key, authenticatorSubKey)
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		CRealm: ticketPart.CRealm, CName: ticketPart.CName,
 		Transited: ticketPart.Transited,
 		AuthTime:  authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
-		CAddr: addresses, AuthorizationData: ticketPart.AuthorizationData,
+		CAddr: addresses, AuthorizationData: requestAuthData,
 	}
 	if issuedClient != nil {
 		ticketPart.CRealm = issuedClient.Realm
@@ -2606,6 +2612,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		TGT:       &tgtPart,
 		Reply:     &ticketPart,
 	})
+	ticketPart.AuthorizationData = append(ticketPart.AuthorizationData, tgtAuthData...)
 	ticketEncryptionKey := serviceKey
 	ticketKVNO := serviceKey.KVNO
 	var ticketKVNOPtr = &ticketKVNO
