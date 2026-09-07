@@ -47,6 +47,12 @@ const (
 	KRBAPErrTktNYV ErrorCode = 33
 	// KRBAPErrSkew is KRB_AP_ERR_SKEW.
 	KRBAPErrSkew ErrorCode = 37
+	// KRBAPErrBadAddr is KRB_AP_ERR_BADADDR.
+	KRBAPErrBadAddr ErrorCode = 38
+	// KRBAPErrBadOrder is KRB_AP_ERR_BADORDER.
+	KRBAPErrBadOrder ErrorCode = 42
+	// KRBAPErrInappCksum is KRB_AP_ERR_INAPP_CKSUM.
+	KRBAPErrInappCksum ErrorCode = 50
 )
 
 // KRBError represents a KRB-ERROR response with safe protocol metadata.
