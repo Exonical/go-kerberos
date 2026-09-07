@@ -65,7 +65,7 @@ func TestCopyTicketErrorsAndQuietParsing(t *testing.T) {
 	}
 }
 
-func TestCopySelectsRequestedEnctype(t *testing.T) {
+func TestCopyUsesSupportedEnctypeOrder(t *testing.T) {
 	client := mustCopyPrincipal(t, "alice@EXAMPLE.COM")
 	service := mustCopyPrincipal(t, "host/one@EXAMPLE.COM")
 	source := filepath.Join(t.TempDir(), "source")
@@ -90,7 +90,7 @@ func TestCopySelectsRequestedEnctype(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(value.Credentials) != 1 || value.Credentials[0].Enctype != crypto.EnctypeAES128SHA1 {
+	if len(value.Credentials) != 1 || value.Credentials[0].Enctype != crypto.EnctypeAES256SHA1 {
 		t.Fatalf("selected credentials = %#v", value.Credentials)
 	}
 }

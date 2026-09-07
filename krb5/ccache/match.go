@@ -57,9 +57,6 @@ func credentialMatchesMIT(value, tag Credential, flags uint32) bool {
 		if !isSupportedEnctype(value.Enctype) {
 			return false
 		}
-		if tag.Enctype != 0 && value.Enctype != tag.Enctype {
-			return false
-		}
 	}
 	return true
 }
@@ -96,10 +93,6 @@ func isSupportedEnctype(value int32) bool {
 	return err == nil
 }
 
-func retrieveCredentials(credentials []Credential, match Credential, flags uint32) (Credential, error) {
-	return retrieveCredentialsWithOrder(credentials, match, flags, supportedEnctypes)
-}
-
 func retrieveCredentialsWithOrder(credentials []Credential, match Credential, flags uint32, order []int32) (Credential, error) {
 	var selected Credential
 	selectedRank := len(order) + 1
@@ -134,10 +127,6 @@ var supportedEnctypes = []int32{
 	crypto.EnctypeAES128SHA256,
 	crypto.EnctypeCamellia128,
 	crypto.EnctypeCamellia256,
-}
-
-func supportedEnctypeRank(value int32) int {
-	return supportedEnctypeRankIn(value, supportedEnctypes)
 }
 
 func supportedEnctypeRankIn(value int32, order []int32) int {

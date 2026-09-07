@@ -40,8 +40,8 @@ func TestRetrieveSupportedKeyTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Enctype != crypto.EnctypeAES128SHA1 {
-		t.Fatalf("requested enctype = %d, want %d", got.Enctype, crypto.EnctypeAES128SHA1)
+	if got.Enctype != crypto.EnctypeAES256SHA1 {
+		t.Fatalf("requested enctype = %d, want preferred %d", got.Enctype, crypto.EnctypeAES256SHA1)
 	}
 }
 
