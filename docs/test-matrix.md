@@ -881,3 +881,27 @@ loop contract. Unit and in-process exchange tests cover hint generation,
 client answer dispatch, informational-before-real ordering, required-module
 failures, verification failures, hardware ticket flags, and audit indicator
 propagation.
+
+## KDB master-key lifecycle parity
+
+`krb5/kdb` implements the MIT 1.22.2 tagged-data layouts for
+`KRB5_TL_MKVNO` (0x0008), `KRB5_TL_ACTKVNO` (0x0009, version 1), and
+`KRB5_TL_MKEY_AUX` (0x000a, version 1). Integer fields use MIT's little-endian
+KDB encoding. `krb5/kdb/mitdump` preserves multiple K/M key-data entries,
+recovers the newest key through MKEY_AUX when an older key is supplied, and
+selects each principal's wrapping key from its MKVNO (defaulting to version 1
+when absent).
+
+`gokdb5util` supports `add_mkey`, `use_mkey`, `list_mkeys`,
+`update_princ_encryption`, `purge_mkeys`, and `tabdump`. The lifecycle commands
+operate on the Go file-backed dump and rewrite it atomically. Time parsing in
+`use_mkey` supports `now`, Unix seconds, RFC3339, `YYYYMMDDhhmmss`, and
+`YYYY-MM-DD hh:mm:ss`; the full MIT `getdate` grammar is not implemented.
+`tabdump` currently supports `keyinfo`, `princ_flags`, `princ_meta`,
+`princ_stringattrs`, and `princ_tktpolicy`. MIT dump types requiring fields not
+present in `PrincipalRecord` remain unsupported.
+
+Codec goldens and a Go multi-master-key dump/load round trip are included.
+A live `kdb5_util create` plus interactive `add_mkey` differential gate was
+deferred because the installed MIT command requires interactive setup and the
+repository's integration harness has no stable disposable `expect` fixture.

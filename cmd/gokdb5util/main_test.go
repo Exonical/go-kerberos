@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 )
 
@@ -137,5 +138,57 @@ func TestDestroyConfirmation(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMasterKeyLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "old", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "old", "add_mkey", "-e", "18"},
+		strings.NewReader("new\nnew\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "version 2") {
+		t.Fatalf("add_mkey output = %q", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "use_mkey", "2", "now"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "update_princ_encryption", "-f", "-v"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	store, err := mitdump.LoadWithMasterPassword(dbPath, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range store.Records() {
+		if record.Name.String() == "K/M@EXAMPLE.COM" {
+			continue
+		}
+		kvno, err := kdb.MKVNO(record.TLData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kvno != 2 {
+			t.Fatalf("%s MKVNO = %d", record.Name, kvno)
+		}
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "purge_mkeys", "-f"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "1 key(s) purged.") {
+		t.Fatalf("purge_mkeys output = %q", out.String())
 	}
 }

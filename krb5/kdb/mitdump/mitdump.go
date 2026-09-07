@@ -44,6 +44,9 @@ type FileStore struct {
 	policies      map[string]kdb.PolicyRecord
 	MasterEnctype int32
 	MasterKey     []byte
+	MasterKeys    []kdb.Key
+	ActiveMKeys   []kdb.ActKVNO
+	MKeyAux       []kdb.MKeyAuxEntry
 }
 
 // Policies returns a copy of the standalone policy records in the dump.
@@ -172,16 +175,19 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 	if err != nil {
 		return nil, fmt.Errorf("MIT dump K/M principal: %w", err)
 	}
+	masterKeys := append([]kdb.Key(nil), db.MasterKeys...)
+	if len(masterKeys) == 0 {
+		masterKeys = []kdb.Key{{Enctype: masterEnctype, KVNO: 1,
+			Key: append([]byte(nil), masterKey...), Salt: db.Realm + "KM"}}
+	}
+	latest := masterKeys[0]
 	records := make([]kdb.PrincipalRecord, 0, len(db.ListPrincipals())+1)
 	records = append(records, kdb.PrincipalRecord{
-		Name: *masterName,
-		Keys: map[int32]kdb.Key{masterEnctype: {
-			Enctype: masterEnctype,
-			KVNO:    1,
-			Key:     append([]byte(nil), masterKey...),
-			Salt:    db.Realm + "KM",
-		}},
-		KVNO: 1,
+		Name:    *masterName,
+		Keys:    map[int32]kdb.Key{latest.Enctype: latest},
+		KeyData: append([]kdb.Key(nil), masterKeys...),
+		KVNO:    latest.KVNO,
+		TLData:  masterKeyTLData(db, masterKeys),
 	})
 	for _, name := range db.ListPrincipals() {
 		parsed, err := principal.Parse(name)
@@ -244,7 +250,8 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 		}
 	}
 	for _, record := range records {
-		if err := writePrincipalRecord(&out, record, masterEType, masterKey, historyKey); err != nil {
+		if err := writePrincipalRecord(&out, record, masterKeys, masterEType,
+			masterKey, historyKey); err != nil {
 			return nil, err
 		}
 	}
@@ -252,16 +259,14 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 }
 
 func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
-	masterEType crypto.EType, masterKey []byte, historyKey *kdb.Key) error {
+	masterKeys []kdb.Key, masterEType crypto.EType, masterKey []byte,
+	historyKey *kdb.Key) error {
 	name, err := record.Name.Format()
 	if err != nil {
 		return fmt.Errorf("MIT dump principal: %w", err)
 	}
 	if len(name) > int(^uint32(0)>>1) {
 		return fmt.Errorf("MIT dump principal name is too long")
-	}
-	if len(record.Keys) > int(^uint16(0)) {
-		return fmt.Errorf("MIT dump principal %q has too many keys", name)
 	}
 	tlData := append([]kdb.TLData(nil), record.TLData...)
 	if historyKey != nil && (len(record.PasswordHistory) > 0 ||
@@ -308,16 +313,26 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 		return fmt.Errorf("MIT dump principal %q: %w", name, err)
 	}
 
-	keys := make([]kdb.Key, 0, len(record.Keys))
-	for _, key := range record.Keys {
-		keys = append(keys, key)
+	keys := make([]kdb.Key, 0, len(record.Keys)+len(record.KeyData))
+	if isKMPrincipal(record.Name) && len(record.KeyData) > 0 {
+		keys = append(keys, record.KeyData...)
+	} else {
+		for _, key := range record.Keys {
+			keys = append(keys, key)
+		}
 	}
 	sort.Slice(keys, func(i, j int) bool {
+		if isKMPrincipal(record.Name) && keys[i].KVNO != keys[j].KVNO {
+			return keys[i].KVNO > keys[j].KVNO
+		}
 		if keys[i].Enctype != keys[j].Enctype {
 			return keys[i].Enctype < keys[j].Enctype
 		}
 		return keys[i].KVNO < keys[j].KVNO
 	})
+	if len(keys) > int(^uint16(0)) {
+		return fmt.Errorf("MIT dump principal %q has too many keys", name)
+	}
 
 	var line strings.Builder
 	lastSuccess, err := dumpEpoch(record.LastSuccess, "last success")
@@ -343,8 +358,13 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 		fmt.Fprintf(&line, "%d\t%d\t%s", data.Type, len(data.Data),
 			dumpOctets(data.Data))
 	}
+	wrappingKey := selectMasterKey(record, masterKeys, masterEType, masterKey)
+	wrappingEType, err := crypto.NewRegistry().Get(wrappingKey.Enctype)
+	if err != nil {
+		return fmt.Errorf("MIT dump principal %q master enctype: %w", name, err)
+	}
 	for _, key := range keys {
-		encoded, err := encodeKeyData(record.Name, key, masterEType, masterKey)
+		encoded, err := encodeKeyData(record.Name, key, wrappingEType, wrappingKey.Key)
 		if err != nil {
 			return fmt.Errorf("MIT dump principal %q: %w", name, err)
 		}
@@ -356,6 +376,76 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 		return fmt.Errorf("write MIT dump principal: %w", err)
 	}
 	return nil
+}
+
+func selectMasterKey(record kdb.PrincipalRecord, keys []kdb.Key,
+	fallbackEType crypto.EType, fallback []byte) kdb.Key {
+	kvno := uint32(1)
+	if value, err := kdb.MKVNO(record.TLData); err == nil && value != 0 {
+		kvno = value
+	}
+	for _, key := range keys {
+		if key.KVNO == kvno {
+			return key
+		}
+	}
+	return kdb.Key{Enctype: fallbackEType.ID(), KVNO: 1,
+		Key: append([]byte(nil), fallback...)}
+}
+
+func isKMPrincipal(name principal.Principal) bool {
+	return len(name.Components) == 2 && name.Components[0] == "K" &&
+		name.Components[1] == "M"
+}
+
+func masterKeyTLData(db *kdb.Database, keys []kdb.Key) []kdb.TLData {
+	if len(keys) == 0 {
+		return nil
+	}
+	mkvno, err := kdb.EncodeMKVNO(keys[0].KVNO)
+	if err != nil {
+		return nil
+	}
+	data := []kdb.TLData{{Type: kdb.MKVNOType, Data: mkvno}}
+	active := append([]kdb.ActKVNO(nil), db.ActiveMKeys...)
+	if len(active) == 0 {
+		active = []kdb.ActKVNO{{KVNO: uint16(keys[0].KVNO), ActTime: 0}}
+	}
+	if encoded, err := kdb.EncodeACTKVNO(active); err == nil {
+		data = append(data, kdb.TLData{Type: kdb.ACTKVNOType, Data: encoded})
+	}
+	aux := append([]kdb.MKeyAuxEntry(nil), db.MKeyAux...)
+	if len(aux) == 0 && len(keys) > 1 {
+		for _, old := range keys[1:] {
+			contents, err := encodeMasterKeyData(old, keys[0])
+			if err != nil {
+				continue
+			}
+			aux = append(aux, kdb.MKeyAuxEntry{
+				MKeyKVNO: uint16(old.KVNO), LatestKeyKVNO: uint16(keys[0].KVNO),
+				LatestKeyEnctype: keys[0].Enctype, LatestKeyData: contents,
+			})
+		}
+	}
+	if encoded, err := kdb.EncodeMKEYAux(aux); err == nil && len(encoded) > 0 {
+		data = append(data, kdb.TLData{Type: kdb.MKEYAuxType, Data: encoded})
+	}
+	return data
+}
+
+func encodeMasterKeyData(wrapping, target kdb.Key) ([]byte, error) {
+	etype, err := crypto.NewRegistry().Get(wrapping.Enctype)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, err := etype.Encrypt(wrapping.Key, 0, target.Key)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, 2+len(ciphertext))
+	binary.LittleEndian.PutUint16(data, uint16(len(target.Key)))
+	copy(data[2:], ciphertext)
+	return data, nil
 }
 
 func writePolicyRecord(out io.Writer, policy kdb.PolicyRecord) error {
@@ -747,7 +837,11 @@ func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte)
 	if err != nil {
 		return nil, fmt.Errorf("MIT dump master enctype: %w", err)
 	}
-	records, err := decryptRecords(store.records, masterEType, masterKey)
+	masterKeys, aux, err := recoverMasterKeys(store, masterEType, masterKey)
+	if err != nil {
+		return nil, err
+	}
+	records, err := decryptRecords(store.records, masterKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -755,6 +849,29 @@ func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte)
 	store.records = records
 	store.MasterEnctype = masterEnctype
 	store.MasterKey = append([]byte(nil), masterKey...)
+	store.MasterKeys = make([]kdb.Key, 0, len(masterKeys))
+	for _, key := range masterKeys {
+		store.MasterKeys = append(store.MasterKeys, key)
+	}
+	sort.Slice(store.MasterKeys, func(i, j int) bool {
+		return store.MasterKeys[i].KVNO > store.MasterKeys[j].KVNO
+	})
+	store.MKeyAux = aux
+	for _, km := range records {
+		if km.Name.Realm != store.Realm || len(km.Name.Components) != 2 ||
+			km.Name.Components[0] != "K" || km.Name.Components[1] != "M" {
+			continue
+		}
+		for _, item := range km.TLData {
+			if item.Type == kdb.ACTKVNOType {
+				store.ActiveMKeys, err = kdb.DecodeACTKVNO(item.Data)
+				if err != nil {
+					return nil, fmt.Errorf("MIT dump activation metadata: %w", err)
+				}
+			}
+		}
+		break
+	}
 	return store, nil
 }
 
@@ -876,52 +993,169 @@ func dumpMasterEnctype(store *FileStore) (int32, bool, error) {
 			record.Name.Components[1] != "M" {
 			continue
 		}
-		if len(record.Keys) != 1 {
+		keys := record.KeyData
+		if len(keys) == 0 {
+			for _, key := range record.Keys {
+				keys = append(keys, key)
+			}
+		}
+		if len(keys) == 0 {
 			return 0, false, fmt.Errorf("MIT dump K/M principal has invalid key data")
 		}
-		for enctype := range record.Keys {
-			if _, err := crypto.NewRegistry().Get(enctype); err != nil {
-				return 0, false, fmt.Errorf("unsupported MIT dump master enctype %d", enctype)
+		for _, key := range keys {
+			if _, err := crypto.NewRegistry().Get(key.Enctype); err != nil {
+				return 0, false, fmt.Errorf("unsupported MIT dump master enctype %d", key.Enctype)
 			}
-			return enctype, true, nil
+			return key.Enctype, true, nil
 		}
 	}
 	return 0, false, nil
 }
 
-func decryptRecords(records map[string]kdb.PrincipalRecord, masterEType crypto.EType,
-	masterKey []byte) (map[string]kdb.PrincipalRecord, error) {
+func decryptRecords(records map[string]kdb.PrincipalRecord,
+	masterKeys map[uint32]kdb.Key) (map[string]kdb.PrincipalRecord, error) {
 	decrypted := make(map[string]kdb.PrincipalRecord, len(records))
 	for name, record := range records {
 		record.Keys = copyKeys(record.Keys)
+		kvno, _ := kdb.MKVNO(record.TLData)
+		wrapping, ok := masterKeys[kvno]
+		if !ok {
+			wrapping, ok = masterKeys[1]
+		}
+		if !ok {
+			for _, candidate := range masterKeys {
+				wrapping = candidate
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("MIT dump has no master key for principal %s", name)
+		}
+		wrappingEType, err := crypto.NewRegistry().Get(wrapping.Enctype)
+		if err != nil {
+			return nil, err
+		}
 		for enctype, key := range record.Keys {
-			etype, err := crypto.NewRegistry().Get(enctype)
+			key, err = decryptKeyData(key, wrappingEType, wrapping.Key)
 			if err != nil {
-				continue
+				return nil, err
 			}
-			if len(key.Key) == etype.KeySize() {
-				continue
-			}
-			if len(key.Key) < 2 {
-				return nil, fmt.Errorf("MIT dump key data is truncated")
-			}
-			keyLength := int(binary.LittleEndian.Uint16(key.Key[:2]))
-			if keyLength != etype.KeySize() {
-				return nil, fmt.Errorf("MIT dump key length is invalid")
-			}
-			plain, err := masterEType.Decrypt(masterKey, 0, key.Key[2:])
-			if err != nil {
-				return nil, fmt.Errorf("MIT dump key data integrity check failed")
-			}
-			if len(plain) < keyLength {
-				return nil, fmt.Errorf("MIT dump decrypted key data is truncated")
-			}
-			key.Key = append([]byte(nil), plain[:keyLength]...)
 			record.Keys[enctype] = key
+		}
+		for i, key := range record.KeyData {
+			key, err = decryptKeyData(key, wrappingEType, wrapping.Key)
+			if err != nil {
+				return nil, err
+			}
+			record.KeyData[i] = key
 		}
 		decrypted[name] = record
 	}
 	return decrypted, nil
+}
+
+func decryptKeyData(key kdb.Key, wrapping crypto.EType, wrappingKey []byte) (kdb.Key, error) {
+	target, err := crypto.NewRegistry().Get(key.Enctype)
+	if err != nil {
+		return key, nil
+	}
+	if len(key.Key) == target.KeySize() {
+		return key, nil
+	}
+	if len(key.Key) < 2 {
+		return key, fmt.Errorf("MIT dump key data is truncated")
+	}
+	keyLength := int(binary.LittleEndian.Uint16(key.Key[:2]))
+	if keyLength != target.KeySize() {
+		return key, fmt.Errorf("MIT dump key length is invalid")
+	}
+	plain, err := wrapping.Decrypt(wrappingKey, 0, key.Key[2:])
+	if err != nil || len(plain) < keyLength {
+		return key, fmt.Errorf("MIT dump key data integrity check failed")
+	}
+	key.Key = append([]byte(nil), plain[:keyLength]...)
+	return key, nil
+}
+
+func recoverMasterKeys(store *FileStore, supplied crypto.EType,
+	suppliedKey []byte) (map[uint32]kdb.Key, []kdb.MKeyAuxEntry, error) {
+	var master kdb.PrincipalRecord
+	found := false
+	for _, record := range store.records {
+		if record.Name.Realm == store.Realm && len(record.Name.Components) == 2 &&
+			record.Name.Components[0] == "K" && record.Name.Components[1] == "M" {
+			master, found = record, true
+			break
+		}
+	}
+	if !found {
+		return map[uint32]kdb.Key{1: {Enctype: supplied.ID(), KVNO: 1,
+			Key: append([]byte(nil), suppliedKey...)}}, nil, nil
+	}
+	keys := master.KeyData
+	if len(keys) == 0 {
+		for _, key := range master.Keys {
+			keys = append(keys, key)
+		}
+	}
+	var aux []kdb.MKeyAuxEntry
+	for _, item := range master.TLData {
+		if item.Type == kdb.MKEYAuxType {
+			var err error
+			aux, err = kdb.DecodeMKEYAux(item.Data)
+			if err != nil {
+				return nil, nil, fmt.Errorf("MIT dump master key auxiliary data: %w", err)
+			}
+		}
+	}
+	var latest kdb.Key
+	if len(keys) > 0 {
+		candidate := keys[0]
+		if candidate.Enctype == supplied.ID() {
+			if decoded, err := decryptKeyData(candidate, supplied, suppliedKey); err == nil {
+				latest = decoded
+			}
+		}
+	}
+	if len(latest.Key) == 0 {
+		for _, item := range aux {
+			key := kdb.Key{Enctype: item.LatestKeyEnctype, KVNO: uint32(item.LatestKeyKVNO),
+				Key: item.LatestKeyData}
+			if decoded, err := decryptKeyData(key, supplied, suppliedKey); err == nil {
+				latest = decoded
+				break
+			}
+		}
+	}
+	if len(latest.Key) == 0 {
+		return nil, aux, fmt.Errorf("MIT dump master key could not recover latest key")
+	}
+	latestKVNO := latest.KVNO
+	if latestKVNO == 0 {
+		for _, item := range master.TLData {
+			if item.Type == kdb.MKVNOType {
+				var err error
+				latestKVNO, err = kdb.DecodeMKVNO(item.Data)
+				if err != nil {
+					return nil, aux, fmt.Errorf("MIT dump master key version metadata: %w", err)
+				}
+			}
+		}
+	}
+	result := map[uint32]kdb.Key{latestKVNO: latest}
+	latestEType, err := crypto.NewRegistry().Get(latest.Enctype)
+	if err != nil {
+		return nil, aux, err
+	}
+	for _, key := range keys {
+		decoded, err := decryptKeyData(key, latestEType, latest.Key)
+		if err != nil {
+			return nil, aux, err
+		}
+		result[decoded.KVNO] = decoded
+	}
+	return result, aux, nil
 }
 
 // Lookup implements kdb.Store.
@@ -934,6 +1168,9 @@ func (s *FileStore) Lookup(name principal.Principal) (kdb.PrincipalRecord, bool,
 		return kdb.PrincipalRecord{}, false, nil
 	}
 	record.Keys = copyKeys(record.Keys)
+	for i := range record.KeyData {
+		record.KeyData[i].Key = append([]byte(nil), record.KeyData[i].Key...)
+	}
 	return record, true, nil
 }
 
@@ -946,6 +1183,9 @@ func (s *FileStore) Records() []kdb.PrincipalRecord {
 	out := make([]kdb.PrincipalRecord, 0, len(s.records))
 	for _, record := range s.records {
 		record.Keys = copyKeys(record.Keys)
+		for i := range record.KeyData {
+			record.KeyData[i].Key = append([]byte(nil), record.KeyData[i].Key...)
+		}
 		stringsCopy := make(map[string]string, len(record.Strings))
 		for key, value := range record.Strings {
 			stringsCopy[key] = value
@@ -1072,6 +1312,7 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 		cursor += 3
 	}
 	keys := make(map[int32]kdb.Key)
+	var keyData []kdb.Key
 	for i := uint64(0); i < header[3]; i++ {
 		if cursor+1 >= len(fields) {
 			return kdb.PrincipalRecord{}, fmt.Errorf("truncated key data")
@@ -1120,9 +1361,6 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 			}
 			cursor += 3
 		}
-		if _, exists := keys[enctype]; exists {
-			return kdb.PrincipalRecord{}, fmt.Errorf("duplicate key enctype %d", enctype)
-		}
 		salt := name.Realm + strings.Join(name.Components, "")
 		if keyVersion == 2 {
 			switch saltType {
@@ -1136,8 +1374,14 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 				salt = string(saltBytes)
 			}
 		}
-		keys[enctype] = kdb.Key{Enctype: enctype, KVNO: uint32(kvno),
+		key := kdb.Key{Enctype: enctype, KVNO: uint32(kvno),
 			Key: keyBytes, Salt: salt}
+		if _, exists := keys[enctype]; exists {
+			keyData = append(keyData, key)
+		} else {
+			keys[enctype] = key
+			keyData = append(keyData, key)
+		}
 	}
 	if cursor >= len(fields) {
 		return kdb.PrincipalRecord{}, fmt.Errorf("truncated extra data")
@@ -1158,7 +1402,7 @@ func parseRecord(line string) (kdb.PrincipalRecord, error) {
 		}
 	}
 	return kdb.PrincipalRecord{
-		Name: *name, Keys: keys, KVNO: kvno, Flags: uint32(attributes),
+		Name: *name, Keys: keys, KeyData: keyData, KVNO: kvno, Flags: uint32(attributes),
 		MaxLife: maxLife, MaxRenew: maxRenew,
 		Expiration: expiration, PasswordExpiration: passwordExpiration,
 		LastSuccess: lastSuccess, LastFailed: lastFailed,

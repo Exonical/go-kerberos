@@ -45,6 +45,9 @@ type TLData struct {
 type PrincipalRecord struct {
 	Name principal.Principal
 	Keys map[int32]Key
+	// KeyData preserves duplicate-enctype key_data entries, as used by the
+	// K/M principal when multiple master-key versions are present.
+	KeyData []Key
 	// PasswordHistory contains prior derived key sets, newest first. When a
 	// kadmin/history key is available, it is serialized in MIT KADM_DATA.
 	PasswordHistory []map[int32]Key
@@ -152,6 +155,11 @@ type PolicyResolver interface {
 // Database is a concurrency-safe in-memory principal store.
 type Database struct {
 	Realm string
+	// MasterKeys contains decrypted K/M keys newest first when a database has
+	// undergone master-key rotation.  Empty uses the legacy single-key path.
+	MasterKeys  []Key
+	ActiveMKeys []ActKVNO
+	MKeyAux     []MKeyAuxEntry
 
 	mu         sync.RWMutex
 	principals map[string]PrincipalRecord
@@ -1283,6 +1291,10 @@ func copyKeys(keys map[int32]Key) map[int32]Key {
 func copyRecord(record PrincipalRecord) PrincipalRecord {
 	record.Name.Components = append([]string(nil), record.Name.Components...)
 	record.Keys = copyKeys(record.Keys)
+	record.KeyData = append([]Key(nil), record.KeyData...)
+	for i := range record.KeyData {
+		record.KeyData[i].Key = append([]byte(nil), record.KeyData[i].Key...)
+	}
 	history := make([]map[int32]Key, len(record.PasswordHistory))
 	for i, keys := range record.PasswordHistory {
 		history[i] = copyKeys(keys)
