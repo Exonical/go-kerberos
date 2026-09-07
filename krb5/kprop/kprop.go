@@ -14,10 +14,10 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/ap"
+	"github.com/Exonical/go-kerberos/krb5/appmsg"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -397,27 +397,15 @@ func (s *Server) writeError(ctx context.Context, conn net.Conn, code int32, text
 }
 
 func makeSafe(key *protocol.EncryptionKey, data []byte, seq uint32, addr protocol.HostAddress) ([]byte, error) {
-	etype, err := crypto.NewRegistry().Get(key.KeyType)
-	if err != nil {
-		return nil, err
-	}
-	body := protocol.SafeBody{UserData: append([]byte(nil), data...), SeqNumber: &seq, SAddress: addr}
-	message := protocol.KRBSafe{PVNO: 5, MsgType: 20, SafeBody: body}
-	encoded, err := asn1.Marshal(message)
-	if err != nil {
-		return nil, err
-	}
-	checksum, err := etype.Checksum(key.KeyValue, SafeUsage, encoded)
-	if err != nil {
-		return nil, err
-	}
-	return asn1.Marshal(protocol.KRBSafe{
-		PVNO: 5, MsgType: 20, SafeBody: body,
-		Checksum: protocol.Checksum{ChecksumType: checksumType(key.KeyType), Checksum: checksum},
+	return appmsg.MakeSafe(data, &appmsg.Options{
+		Key:            *key,
+		LocalAddress:   &addr,
+		DoSequence:     true,
+		SequenceNumber: seq,
 	})
 }
 
-func verifySafe(key *protocol.EncryptionKey, der []byte, expectedSeq uint32, local protocol.HostAddress) (uint64, uint32, error) {
+func verifySafe(key *protocol.EncryptionKey, der []byte, expectedSeq uint32, _ protocol.HostAddress) (uint64, uint32, error) {
 	var msg protocol.KRBSafe
 	if err := asn1.Unmarshal(der, &msg); err != nil {
 		return 0, 0, err
@@ -425,28 +413,23 @@ func verifySafe(key *protocol.EncryptionKey, der []byte, expectedSeq uint32, loc
 	if msg.PVNO != 5 || msg.MsgType != 20 || msg.SafeBody.SeqNumber == nil {
 		return 0, 0, errors.New("kprop: malformed KRB-SAFE")
 	}
-	if *msg.SafeBody.SeqNumber != expectedSeq {
-		return 0, *msg.SafeBody.SeqNumber, fmt.Errorf("kprop: sequence %d, want %d", *msg.SafeBody.SeqNumber, expectedSeq)
-	}
-	etype, err := crypto.NewRegistry().Get(key.KeyType)
+	gotSeq := *msg.SafeBody.SeqNumber
+	_, err := appmsg.ReadSafe(der, &appmsg.Options{
+		Key:            *key,
+		DoSequence:     true,
+		SequenceNumber: gotSeq,
+	})
 	if err != nil {
-		return 0, 0, err
+		return 0, gotSeq, err
 	}
-	checksumMessage := msg
-	checksumMessage.Checksum = protocol.Checksum{}
-	messageDER, err := asn1.Marshal(checksumMessage)
-	if err != nil {
-		return 0, 0, err
-	}
-	if msg.Checksum.ChecksumType != checksumType(key.KeyType) ||
-		etype.VerifyChecksum(key.KeyValue, SafeUsage, messageDER, msg.Checksum.Checksum) != nil {
-		return 0, 0, krberrors.ErrIntegrity
+	if gotSeq != expectedSeq {
+		return 0, gotSeq, fmt.Errorf("kprop: sequence %d, want %d", gotSeq, expectedSeq)
 	}
 	size, _, err := decodeDatabaseSize(msg.SafeBody.UserData)
 	if err != nil {
-		return 0, *msg.SafeBody.SeqNumber, err
+		return 0, gotSeq, err
 	}
-	return size, *msg.SafeBody.SeqNumber, nil
+	return size, gotSeq, nil
 }
 
 func makePriv(key *protocol.EncryptionKey, data []byte, seq uint32, addr protocol.HostAddress, iv []byte) ([]byte, []byte, error) {
