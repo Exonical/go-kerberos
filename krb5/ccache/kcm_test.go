@@ -26,6 +26,7 @@ func kcmRequest(op uint16, args ...[]byte) []byte {
 }
 
 func TestKCMRoundTripAndCollection(t *testing.T) {
+	skipWindowsUnixSocket(t)
 	socket := filepath.Join(t.TempDir(), "kcm.sock")
 	server := NewKCMServer(socket)
 	listener, err := net.Listen("unix", socket)
@@ -425,6 +426,7 @@ func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
 
 func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
 	t.Helper()
+	skipWindowsUnixSocket(t)
 	socket := filepath.Join(t.TempDir(), "kcm.sock")
 	server := NewKCMServer(socket)
 	server.IsolatePeers = isolate
@@ -445,6 +447,13 @@ func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint
 		<-done
 	})
 	return server, socket
+}
+
+func skipWindowsUnixSocket(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("KCM Unix sockets are unavailable on Windows")
+	}
 }
 
 func TestKCMServerSamePeerClientsShareNamespace(t *testing.T) {

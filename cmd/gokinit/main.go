@@ -135,7 +135,7 @@ func runInit(args []string, stdin io.Reader, _ io.Writer, stderr io.Writer, inte
 func loadInitConfig(getenv func(string) string) (*config.Config, error) {
 	path := getenv("KRB5_CONFIG")
 	if path == "" {
-		path = "/etc/krb5.conf"
+		return config.ParseDefault(false)
 	}
 	cfg, err := config.ParseFile(path)
 	if err != nil {

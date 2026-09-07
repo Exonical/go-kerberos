@@ -424,10 +424,23 @@ tokens `%{APPDATA}`, `%{COMMON_APPDATA}`, `%{LOCAL_APPDATA}`, `%{SYSTEM}`,
 `%{SBINDIR}`, `%{euid}`, `%{USERID}`, `%{uid}`, and `%{TEMP}` resolve through
 the corresponding Windows known folders, executable directory, current-user
 SID, and temporary-directory APIs. Windows expansion converts `/` to `\`,
-matching MIT's `expand_path.c`; Windows registry tokens remain out of scope.
+matching MIT's `expand_path.c`; these tokens are shell-folder/SID based and do
+not read the registry.
 Unknown and malformed tokens are errors. MIT profile `module` loading is also
 not implemented; it requires plugin-loader infrastructure not present in this
 Go profile package.
+
+On Windows, default profile discovery follows MIT's registry/file order:
+`KRB5_CONFIG`, the per-user and machine `Software\MIT\Kerberos5\config`
+values, the roaming application profile, `%WINDIR%\krb5.ini`, and the
+executable directory. Secure discovery omits the environment, per-user
+registry, and roaming-application sources. The hostrealm registry module
+checks `default_realm` in the machine key before the user key. Default FILE
+ccaches similarly honor `KRB5CCNAME`, user then machine `ccname`, and the
+`TEMP`, `TMP`, and `WINDIR` fallback directories; `SetDefaultName` writes the
+user `ccname` value. The legacy `RegKRB5CCNAME`/`kerberos.ini` indirection is
+intentionally not implemented. Windows registry tests run only in the
+Windows CI job.
 
 Unit coverage exercises MIT profile `[domain_realm]` matching (exact host,
 case-insensitive parent walking, leading-dot suffixes, and numeric-address

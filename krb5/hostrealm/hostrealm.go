@@ -251,6 +251,9 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 	if host == "" {
 		return "", false, fmt.Errorf("host realm: empty hostname")
 	}
+	if realm := registryDefaultRealm(); realm != "" {
+		return realm, true, nil
+	}
 	if cfg != nil {
 		if realm, ok := cfg.RealmForHost(host); ok {
 			return realm, true, nil

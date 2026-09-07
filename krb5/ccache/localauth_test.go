@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -58,6 +59,9 @@ func TestSelectForServerUsesK5Identity(t *testing.T) {
 }
 
 func TestSelectForServerClosesNonSelectedKCMHandles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("KCM Unix sockets are unavailable on Windows")
+	}
 	socket := filepath.Join(t.TempDir(), "kcm.sock")
 	server := NewKCMServer(socket)
 	listener, err := net.Listen("unix", socket)

@@ -1,0 +1,41 @@
+//go:build windows
+
+package hostrealm
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"github.com/Exonical/go-kerberos/krb5/config"
+	"golang.org/x/sys/windows/registry"
+)
+
+func TestRegistryDefaultRealmWindows(t *testing.T) {
+	oldPath := hostrealmRegistryPath
+	defer func() { hostrealmRegistryPath = oldPath }()
+	hostrealmRegistryPath = `Software\GoKerberosTest\HostRealm\` + filepath.Base(t.TempDir())
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, hostrealmRegistryPath, registry.SET_VALUE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		key.Close()
+		_ = registry.DeleteKey(registry.CURRENT_USER, hostrealmRegistryPath)
+	}()
+	if err := key.SetStringValue("default_realm", "EXAMPLE.TEST"); err != nil {
+		t.Fatal(err)
+	}
+	if got := registryDefaultRealm(); got != "EXAMPLE.TEST" {
+		t.Fatalf("registry default realm = %q", got)
+	}
+	cfg := &config.Config{
+		DefaultRealm: "PROFILE.TEST",
+		DomainRealm:  map[string]string{".example.test": "PROFILE.TEST"},
+	}
+	realm, authoritative, err := HostRealm(context.Background(), cfg, "host.example.test", Options{})
+	if err != nil || realm != "EXAMPLE.TEST" || !authoritative {
+		t.Fatalf("registry-first host realm = %q, authoritative=%v, err=%v",
+			realm, authoritative, err)
+	}
+}

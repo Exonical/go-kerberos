@@ -350,7 +350,7 @@ func RunRemote(ctx context.Context, opts StartupOptions, in io.Reader, out, errO
 func loadClientConfig() (*config.Config, error) {
 	path := os.Getenv("KRB5_CONFIG")
 	if path == "" {
-		path = "/etc/krb5.conf"
+		return config.ParseDefault(false)
 	}
 	return config.ParseFile(path)
 }

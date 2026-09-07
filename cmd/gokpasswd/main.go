@@ -78,7 +78,7 @@ func validatePasswordConfirmation(password, confirmation string) error {
 func loadPasswdConfig() (*config.Config, error) {
 	path := os.Getenv("KRB5_CONFIG")
 	if path == "" {
-		path = "/etc/krb5.conf"
+		return config.ParseDefault(false)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
