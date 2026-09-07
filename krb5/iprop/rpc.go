@@ -374,8 +374,13 @@ func (c *Client) writeRecord(ctx context.Context, data []byte) error {
 	if len(data) > maxRecord {
 		return errors.New("iprop: RPC record too large")
 	}
+	if ctx == nil {
+		return errors.New("iprop: nil context")
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.Conn.SetWriteDeadline(deadline)
+	} else {
+		_ = c.Conn.SetWriteDeadline(time.Time{})
 	}
 	var h [4]byte
 	binary.BigEndian.PutUint32(h[:], uint32(len(data))|0x80000000)
@@ -386,8 +391,13 @@ func (c *Client) writeRecord(ctx context.Context, data []byte) error {
 	return err
 }
 func (c *Client) readRecord(ctx context.Context) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("iprop: nil context")
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.Conn.SetReadDeadline(deadline)
+	} else {
+		_ = c.Conn.SetReadDeadline(time.Time{})
 	}
 	var h [4]byte
 	if _, err := io.ReadFull(c.Conn, h[:]); err != nil {
@@ -811,6 +821,8 @@ type Replica struct {
 	Ulog          *Ulog
 	MasterEnctype int32
 	MasterKey     []byte
+	// Persist is called after applying updates and before advancing Ulog.
+	Persist func() error
 	// LoadDump, when set, applies a received kprop full-resync dump and updates
 	// the local store. It is invoked by the kprop server integration.
 	LoadDump func(io.Reader, uint64) error
@@ -846,6 +858,11 @@ func (r *Replica) Poll(ctx context.Context) (UpdateStatus, error) {
 	}
 	if err := r.apply(result.Updates); err != nil {
 		return UpdateError, err
+	}
+	if r.Persist != nil && len(result.Updates) != 0 {
+		if err := r.Persist(); err != nil {
+			return UpdateError, err
+		}
 	}
 	if r.Ulog != nil {
 		for _, update := range result.Updates {
