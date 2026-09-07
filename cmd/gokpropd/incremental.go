@@ -304,7 +304,7 @@ func openReplicaUlog(path string, size int) (*iprop.Ulog, iprop.Last, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, iprop.Last{}, err
 	}
-	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepathDir(path), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return nil, iprop.Last{}, err
 	}
 	if size <= 0 {
