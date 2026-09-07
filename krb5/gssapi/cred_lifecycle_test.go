@@ -152,6 +152,7 @@ func TestCredentialExportImportRoundTrip(t *testing.T) {
 		[]byte(`["bad",[]]`),
 		[]byte(`["K5C1",null]`),
 		[]byte(`["K5C1",[1]]`),
+		[]byte(`["K5C1",[1, null, null, false, false, null, null, null, null, false, 0, 0, null, null]] trailing`),
 	} {
 		if _, err := ImportCredential(malformed); err == nil {
 			t.Fatalf("malformed token accepted: %s", malformed)

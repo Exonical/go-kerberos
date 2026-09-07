@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/Exonical/go-kerberos/krb5/ccache"
@@ -33,10 +34,7 @@ func (c *Credential) Export() ([]byte, error) {
 		cache = exportCache(credentialCache(c))
 	}
 	var keytabName any
-	if c.keytab != nil {
-		keytabName = c.keytabName
-	}
-	if keytabName == nil && c.keytabName != "" {
+	if c.keytabName != "" {
 		keytabName = c.keytabName
 	}
 	cred := []any{
@@ -56,6 +54,13 @@ func ImportCredential(data []byte) (*Credential, error) {
 	if err := decoder.Decode(&top); err != nil {
 		return nil, fmt.Errorf("GSS import credential: invalid JSON: %w", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("GSS import credential: trailing JSON")
+		}
+		return nil, fmt.Errorf("GSS import credential: invalid trailing JSON: %w", err)
+	}
 	if len(top) != 2 || stringValue(top[0]) != credentialExportMagic {
 		return nil, fmt.Errorf("GSS import credential: invalid magic")
 	}
@@ -64,7 +69,7 @@ func ImportCredential(data []byte) (*Credential, error) {
 		return nil, fmt.Errorf("GSS import credential: invalid credential shape")
 	}
 	usageNumber, err := numberValue(credArray[0])
-	if err != nil || usageNumber == 0 {
+	if err != nil || usageNumber == 0 || usageNumber > int64(^uint32(0)) {
 		return nil, fmt.Errorf("GSS import credential: invalid usage")
 	}
 	name, err := importName(credArray[1])
@@ -76,7 +81,10 @@ func ImportCredential(data []byte) (*Credential, error) {
 		return nil, err
 	}
 	var kt *keytab.Keytab
-	keytabName := stringValue(credArray[5])
+	keytabName, ok := optionalString(credArray[5])
+	if !ok {
+		return nil, fmt.Errorf("GSS import credential: invalid keytab")
+	}
 	if keytabName != "" {
 		kt, err = keytab.Resolve(keytabName)
 		if err != nil {
@@ -145,7 +153,7 @@ func importCache(value any) (*ccache.Cache, string, error) {
 	if value == nil {
 		return nil, "", nil
 	}
-	if name := stringValue(value); name != "" {
+	if name, ok := value.(string); ok {
 		handle, err := ccache.Resolve(name)
 		if err != nil {
 			return nil, "", fmt.Errorf("GSS import credential ccache: %w", err)
@@ -316,10 +324,21 @@ func importName(value any) (*principal.Principal, error) {
 	if !ok || len(array) != 3 {
 		return nil, fmt.Errorf("GSS import credential: invalid name")
 	}
-	if stringValue(array[0]) == "" {
+	nameValue, ok := array[0].(string)
+	if !ok {
+		return nil, fmt.Errorf("GSS import credential: invalid name principal")
+	}
+	for _, field := range array[1:] {
+		if field != nil {
+			if _, ok := field.(string); !ok {
+				return nil, fmt.Errorf("GSS import credential: invalid name metadata")
+			}
+		}
+	}
+	if nameValue == "" {
 		return nil, nil
 	}
-	name, err := parsePrincipal(stringValue(array[0]))
+	name, err := parsePrincipal(nameValue)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +354,13 @@ func parsePrincipal(value string) (principal.Principal, error) {
 }
 
 func decodeBase64(value any) ([]byte, error) {
-	stringValue := stringValue(value)
+	if value == nil {
+		return nil, nil
+	}
+	stringValue, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid base64 data type")
+	}
 	if stringValue == "" {
 		return nil, nil
 	}
@@ -354,6 +379,14 @@ func stringValue(value any) string {
 		return result
 	}
 	return ""
+}
+
+func optionalString(value any) (string, bool) {
+	if value == nil {
+		return "", true
+	}
+	result, ok := value.(string)
+	return result, ok
 }
 
 func numberValue(value any) (int64, error) {
