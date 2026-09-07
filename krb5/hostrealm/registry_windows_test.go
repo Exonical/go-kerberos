@@ -44,7 +44,22 @@ func TestRegistryDefaultRealmWindows(t *testing.T) {
 		t.Fatalf("registry default realm = %q, authoritative=%v, err=%v",
 			realm, authoritative, err)
 	}
+	realm, authoritative, err = HostRealm(context.Background(), &config.Config{},
+		"host.example.test", Options{Resolver: &txtResolver{}})
+	if err != nil || realm != "EXAMPLE.TEST" || authoritative {
+		t.Fatalf("registry without profile default = %q, authoritative=%v, err=%v",
+			realm, authoritative, err)
+	}
+	realm, authoritative, err = HostRealm(context.Background(), nil,
+		"host.example.test", Options{Resolver: &txtResolver{}})
+	if err != nil || realm != "EXAMPLE.TEST" || authoritative {
+		t.Fatalf("registry with nil config = %q, authoritative=%v, err=%v",
+			realm, authoritative, err)
+	}
 	if realm, ok := FallbackRealm(&config.Config{DefaultRealm: "PROFILE.TEST"}, "host.example.test"); !ok || realm != "EXAMPLE.TEST" {
 		t.Fatalf("registry fallback realm = %q, found=%v", realm, ok)
+	}
+	if realm, ok := FallbackRealm(nil, "host.example.test"); !ok || realm != "EXAMPLE.TEST" {
+		t.Fatalf("registry fallback without config = %q, found=%v", realm, ok)
 	}
 }
