@@ -863,8 +863,9 @@ func (h *kcmHandle) collection() ([]*Handle, error) {
 // KCMServer serves the Heimdal KCM v2 protocol over a Unix socket.
 type KCMServer struct {
 	Socket string
-	// SharedNamespace disables per-peer-UID cache isolation. It is intended
-	// for tests and daemons deliberately serving all users.
+	// SharedNamespace disables per-peer-UID cache isolation and restricts the
+	// socket to its owner. Isolated multi-user daemons use a world-connectable
+	// socket and enforce access through peer-UID namespaces.
 	SharedNamespace bool
 	mu              sync.Mutex
 	shared          *kcmNamespace
@@ -917,9 +918,9 @@ func (s *KCMServer) Serve() error {
 	if err != nil {
 		return err
 	}
-	mode := os.FileMode(0600)
+	mode := os.FileMode(0666)
 	if s.SharedNamespace {
-		mode = 0666
+		mode = 0600
 	}
 	if err := os.Chmod(s.Socket, mode); err != nil {
 		_ = listener.Close()

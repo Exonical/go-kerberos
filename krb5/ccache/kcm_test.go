@@ -347,8 +347,8 @@ func TestKCMServerSocketPermissions(t *testing.T) {
 		shared bool
 		want   os.FileMode
 	}{
-		{name: "isolated", want: 0600},
-		{name: "shared", shared: true, want: 0666},
+		{name: "isolated", want: 0666},
+		{name: "shared", shared: true, want: 0600},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			socket := shortKCMSocket(t)
