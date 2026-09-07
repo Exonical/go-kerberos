@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -36,7 +35,20 @@ func TestFromEnv(t *testing.T) {
 		}
 	})
 	t.Run("file", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "trace.log")
+		file, err := os.CreateTemp("", "go-kerberos-trace-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := file.Name()
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" {
+			defer os.Remove(path)
+		}
 		t.Setenv("KRB5_TRACE", path)
 		callback, err := FromEnv()
 		if err != nil {
