@@ -121,6 +121,9 @@ type Server struct {
 	// CertAuthModules are additional PKINIT certificate authorization modules.
 	// Built-in modules always run before these modules.
 	CertAuthModules []CertAuthModule
+	// AuthDataModules add MIT-shaped KDC authorization data to issued tickets.
+	// A nil list leaves authorization-data module handling disabled.
+	AuthDataModules []AuthDataModule
 	// PKINITRequireFreshness requires RFC 8070 freshness tokens on signed
 	// PKINIT requests. Clients which advertise freshness receive an opaque
 	// token in PREAUTH_REQUIRED and must echo it in PKAuthenticator.
@@ -1554,6 +1557,15 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
+	s.handleAuthData(&AuthDataRequest{
+		Flags:     AuthDataASReq,
+		Client:    clientName,
+		Server:    serviceName,
+		ClientKey: &clientKey,
+		ServerKey: &serviceKey,
+		Request:   request,
+		Reply:     &ticketPart,
+	})
 	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil, assertedIndicators); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
@@ -2555,6 +2567,7 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if request.ReqBody.KDCOptions&(types.KDCForwarded|types.KDCProxy) != 0 {
 		addresses = append(protocol.HostAddresses(nil), request.ReqBody.Addresses...)
 	}
+	tgtPart := ticketPart
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
@@ -2583,6 +2596,16 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
+	s.handleAuthData(&AuthDataRequest{
+		Flags:     AuthDataTGSReq,
+		Client:    principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
+		Server:    serviceName,
+		ClientKey: nil,
+		ServerKey: &serviceKey,
+		Request:   request,
+		TGT:       &tgtPart,
+		Reply:     &ticketPart,
+	})
 	ticketEncryptionKey := serviceKey
 	ticketKVNO := serviceKey.KVNO
 	var ticketKVNOPtr = &ticketKVNO
