@@ -44,7 +44,7 @@ type AuthModPrinc interface {
 }
 
 type AuthSetString interface {
-	AuthSetString(client, target principal.Principal, key, value string) AuthDecision
+	AuthSetString(client, target principal.Principal, key string, value *string) AuthDecision
 }
 
 type AuthCpw interface {
@@ -139,7 +139,7 @@ func (m ACLAuthModule) AuthAddPrinc(c, t principal.Principal, _ *PrincipalEntry,
 func (m ACLAuthModule) AuthModPrinc(c, t principal.Principal, _ *PrincipalEntry, _ int64) (AuthDecision, *AuthRestrictions) {
 	return m.check(c, "modify", t), nil
 }
-func (m ACLAuthModule) AuthSetString(c, t principal.Principal, _, _ string) AuthDecision {
+func (m ACLAuthModule) AuthSetString(c, t principal.Principal, _ string, _ *string) AuthDecision {
 	return m.check(c, "modify", t)
 }
 func (m ACLAuthModule) AuthCpw(c, t principal.Principal) AuthDecision {
@@ -152,7 +152,7 @@ func (m ACLAuthModule) AuthSetKey(c, t principal.Principal) AuthDecision {
 	return m.check(c, "set-key", t)
 }
 func (m ACLAuthModule) AuthPurgeKeys(c, t principal.Principal) AuthDecision {
-	return m.check(c, "purgekeys", t)
+	return m.check(c, "modify", t)
 }
 func (m ACLAuthModule) AuthDelPrinc(c, t principal.Principal) AuthDecision {
 	return m.check(c, "delete", t)
@@ -228,7 +228,8 @@ type authRequest struct {
 	operation            string
 	client, target       principal.Principal
 	source, destination  principal.Principal
-	key, value           string
+	key                  string
+	value                *string
 	policy, clientPolicy string
 	entry                *PrincipalEntry
 	mask                 int64
@@ -411,7 +412,7 @@ func (s *Server) authorizePrincipal(client principal.Principal, operation string
 }
 
 func (s *Server) authorizeString(client, target principal.Principal,
-	key, value string) bool {
+	key string, value *string) bool {
 	if s.AuthModules == nil {
 		return s.authorize(client, "set-string", target)
 	}
