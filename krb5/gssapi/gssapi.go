@@ -74,6 +74,7 @@ type AcceptorOptions struct {
 	ReplayCache     rcache.Cache
 	ReplayCacheName string
 	ChannelBindings *ChannelBindings
+	NegoEx          bool
 }
 
 // ErrBadBindings identifies channel bindings which do not match.

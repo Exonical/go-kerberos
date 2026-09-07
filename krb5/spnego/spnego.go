@@ -2,6 +2,7 @@
 package spnego
 
 import (
+	"crypto/rand"
 	"encoding/asn1"
 	"fmt"
 	"time"
@@ -29,6 +30,7 @@ type NegState uint8
 // InitiatorOptions controls the underlying Kerberos GSS initiator.
 type InitiatorOptions struct {
 	ChannelBindings *gssapi.ChannelBindings
+	NegoEx          bool
 }
 
 // AcceptorOptions controls the underlying Kerberos GSS acceptor.
@@ -60,6 +62,7 @@ var (
 	spnegoOID         = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 2}
 	kerberosOID       = asn1.ObjectIdentifier{1, 2, 840, 113554, 1, 2, 2}
 	legacyKerberosOID = asn1.ObjectIdentifier{1, 2, 840, 48018, 1, 2, 2}
+	negoexOID         = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 311, 2, 2, 30}
 )
 
 // EncodeToken encodes a SPNEGO token using RFC 4178 DER.
@@ -390,6 +393,7 @@ type Initiator struct {
 	mechList []asn1.ObjectIdentifier
 	needMIC  bool
 	complete bool
+	negoex   *negoExState
 }
 
 // NewInitiator creates an initiator offering the Kerberos mechanism.
@@ -415,14 +419,19 @@ func NewInitiatorWithMechsAndOptions(creds *client.Credentials, flags uint32,
 	if len(mechs) == 0 {
 		return nil, fmt.Errorf("SPNEGO initiator: empty mechanism list")
 	}
-	if _, index := selectKerberos(mechs); index < 0 {
-		return nil, fmt.Errorf("SPNEGO initiator: Kerberos mechanism is not offered")
+	if !options.NegoEx {
+		if _, index := selectKerberos(mechs); index < 0 {
+			return nil, fmt.Errorf("SPNEGO initiator: Kerberos mechanism is not offered")
+		}
 	}
 	gi, err := gssapi.NewInitiatorWithOptions(creds, flags, gssapi.InitiatorOptions{
 		ChannelBindings: options.ChannelBindings,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if options.NegoEx {
+		mechs = []asn1.ObjectIdentifier{negoexOID}
 	}
 	return &Initiator{creds: creds, flags: flags, mechs: append([]asn1.ObjectIdentifier(nil), mechs...), mech: gi}, nil
 }
@@ -440,6 +449,26 @@ func (i *Initiator) InitialToken(now time.Time) ([]byte, error) {
 		return nil, err
 	}
 	i.mechList = append([]asn1.ObjectIdentifier(nil), i.mechs...)
+	if i.mechList[0].Equal(negoexOID) {
+		scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
+		i.negoex, err = newNegoExState(true, scheme)
+		if err != nil {
+			return nil, err
+		}
+		var random [32]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, err
+		}
+		token, err := i.negoex.append(
+			NegoExMessage{Type: NegoExInitiatorNego, Random: random, AuthSchemes: []NegoExAuthScheme{scheme}},
+			NegoExMessage{Type: NegoExInitiatorMetaData, AuthScheme: scheme},
+			NegoExMessage{Type: NegoExAPRequest, AuthScheme: scheme, Token: mechToken},
+		)
+		if err != nil {
+			return nil, err
+		}
+		mechToken = token
+	}
 	return EncodeToken(Token{Init: &NegTokenInit{MechTypes: i.mechList, MechToken: mechToken}})
 }
 
@@ -460,8 +489,62 @@ func (i *Initiator) Continue(token []byte) ([]byte, error) {
 	if selected == nil {
 		selected = kerberosOID
 	}
-	if !isKerberos(selected) {
+	if i.negoex != nil && !selected.Equal(negoexOID) {
 		return nil, fmt.Errorf("SPNEGO initiator: unsupported selected mechanism")
+	}
+	if i.negoex == nil && !isKerberos(selected) {
+		return nil, fmt.Errorf("SPNEGO initiator: unsupported selected mechanism")
+	}
+	if i.negoex != nil {
+		if resp.ResponseToken == nil {
+			return nil, fmt.Errorf("SPNEGO initiator: missing NegoEx response")
+		}
+		messages, err := DecodeNegoEx(resp.ResponseToken)
+		if err != nil {
+			return nil, err
+		}
+		if err := i.negoex.validate(messages); err != nil {
+			return nil, err
+		}
+		for _, message := range messages {
+			if message.Type == NegoExChallenge {
+				if len(message.Token) != 0 {
+					if err := i.mech.VerifyToken(message.Token); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+		ctx, err := i.mech.Context()
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range messages {
+			if message.Type == NegoExVerify {
+				if err := i.negoex.verify(ctx, message, resp.ResponseToken[:message.Offset]); err != nil {
+					return nil, fmt.Errorf("SPNEGO initiator: NegoEx verify: %w", err)
+				}
+			}
+		}
+		if _, err := i.negoex.receive(resp.ResponseToken); err != nil {
+			return nil, err
+		}
+		checksum, checksumType, err := i.negoex.checksum(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
+		outToken, err := i.negoex.append(NegoExMessage{
+			Type: NegoExVerify, AuthScheme: i.negoex.scheme,
+			ChecksumType: checksumType, Checksum: checksum,
+		})
+		if err != nil {
+			return nil, err
+		}
+		i.complete = true
+		return encodeBareResp(NegTokenResp{
+			NegState: NegStateAcceptCompleted, SupportedMech: negoexOID,
+			ResponseToken: outToken,
+		})
 	}
 	i.needMIC = resp.NegState == NegStateRequestMIC || !selected.Equal(i.mechList[0])
 	if resp.ResponseToken != nil {
@@ -514,6 +597,8 @@ type Acceptor struct {
 	ctx       *Context
 	mechTypes []asn1.ObjectIdentifier
 	needMIC   bool
+	negoex    *negoExState
+	negoExOpt bool
 }
 
 // NewAcceptor creates an acceptor backed by a Kerberos service keytab.
@@ -524,7 +609,7 @@ func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 // NewAcceptorWithOptions creates an acceptor with underlying Kerberos
 // channel-binding and replay-cache options.
 func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Acceptor {
-	return &Acceptor{mech: gssapi.NewAcceptorWithOptions(kt, options)}
+	return &Acceptor{mech: gssapi.NewAcceptorWithOptions(kt, options), negoExOpt: options.NegoEx}
 }
 
 // Accept processes an initiator token and returns an optional response token.
@@ -538,6 +623,32 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 			return nil, nil, fmt.Errorf("SPNEGO acceptor: %w", err)
 		}
 		resp := decoded.Resp
+		if a.negoex != nil {
+			if resp.ResponseToken == nil {
+				return nil, nil, fmt.Errorf("SPNEGO acceptor: missing NegoEx verification")
+			}
+			messages, err := DecodeNegoEx(resp.ResponseToken)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := a.negoex.validate(messages); err != nil {
+				return nil, nil, err
+			}
+			ctx := a.ctx.ctx
+			for _, message := range messages {
+				if message.Type == NegoExVerify {
+					prefix := resp.ResponseToken[:message.Offset]
+					if err := a.negoex.verify(ctx, message, prefix); err != nil {
+						return nil, nil, fmt.Errorf("SPNEGO acceptor: NegoEx verify: %w", err)
+					}
+				}
+			}
+			if _, err := a.negoex.receive(resp.ResponseToken); err != nil {
+				return nil, nil, err
+			}
+			a.ctx.established = true
+			return a.ctx, nil, nil
+		}
 		if resp.MechListMIC == nil {
 			return nil, nil, fmt.Errorf("SPNEGO acceptor: missing required mechListMIC")
 		}
@@ -556,6 +667,85 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 		return nil, nil, fmt.Errorf("SPNEGO acceptor: %w", err)
 	}
 	init := decoded.Init
+	if a.negoExOpt && len(init.MechTypes) > 0 && init.MechTypes[0].Equal(negoexOID) {
+		messages, err := DecodeNegoEx(init.MechToken)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(messages) < 3 || messages[0].Type != NegoExInitiatorNego {
+			return nil, nil, fmt.Errorf("SPNEGO acceptor: invalid NegoEx negotiation")
+		}
+		apIndex := -1
+		for index := range messages {
+			if messages[index].Type == NegoExAPRequest {
+				apIndex = index
+				break
+			}
+		}
+		if apIndex < 0 {
+			return nil, nil, fmt.Errorf("SPNEGO acceptor: missing NegoEx AP-REQUEST")
+		}
+		scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
+		if len(messages[0].AuthSchemes) == 0 || messages[0].AuthSchemes[0] != scheme ||
+			messages[apIndex].AuthScheme != scheme {
+			return nil, nil, fmt.Errorf("SPNEGO acceptor: unsupported NegoEx auth scheme")
+		}
+		state := &negoExState{initiator: false, conversation: messages[0].ConversationID,
+			sequence: 0, scheme: scheme}
+		if _, err := state.receive(init.MechToken); err != nil {
+			return nil, nil, err
+		}
+		ctx, reply, err := a.mech.Accept(messages[apIndex].Token, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		var random [32]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, nil, err
+		}
+		outPrefix, err := state.append(
+			NegoExMessage{Type: NegoExAcceptorNego, Random: random, AuthSchemes: []NegoExAuthScheme{scheme}},
+			NegoExMessage{Type: NegoExAcceptorMetaData, AuthScheme: scheme},
+			NegoExMessage{Type: NegoExChallenge, AuthScheme: scheme, Token: reply},
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		checksum, checksumType, err := state.checksum(ctx, nil)
+		if err != nil {
+			alert, alertErr := state.append(NewNegoExVerifyNoKeyAlert(scheme))
+			if alertErr != nil {
+				return nil, nil, err
+			}
+			a.negoex = state
+			a.ctx = &Context{ctx: ctx}
+			a.mechTypes = append([]asn1.ObjectIdentifier(nil), init.MechTypes...)
+			out, encodeErr := encodeBareResp(NegTokenResp{
+				NegState: NegStateAcceptIncomplete, SupportedMech: negoexOID,
+				ResponseToken: alert,
+			})
+			if encodeErr != nil {
+				return nil, nil, encodeErr
+			}
+			return a.ctx, out, nil
+		}
+		outVerify, err := state.append(NegoExMessage{
+			Type: NegoExVerify, AuthScheme: scheme,
+			ChecksumType: checksumType, Checksum: checksum,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		outToken := append(outPrefix, outVerify...)
+		a.negoex = state
+		a.ctx = &Context{ctx: ctx}
+		a.mechTypes = append([]asn1.ObjectIdentifier(nil), init.MechTypes...)
+		out, err := encodeBareResp(NegTokenResp{
+			NegState: NegStateAcceptIncomplete, SupportedMech: negoexOID,
+			ResponseToken: outToken,
+		})
+		return a.ctx, out, err
+	}
 	selected, index := selectKerberos(init.MechTypes)
 	if selected == nil {
 		return nil, nil, fmt.Errorf("SPNEGO acceptor: no supported mechanism")
