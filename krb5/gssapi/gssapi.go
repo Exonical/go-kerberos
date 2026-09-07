@@ -639,6 +639,14 @@ func (c *Context) Flags() uint32 {
 	return c.flags
 }
 
+// TargetName returns the service principal authenticated by the context.
+func (c *Context) TargetName() principal.Principal {
+	if c == nil {
+		return principal.Principal{}
+	}
+	return c.target
+}
+
 // MIC creates an RFC 4121 integrity token.
 func (c *Context) MIC(data []byte) ([]byte, error) {
 	return c.mic(data)

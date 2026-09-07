@@ -256,7 +256,7 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 			return realm, true, nil
 		}
 	}
-	if cfg == nil || cfg.DNSLookupRealm {
+	if cfg != nil && cfg.DNSLookupRealm {
 		resolver := opts.Resolver
 		if resolver == nil {
 			r := NetResolver{}

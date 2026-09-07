@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Exonical/go-kerberos/cmd/internal/secretinput"
 	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -104,17 +104,8 @@ func runInit(args []string, stdin io.Reader, _ io.Writer, stderr io.Writer, inte
 	if err != nil {
 		return err
 	}
-	if interactive {
-		fmt.Fprintf(stderr, "Password for %s: ", clientPrincipal.String())
-	}
-	password, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && err != io.EOF {
-		return fmt.Errorf("read password: %w", err)
-	}
-	password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
-	if password == "" {
-		return fmt.Errorf("empty password")
-	}
+	password, err := secretinput.Read(stdin, stderr,
+		fmt.Sprintf("Password for %s: ", clientPrincipal.String()), interactive)
 	if options.Lifetime > 0 {
 		cfg.TicketLifetime = options.Lifetime
 	}
@@ -145,6 +136,5 @@ func loadInitConfig(getenv func(string) string) (*config.Config, error) {
 }
 
 func isTerminal(file *os.File) bool {
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return secretinput.IsTerminal(file)
 }

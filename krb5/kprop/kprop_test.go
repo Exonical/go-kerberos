@@ -190,7 +190,7 @@ func TestGoClientServerTransfer(t *testing.T) {
 	server := &Server{
 		Keytab: &keytab.Keytab{Entries: []keytab.Entry{{Principal: service, KVNO: 1, Enctype: etype.ID(), Key: serviceKey}}},
 		Realm:  realm,
-		Authorize: func(got principal.Principal) error {
+		Authorize: func(got principal.Principal, _ int32) error {
 			if got.String() != user.String() {
 				t.Fatalf("authorized principal = %s", got)
 			}

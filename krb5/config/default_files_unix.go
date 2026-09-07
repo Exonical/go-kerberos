@@ -2,11 +2,11 @@
 
 package config
 
-import "os"
+import "github.com/Exonical/go-kerberos/internal/secureenv"
 
 func defaultConfigFiles(secure bool) []string {
 	if !secure {
-		if path := os.Getenv("KRB5_CONFIG"); path != "" {
+		if path := secureenv.Get("KRB5_CONFIG"); path != "" {
 			return []string{path}
 		}
 	}

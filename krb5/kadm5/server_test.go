@@ -18,6 +18,29 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
+func TestServicePrincipalValidation(t *testing.T) {
+	realm := "EXAMPLE.COM"
+	valid := principal.Principal{Realm: realm, Components: []string{"kadmin", "admin"}}
+	if !validKadmService(valid, realm) {
+		t.Fatal("valid kadm5 service rejected")
+	}
+	for _, service := range []principal.Principal{
+		{Realm: realm, Components: []string{"kadmin"}},
+		{Realm: realm, Components: []string{"kadmin", "history"}},
+		{Realm: "OTHER.COM", Components: []string{"kadmin", "admin"}},
+		{Realm: realm, Components: []string{"host", "admin"}},
+	} {
+		if validKadmService(service, realm) {
+			t.Fatalf("invalid kadm5 service accepted: %v", service)
+		}
+	}
+	if !isChangePasswordService(principal.Principal{
+		Realm: realm, Components: []string{"kadmin", "changepw"},
+	}) {
+		t.Fatal("changepw service not recognized")
+	}
+}
+
 func TestParseRPCCall(t *testing.T) {
 	prefix := xdrWriter{}
 	prefix.u32(0x11223344)
@@ -184,7 +207,7 @@ func TestDispatchSetStringDeletion(t *testing.T) {
 			key := "delete-me"
 			body.nullableString(&key)
 			body.nullableString(nil)
-			reply := server.dispatch(client, setString, body.bytes(), true)
+			reply := server.dispatch(client, principal.Principal{}, setString, body.bytes(), true)
 			reader := xdrReader{b: reply}
 			api, err := reader.u32()
 			if err != nil {
