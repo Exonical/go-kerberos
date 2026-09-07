@@ -61,8 +61,6 @@ func runList(args []string, stdout io.Writer) error {
 	cachePath := options.CachePath
 	if cachePath == "" {
 		cachePath = resolveListCachePath(os.Getenv("KRB5CCNAME"), os.Getuid())
-	} else {
-		cachePath = strings.TrimPrefix(cachePath, "FILE:")
 	}
 	return listCache(cachePath, options.ShowEtypes, stdout)
 }
@@ -75,16 +73,20 @@ func resolveListCachePath(value string, uid int) string {
 }
 
 func listCache(path string, showEtypes bool, stdout io.Writer) error {
-	file, err := os.Open(path)
+	cacheName := path
+	if !hasCacheTypePrefix(cacheName) {
+		cacheName = "FILE:" + cacheName
+	}
+	handle, err := ccache.Resolve(cacheName)
 	if err != nil {
 		return fmt.Errorf("open cache: %w", err)
 	}
-	defer file.Close()
-	cache, err := ccache.Read(file)
+	defer handle.Close()
+	cache, err := handle.Read()
 	if err != nil {
 		return fmt.Errorf("read cache: %w", err)
 	}
-	fmt.Fprintf(stdout, "Ticket cache: FILE:%s\n", path)
+	fmt.Fprintf(stdout, "Ticket cache: %s\n", cacheName)
 	fmt.Fprintf(stdout, "Default principal: %s\n\n", cache.DefaultPrincipal.String())
 	fmt.Fprintln(stdout, "Valid starting       Expires              Service principal")
 	for _, credential := range cache.Credentials {
@@ -100,6 +102,15 @@ func listCache(path string, showEtypes bool, stdout io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func hasCacheTypePrefix(name string) bool {
+	for _, prefix := range []string{"FILE:", "DIR:", "MEMORY:", "KCM:", "KEYRING:", "MSLSA:"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func listKeytab(path string, showEtypes bool, stdout io.Writer) error {

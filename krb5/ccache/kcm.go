@@ -538,6 +538,9 @@ func (h *Handle) Initialize(p principal.Principal) error {
 	if h != nil && h.typ == TypeKeyring {
 		return h.keyring.initialize(p)
 	}
+	if h != nil && h.typ == TypeMSLSA {
+		return ErrMSLSAReadOnly
+	}
 	if h == nil || h.typ != TypeKCM {
 		return errors.New("ccache: initialize requires a KCM cache")
 	}
@@ -553,6 +556,9 @@ func (h *Handle) Initialize(p principal.Principal) error {
 func (h *Handle) Store(credential Credential) error {
 	if h != nil && h.typ == TypeKeyring {
 		return h.keyring.store(credential)
+	}
+	if h != nil && h.typ == TypeMSLSA {
+		return ErrMSLSAReadOnly
 	}
 	if h == nil {
 		return errors.New("ccache: store requires a cache")
@@ -599,6 +605,19 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 			}
 		}
 		return Credential{}, errors.New("ccache: KEYRING credential not found")
+	}
+	if h != nil && h.typ == TypeMSLSA {
+		cache, err := h.Read()
+		if err != nil {
+			return Credential{}, err
+		}
+		wireFlags := MapTCFlags(flags)
+		for _, candidate := range cache.Credentials {
+			if credentialMatches(candidate, match, wireFlags) {
+				return candidate, nil
+			}
+		}
+		return Credential{}, errors.New("ccache: MSLSA credential not found")
 	}
 	if h == nil {
 		return Credential{}, errors.New("ccache: retrieve requires a cache")
@@ -667,6 +686,9 @@ func (h *Handle) Remove(match Credential, flags uint32) error {
 			return h.Write(cache)
 		}
 		return h.keyring.remove(match, flags)
+	}
+	if h != nil && h.typ == TypeMSLSA {
+		return ErrMSLSAReadOnly
 	}
 	if h == nil {
 		return errors.New("ccache: remove requires a cache")
@@ -739,6 +761,8 @@ func (h *Handle) Destroy() error {
 	case TypeKCM:
 		_, err := h.kcm.call(kcmOpDestroy, cstring(h.kcm.name))
 		return err
+	case TypeMSLSA:
+		return ErrMSLSAReadOnly
 	default:
 		return errors.New("ccache: unsupported cache destruction")
 	}

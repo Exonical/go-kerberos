@@ -48,10 +48,16 @@ type Server struct {
 	Keytab         *keytab.Keytab
 	AdminPrincipal principal.Principal
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
-	API            uint32
-	ErrorLog       func(error)
-	Logger         *klog.Logger
-	Now            func() time.Time
+	// AuthModules enables MIT-shaped pluggable authorization. When non-nil,
+	// including an empty non-nil list, the configured modules are combined with
+	// the optional ACL adapter and the built-in self-service module. This
+	// replaces the legacy admin-only fallback and allows self-service
+	// cpw/chrand/purgekeys/getprinc/getstrs operations.
+	AuthModules []AuthModule
+	API         uint32
+	ErrorLog    func(error)
+	Logger      *klog.Logger
+	Now         func() time.Time
 	// PasswordQualityModules are evaluated after the named policy. A nil value
 	// uses MIT's built-in empty and princ modules.
 	PasswordQualityModules []PasswordQualityModule
@@ -490,6 +496,17 @@ func rpcErrorReply(xid, status uint32) []byte {
 }
 
 func (s *Server) authorize(client principal.Principal, op string, target principal.Principal) bool {
+	if op == "get-privs" {
+		return true
+	}
+	if s.AuthModules != nil {
+		return s.authorizeRequest(authRequest{operation: op, client: client, target: target})
+	}
+	if op == "randkey" {
+		op = "change-password"
+	} else if op == "set-string" || op == "get-strings" {
+		op = map[string]string{"set-string": "modify", "get-strings": "get"}[op]
+	}
 	if op == "change-password" && principalEqual(client, target) {
 		return true
 	}
@@ -506,6 +523,11 @@ func (s *Server) authorize(client principal.Principal, op string, target princip
 
 func (s *Server) authorizePair(client principal.Principal, op string,
 	first, second principal.Principal) bool {
+	if s.AuthModules != nil && op == "add-alias" {
+		return s.authorizeRequest(authRequest{
+			operation: op, client: client, source: first, destination: second,
+		})
+	}
 	if s.ACL != nil {
 		return s.ACL(client, op, first) && s.ACL(client, op, second)
 	}
@@ -513,6 +535,11 @@ func (s *Server) authorizePair(client principal.Principal, op string,
 }
 
 func (s *Server) authorizeRename(client, source, destination principal.Principal) bool {
+	if s.AuthModules != nil {
+		return s.authorizeRequest(authRequest{
+			operation: "rename", client: client, source: source, destination: destination,
+		})
+	}
 	if s.ACL != nil {
 		return s.ACL(client, "delete", source) &&
 			s.ACL(client, "create", destination)
@@ -534,6 +561,7 @@ func principalEqual(a, b principal.Principal) bool {
 }
 
 func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) []byte {
+	defer s.endAuth()
 	r := xdrReader{b: body}
 	api, err := r.u32()
 	if err != nil {
@@ -563,7 +591,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "create", entry.Principal) {
+		if !s.authorizePrincipal(client, "create", &entry, &mask) {
 			return status(authAdd)
 		}
 		policyName := ""
@@ -617,7 +645,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "create", entry.Principal) {
+		if !s.authorizePrincipal(client, "create", &entry, &mask) {
 			return status(authAdd)
 		}
 		policyName := ""
@@ -681,7 +709,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "modify", entry.Principal) {
+		if !s.authorizePrincipal(client, "modify", &entry, &mask) {
 			return status(authModify)
 		}
 		record, ok, err := s.Database.Lookup(entry.Principal)
@@ -816,7 +844,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "change-password", p) {
+		if !s.authorize(client, "randkey", p) {
 			return status(authChangePass)
 		}
 		if code := s.checkSelfKeyChange(client, p); code != 0 {
@@ -847,7 +875,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "change-password", p) {
+		if !s.authorize(client, "randkey", p) {
 			return status(authChangePass)
 		}
 		if code := s.checkSelfKeyChange(client, p); code != 0 {
@@ -952,10 +980,11 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if proc == modifyPolicy && !validPolicyMask(mask, api) {
 			return status(43787548)
 		}
-		if !s.authorize(client, map[uint32]string{createPolicy: "create-policy", modifyPolicy: "modify-policy"}[proc], principal.Principal{}) {
+		kp := policyRecord(policy)
+		policyOperation := map[uint32]string{createPolicy: "create-policy", modifyPolicy: "modify-policy"}[proc]
+		if !s.authorizePolicy(client, policyOperation, policy.Name, &policy, mask, "") {
 			return status(authAdd)
 		}
-		kp := policyRecord(policy)
 		if proc == createPolicy {
 			err = s.Database.CreatePolicy(kp)
 		} else {
@@ -977,7 +1006,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "delete-policy", principal.Principal{}) {
+		if !s.authorizePolicy(client, "delete-policy", name, nil, 0, "") {
 			return status(authDelete)
 		}
 		return status(kdbCode(s.Database.DeletePolicy(name)))
@@ -986,7 +1015,11 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "get-policy", principal.Principal{}) {
+		clientPolicy := ""
+		if record, ok, _ := s.Database.Lookup(client); ok {
+			clientPolicy = record.Policy
+		}
+		if !s.authorizePolicy(client, "get-policy", name, nil, 0, clientPolicy) {
 			return status(authGet)
 		}
 		policy, err := s.Database.GetPolicy(name)
@@ -1028,7 +1061,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "get", p) {
+		if !s.authorize(client, "get-strings", p) {
 			return status(authGet)
 		}
 		values, err := s.Database.GetStrings(p)
@@ -1061,7 +1094,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if err != nil || key == nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "modify", p) {
+		if !s.authorizeString(client, p, *key, value) {
 			return status(authModify)
 		}
 		return status(kdbCode(s.Database.SetString(p, *key, value)))

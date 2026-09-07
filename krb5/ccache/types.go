@@ -24,6 +24,7 @@ const (
 	TypeMemory  Type = "MEMORY"
 	TypeKCM     Type = "KCM"
 	TypeKeyring Type = "KEYRING"
+	TypeMSLSA   Type = "MSLSA"
 )
 
 // Handle is a resolved credential cache. DIR handles refer to either a
@@ -38,6 +39,7 @@ type Handle struct {
 	memoryHandleMu sync.RWMutex
 	kcm            *kcmHandle
 	keyring        *keyringHandle
+	mslsa          *mslsaHandle
 }
 
 type memoryCache struct {
@@ -75,6 +77,8 @@ func Resolve(name string) (*Handle, error) {
 		return resolveKCM(strings.TrimPrefix(name, "KCM:"))
 	case strings.HasPrefix(name, "KEYRING:"):
 		return resolveKeyring(strings.TrimPrefix(name, "KEYRING:"))
+	case strings.HasPrefix(name, "MSLSA:"):
+		return resolveMSLSA(strings.TrimPrefix(name, "MSLSA:"))
 	default:
 		return nil, fmt.Errorf("ccache: unsupported cache type in %q", name)
 	}
@@ -240,6 +244,9 @@ func (h *Handle) Read() (*Cache, error) {
 	if h.typ == TypeKeyring {
 		return h.keyring.read()
 	}
+	if h.typ == TypeMSLSA {
+		return h.mslsa.read()
+	}
 	file, err := os.Open(h.path)
 	if err != nil {
 		return nil, err
@@ -282,6 +289,9 @@ func (h *Handle) Write(cache *Cache) error {
 	}
 	if h.typ == TypeKeyring {
 		return h.keyring.write(cache)
+	}
+	if h.typ == TypeMSLSA {
+		return ErrMSLSAReadOnly
 	}
 	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
@@ -429,6 +439,9 @@ func (h *Handle) Collection() ([]*Handle, error) {
 	}
 	if h.typ == TypeKeyring {
 		return h.keyring.collectionHandles()
+	}
+	if h.typ == TypeMSLSA {
+		return []*Handle{h}, nil
 	}
 	if h.typ != TypeDir {
 		return []*Handle{h}, nil
