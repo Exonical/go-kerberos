@@ -579,7 +579,8 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
 	} else {
 		etypeID, clientKey, serviceKey, ok = s.selectASKeys(request.ReqBody.EType, clientRecord, serviceRecord)
-		if !ok && s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil {
+		if !ok && (len(s.PreauthModules) > 0 ||
+			(s.PKINITCertificate != nil && s.PKINITSigner != nil && s.PKINITClientCAs != nil)) {
 			etypeID, serviceKey, ok = selectPKINITServiceKey(request.ReqBody.EType, serviceRecord)
 		}
 	}
@@ -628,6 +629,13 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	if customResult != nil && customResult.Authenticated {
 		if response := s.customPreauthFailure(rock, request, armor); response != nil {
 			return response
+		}
+		if requiresHWAuth && !customResult.HardwareAuthenticated {
+			if armor != nil {
+				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+					nil, request.ReqBody.Nonce, armor)
+			}
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 		}
 		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
 			return response
