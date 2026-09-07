@@ -81,6 +81,12 @@ func TestKDCConfigRelationRuntimeGates(t *testing.T) {
 	if server.referralAllowed(unknown, true, false) {
 		t.Fatal("unlisted NT-UNKNOWN referral allowed")
 	}
+	caseVariant := unknown
+	caseVariant.Components = append([]string(nil), unknown.Components...)
+	caseVariant.Components[0] = "HOST"
+	if server.referralAllowed(caseVariant, true, false) {
+		t.Fatal("host referral matching was case-insensitive")
+	}
 	server.HostBasedServices = []string{"*"}
 	if !server.referralAllowed(unknown, true, false) {
 		t.Fatal("wildcard host referral denied")

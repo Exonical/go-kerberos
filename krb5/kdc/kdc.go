@@ -3562,7 +3562,7 @@ func (s *Server) referralAllowed(service principal.Principal, canonicalize bool,
 
 func listContains(values []string, item string) bool {
 	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), item) {
+		if value == item {
 			return true
 		}
 	}

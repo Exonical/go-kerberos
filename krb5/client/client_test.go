@@ -60,6 +60,21 @@ request_timeout = 2s
 	}
 }
 
+func TestPreferredPadataCompactsMissingTypes(t *testing.T) {
+	c := &Client{Config: &config.Config{
+		PreferredPreauthTypes: []int32{13, 14, 17},
+	}}
+	got := c.sortPreferredPadata(testRealm, protocol.MethodData{
+		{PADataType: 17}, {PADataType: 99}, {PADataType: 14}, {PADataType: 17},
+	})
+	want := []int32{14, 17, 99, 17}
+	for i, item := range got {
+		if item.PADataType != want[i] {
+			t.Fatalf("preferred padata order = %#v, want %v", got, want)
+		}
+	}
+}
+
 func TestClientConfigExtraAddresses(t *testing.T) {
 	cfg, err := config.Parse([]byte(`[libdefaults]
 noaddresses = false

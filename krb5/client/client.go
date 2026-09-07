@@ -1825,9 +1825,10 @@ func (c *Client) sortPreferredPadata(realm string, data protocol.MethodData) pro
 		}
 	}
 	result := append(protocol.MethodData(nil), data...)
-	for target, padataType := range preferred {
+	base := 0
+	for _, padataType := range preferred {
 		match := -1
-		for i := target; i < len(result); i++ {
+		for i := base; i < len(result); i++ {
 			if result[i].PADataType == padataType {
 				match = i
 				break
@@ -1837,8 +1838,9 @@ func (c *Client) sortPreferredPadata(realm string, data protocol.MethodData) pro
 			continue
 		}
 		value := result[match]
-		copy(result[target+1:match+1], result[target:match])
-		result[target] = value
+		copy(result[base+1:match+1], result[base:match])
+		result[base] = value
+		base++
 	}
 	return result
 }
