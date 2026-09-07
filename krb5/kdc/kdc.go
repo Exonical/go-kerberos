@@ -626,6 +626,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
 	}
 	if customVerified {
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		s.recordPreauthSuccess(clientName, &clientRecord)
 		if auditState != nil {
 			auditState.PreauthType = customResult.PreauthType
@@ -750,6 +753,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
 		}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, indicators)
@@ -826,6 +832,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
+		}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
 		}
 		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
 			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
@@ -975,6 +984,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if auditState != nil {
 				auditState.Stage = AuditIssueTicket
 			}
+			if response := s.customPreauthFailure(rock, request, armor); response != nil {
+				return response
+			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
 				append([]string(nil), s.SPAKEPreauthIndicators...))
@@ -1077,6 +1089,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
 		replyPAs := protocol.MethodData{paRep}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		return s.buildASRepWithHWAuth(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs,
 			func() []string {
@@ -1187,6 +1202,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	}
 	if auditState != nil {
 		auditState.Stage = AuditIssueTicket
+	}
+	if response := s.customPreauthFailure(rock, request, armor); response != nil {
+		return response
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)

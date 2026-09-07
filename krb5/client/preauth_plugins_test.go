@@ -55,3 +55,31 @@ func TestClientPreauthModulesProcessInfoBeforeReal(t *testing.T) {
 		t.Fatalf("answer count = %d, want 2", len(answers))
 	}
 }
+
+func TestClientPreauthModuleAnswerRetainsCookie(t *testing.T) {
+	var order []string
+	request := protocol.ASReq{ReqBody: protocol.KDCReqBody{
+		CName: &protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
+	}}
+	methodData := protocol.MethodData{
+		{PADataType: 2002, PADataValue: []byte("real")},
+		{PADataType: preauth.PADataCookie, PADataValue: []byte("cookie")},
+	}
+	c := &Client{PreauthModules: []preauth.ClientPreauthModule{
+		orderingPreauthModule{name: "real", flags: preauth.PAReal, order: &order, pa: 2002},
+	}}
+	modulePA, handled, _, err := c.processClientPreauthModules(request, methodData,
+		principal.Principal{Realm: "TEST.REALM", Components: []string{"alice"}},
+		18, []byte("key"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handled {
+		t.Fatal("real module did not handle preauthentication")
+	}
+	outgoing := appendClientPreauthCookie(modulePA, methodData)
+	if cookie := preauth.FindPAData(outgoing, preauth.PADataCookie); cookie == nil ||
+		string(cookie.PADataValue) != "cookie" {
+		t.Fatalf("outgoing padata lost cookie: %#v", outgoing)
+	}
+}

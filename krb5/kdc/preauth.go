@@ -108,11 +108,55 @@ func (s *Server) verifyPreauthModules(rock *PreauthRock,
 				if result.PreauthType == "" {
 					result.PreauthType = module.Name()
 				}
+				if flags&PARequired != 0 {
+					verified, _ := rock.State["verified-required-preauth"].(map[string]bool)
+					if verified == nil {
+						verified = make(map[string]bool)
+						rock.State["verified-required-preauth"] = verified
+					}
+					verified[module.Name()] = true
+				}
 				return result, module, pa.PADataType, true, nil
 			}
 		}
 	}
 	return nil, nil, 0, false, nil
+}
+
+func (s *Server) customPreauthFailure(rock *PreauthRock,
+	request protocol.ASReq, armor *fastContext) []byte {
+	if !s.customPreauthRequired() || rock == nil ||
+		s.customPreauthSatisfied(rock) {
+		return nil
+	}
+	if armor != nil {
+		return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+			nil, request.ReqBody.Nonce, armor)
+	}
+	return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+}
+
+func (s *Server) customPreauthSatisfied(rock *PreauthRock) bool {
+	if rock == nil {
+		return false
+	}
+	verified, _ := rock.State["verified-required-preauth"].(map[string]bool)
+	for _, module := range s.PreauthModules {
+		if module == nil {
+			continue
+		}
+		required := false
+		for _, paType := range module.PATypes() {
+			if module.Flags(paType)&PARequired != 0 {
+				required = true
+				break
+			}
+		}
+		if required && (verified == nil || !verified[module.Name()]) {
+			return false
+		}
+	}
+	return true
 }
 
 func kdcBuiltinPAType(paType int32) bool {

@@ -176,7 +176,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			return nil, fmt.Errorf("AS exchange module preauthentication: %w", err)
 		}
 		if handled {
-			request.PAData = modulePA
+			request.PAData = appendClientPreauthCookie(modulePA, methodData)
 			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 			if err != nil {
 				return nil, err
@@ -449,7 +449,7 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 			return nil, fmt.Errorf("AS service exchange module preauthentication: %w", err)
 		}
 		if handled {
-			request.PAData = modulePA
+			request.PAData = appendClientPreauthCookie(modulePA, methodData)
 			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 			if err != nil {
 				return nil, err
@@ -794,6 +794,14 @@ func claimsPAType(values []int32, typ int32) bool {
 		}
 	}
 	return false
+}
+
+func appendClientPreauthCookie(data protocol.MethodData,
+	methodData protocol.MethodData) protocol.MethodData {
+	if cookie := preauth.FindPAData(methodData, preauth.PADataCookie); cookie != nil {
+		data = append(data, *cookie)
+	}
+	return data
 }
 
 func clientBuiltinPAType(typ int32) bool {

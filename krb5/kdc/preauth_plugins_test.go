@@ -151,6 +151,23 @@ func TestRequiredPreauthModuleMissing(t *testing.T) {
 	}
 }
 
+func TestRequiredPreauthModuleRejectsBuiltinOnly(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	server.PreauthModules = []KDCPreauthModule{testKDCPreauthModule{flags: PARequired}}
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request := asRequest(user, principal.Principal{Realm: server.Realm,
+		NameType: principal.NTSrvInstance, Components: []string{"krbtgt", server.Realm}}, 8)
+	addPreauthPassword(t, &request, "alice-password", now)
+	var response protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberrors.KDCErrPreauthFailed)
+	}
+}
+
 func TestHardwarePreauthModuleSetsTicketFlag(t *testing.T) {
 	now := time.Unix(2000000000, 0).UTC()
 	server, kclient := testServer(t, now)
