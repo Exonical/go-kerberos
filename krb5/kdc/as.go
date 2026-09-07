@@ -1,4 +1,3 @@
-// Package kdc implements a small in-memory Kerberos V5 KDC.
 package kdc
 
 import (
