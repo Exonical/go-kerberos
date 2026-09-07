@@ -24,6 +24,7 @@ registry gate.
 | MEMORY keytab | Named process-local resolver, shared entry mutation, and concurrent resolve tests | No live MIT gate; MIT `kt_memory.c` semantics are process-local | `krb5/keytab` unit and race coverage |
 | FILE ccache | Go reader/writer | MIT-generated cache parsed by Go | Go-generated cache read by MIT |
 | DIR, MEMORY, KCM, and KEYRING ccache types | Go resolver, DIR primary/collection, MEMORY concurrency, KCM v2 framing/server tests, and Linux KEYRING read/write tests | MIT KCM test-server round trips and Go KCM server against MIT CLI where available; KEYRING tests skip when kernel keyring syscalls are unavailable | MIT KCM protocol operations, UUID fallback, default-cache ordering, `GET_CRED_LIST`/`REPLACE`, and Linux KEYRING coverage |
+| Windows MSLSA ccache | Windows-only read-only resolver enumerates current-session LSA tickets and retrieves encoded tickets/session keys; conversion helpers are unit-tested portably | Windows runtime enumeration skips when the runner has no Kerberos tickets or LSA/Kerberos package access; no live CI gate is available because hosted runners are not domain joined | Ticket submission, purge, and cache mutation are intentionally unavailable; `Initialize`, `Store`, `Remove`, and `Destroy` return `MSLSA is read-only in this implementation` |
 | Local authorization and identity selection | Go auth_to_local, .k5login, and .k5identity tests | No live MIT CLI gate exposes an2ln/kuserok; MIT source cases are ported locally | RULE/DEFAULT translation (including case-sensitive principal mappings), authoritative k5login fallback with verifiable user/root ownership, and service/host/realm identity matching |
 | User-to-user authentication | Go client/KDC `ENC-TKT-IN-SKEY` issuance and AP `USE-SESSION-KEY` acceptance | `TestMITClientU2UAgainstGoKDC` uses MIT `kinit`, `kvno --u2u`, and `klist` against the Go KDC; MIT 1.22.2 behavior is the implementation oracle | Second-ticket validation, session-key ticket encryption, KVNO zero, and malformed-ticket rejection |
 | AS exchange | RED | RED | RED |
@@ -108,6 +109,13 @@ for tests and local development; it does not provide persistent storage.
 per-UID cache, UUID, default-cache, and offset isolation through
 `SO_PEERCRED`; isolated servers reject connections without available Unix
 peer credentials.
+
+MSLSA is a Windows-only, read-only credential-cache view backed by the current
+logon session's LSA Kerberos package. It does not submit tickets, purge the
+session cache, or implement cache mutation; `Initialize`, `Store`, `Remove`,
+and `Destroy` return `MSLSA is read-only in this implementation`. Hosted
+Windows runners are not domain joined, so MSLSA runtime enumeration is skipped
+when tickets or LSA package access are unavailable and is not a live gate.
 
 The KDC supports optional server-wide preauthentication disablement, default
 ticket and renewable lifetimes for requests with omitted maximum `till` or
