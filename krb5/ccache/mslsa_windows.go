@@ -279,6 +279,7 @@ func mslsaExternalCredential(ticket *mslsaExternalTicket, clientRealm string) (C
 	return Credential{
 		Client: client, Server: service, Enctype: int32(ticket.SessionKey.KeyType),
 		Key: append([]byte(nil), key...), TicketFlags: ticket.TicketFlags,
+		AuthTime: mslsaFileTimeToUnix(ticket.StartTime),
 		StartTime: mslsaFileTimeToUnix(ticket.StartTime), EndTime: mslsaFileTimeToUnix(ticket.EndTime),
 		RenewTill: mslsaFileTimeToUnix(ticket.RenewUntil), Ticket: append([]byte(nil), encoded...),
 	}, nil

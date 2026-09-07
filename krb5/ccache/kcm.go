@@ -592,8 +592,9 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 		if err != nil {
 			return Credential{}, err
 		}
+		wireFlags := MapTCFlags(flags)
 		for _, candidate := range cache.Credentials {
-			if credentialMatches(candidate, match, flags) {
+			if credentialMatches(candidate, match, wireFlags) {
 				return candidate, nil
 			}
 		}
