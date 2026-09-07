@@ -251,9 +251,6 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 	if host == "" {
 		return "", false, fmt.Errorf("host realm: empty hostname")
 	}
-	if realm := registryDefaultRealm(); realm != "" {
-		return realm, true, nil
-	}
 	if cfg != nil {
 		if realm, ok := cfg.RealmForHost(host); ok {
 			return realm, true, nil
@@ -276,6 +273,9 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 			return realm, false, nil
 		}
 		if cfg.DefaultRealm != "" {
+			if realm := registryDefaultRealm(); realm != "" {
+				return realm, false, nil
+			}
 			return cfg.DefaultRealm, false, nil
 		}
 	}
@@ -339,6 +339,9 @@ func FallbackRealm(cfg *config.Config, host string) (string, bool) {
 		return realm, true
 	}
 	if cfg.DefaultRealm != "" {
+		if realm := registryDefaultRealm(); realm != "" {
+			return realm, true
+		}
 		return cfg.DefaultRealm, true
 	}
 	return "", false

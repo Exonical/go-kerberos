@@ -435,8 +435,9 @@ On Windows, default profile discovery follows MIT's registry/file order:
 values, the roaming application profile, `%WINDIR%\krb5.ini`, and the
 executable directory. Secure discovery omits the environment, per-user
 registry, and roaming-application sources. The hostrealm registry module
-checks `default_realm` in the machine key before the user key. Default FILE
-ccaches similarly honor `KRB5CCNAME`, user then machine `ccname`, and the
+checks `default_realm` in the machine key before the user key only when
+resolving the default realm; host-specific profile mappings remain
+authoritative. Default FILE ccaches similarly honor `KRB5CCNAME`, user then machine `ccname`, and the
 `TEMP`, `TMP`, and `WINDIR` fallback directories; `SetDefaultName` writes the
 user `ccname` value. The legacy `RegKRB5CCNAME`/`kerberos.ini` indirection is
 intentionally not implemented. Windows registry tests run only in the
