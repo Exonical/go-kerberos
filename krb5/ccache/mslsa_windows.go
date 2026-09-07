@@ -3,8 +3,10 @@
 package ccache
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -138,7 +140,7 @@ func (h *mslsaHandle) read() (*Cache, error) {
 	entries := unsafe.Slice((*mslsaTicketCacheInfoEx2)(unsafe.Add(response, unsafe.Sizeof(*header))), header.CountOfTickets) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 	cache := &Cache{}
 	if ticket, response, err := mslsaRetrieveTGT(handle, packageID); err == nil {
-		if client, err := mslsaExternalNamePrincipal(ticket.ClientName, ticket.DomainName); err == nil {
+		if client, err := mslsaExternalNamePrincipal(ticket.ClientName, mslsaUnicodeStringValue(ticket.DomainName)); err == nil {
 			cache.DefaultPrincipal = client
 		}
 		mslsaFree(response)
@@ -154,7 +156,7 @@ func (h *mslsaHandle) read() (*Cache, error) {
 		if err != nil {
 			continue
 		}
-		credential, err := mslsaExternalCredential(ticket)
+		credential, err := mslsaExternalCredential(ticket, mslsaUnicodeStringValue(info.ClientRealm))
 		mslsaFree(response)
 		if err != nil {
 			if errors.Is(err, errMSLSANullSessionKey) {
@@ -205,16 +207,20 @@ func mslsaQuery(handle windows.Handle, packageID uint32) (unsafe.Pointer, uint32
 func mslsaRetrieve(handle windows.Handle, packageID uint32, info mslsaTicketCacheInfoEx2) (*mslsaExternalTicket, unsafe.Pointer, error) {
 	target, _ := windows.UTF16FromString(mslsaUnicodeStringValue(info.ServerName) + "@" + mslsaUnicodeStringValue(info.ServerRealm))
 	target = target[:len(target)-1]
-	requestSize := int(unsafe.Sizeof(mslsaRetrieveRequest{})) + len(target)*2 // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
+	requestHeaderSize := int(unsafe.Sizeof(mslsaRetrieveRequest{})) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
+	requestSize := requestHeaderSize + len(target)*2
 	buffer := make([]byte, requestSize)
 	request := (*mslsaRetrieveRequest)(unsafe.Pointer(&buffer[0])) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
+	for i, value := range target {
+		binary.LittleEndian.PutUint16(buffer[requestHeaderSize+i*2:], value)
+	}
 	request.MessageType = kerbRetrieveEncodedTicketMessage
 	request.CacheOptions = kerbRetrieveTicketCacheTicket
 	request.EncryptionType = info.SessionKeyType
 	request.TicketFlags = info.TicketFlags
 	request.TargetName = mslsaUnicodeString{
 		Length: uint16(len(target) * 2), MaximumLength: uint16(len(target) * 2),
-		Buffer: &target[0],
+		Buffer: (*uint16)(unsafe.Pointer(&buffer[requestHeaderSize])), // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 	}
 	var response unsafe.Pointer
 	var responseSize uint32
@@ -224,6 +230,7 @@ func mslsaRetrieve(handle windows.Handle, packageID uint32, info mslsaTicketCach
 		uintptr(len(buffer)), uintptr(unsafe.Pointer(&response)), // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 		uintptr(unsafe.Pointer(&responseSize)), uintptr(unsafe.Pointer(&subStatus)), // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 	)
+	runtime.KeepAlive(buffer)
 	if mslsaFailed(uint32(status)) || mslsaFailed(subStatus) {
 		return nil, nil, fmt.Errorf("ccache: LsaCallAuthenticationPackage retrieve failed: %w", mslsaStatusError(firstMSLSAStatus(uint32(status), subStatus)))
 	}
@@ -235,7 +242,7 @@ func mslsaRetrieve(handle windows.Handle, packageID uint32, info mslsaTicketCach
 }
 
 func mslsaRetrieveTGT(handle windows.Handle, packageID uint32) (*mslsaExternalTicket, unsafe.Pointer, error) {
-	request := mslsaQueryRequest{MessageType: kerbRetrieveTicketMessage}
+	request := mslsaRetrieveRequest{MessageType: kerbRetrieveTicketMessage}
 	var response unsafe.Pointer
 	var responseSize uint32
 	var subStatus uint32
@@ -244,6 +251,7 @@ func mslsaRetrieveTGT(handle windows.Handle, packageID uint32) (*mslsaExternalTi
 		uintptr(unsafe.Sizeof(request)), uintptr(unsafe.Pointer(&response)), // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 		uintptr(unsafe.Pointer(&responseSize)), uintptr(unsafe.Pointer(&subStatus)), // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.use-of-unsafe-block -- required for Win32 LSA ABI pointers and lazy syscall calls
 	)
+	runtime.KeepAlive(&request)
 	if mslsaFailed(uint32(status)) || mslsaFailed(subStatus) {
 		return nil, nil, fmt.Errorf("ccache: MSLSA TGT retrieval failed: %w", mslsaStatusError(firstMSLSAStatus(uint32(status), subStatus)))
 	}
@@ -254,12 +262,12 @@ func mslsaRetrieveTGT(handle windows.Handle, packageID uint32) (*mslsaExternalTi
 	return &(*mslsaRetrieveResponse)(response).Ticket, response, nil
 }
 
-func mslsaExternalCredential(ticket *mslsaExternalTicket) (Credential, error) {
-	client, err := mslsaExternalNamePrincipal(ticket.ClientName, ticket.DomainName)
+func mslsaExternalCredential(ticket *mslsaExternalTicket, clientRealm string) (Credential, error) {
+	client, err := mslsaExternalNamePrincipal(ticket.ClientName, clientRealm)
 	if err != nil {
 		return Credential{}, err
 	}
-	service, err := mslsaExternalNamePrincipal(ticket.ServiceName, ticket.DomainName)
+	service, err := mslsaExternalNamePrincipal(ticket.ServiceName, mslsaUnicodeStringValue(ticket.DomainName))
 	if err != nil {
 		return Credential{}, err
 	}
@@ -276,7 +284,7 @@ func mslsaExternalCredential(ticket *mslsaExternalTicket) (Credential, error) {
 	}, nil
 }
 
-func mslsaExternalNamePrincipal(name *mslsaExternalName, realm mslsaUnicodeString) (principal.Principal, error) {
+func mslsaExternalNamePrincipal(name *mslsaExternalName, realm string) (principal.Principal, error) {
 	if name == nil || name.NameCount == 0 {
 		return principal.Principal{}, errors.New("ccache: MSLSA ticket has no service principal")
 	}
@@ -285,7 +293,7 @@ func mslsaExternalNamePrincipal(name *mslsaExternalName, realm mslsaUnicodeStrin
 	for _, component := range names {
 		components = append(components, mslsaUnicodeStringValue(component))
 	}
-	return mslsaPrincipal(mslsaName{Components: components}, mslsaUnicodeStringValue(realm))
+	return mslsaPrincipal(mslsaName{Components: components}, realm)
 }
 
 func mslsaUnicodePrincipal(name, realm mslsaUnicodeString) (principal.Principal, error) {
