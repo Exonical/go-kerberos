@@ -122,6 +122,9 @@ type Server struct {
 	// CertAuthModules are additional PKINIT certificate authorization modules.
 	// Built-in modules always run before these modules.
 	CertAuthModules []CertAuthModule
+	// PreauthModules contains compile-time registered KDC preauthentication
+	// modules. Built-in mechanisms retain precedence for their PA types.
+	PreauthModules []KDCPreauthModule
 	// AuthDataModules add MIT-shaped KDC authorization data to issued tickets.
 	// A nil list leaves authorization-data module handling disabled.
 	AuthDataModules []AuthDataModule
@@ -562,7 +565,8 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		auditState.Stage = AuditValidatePolicy
 	}
 	requiresHWAuth := clientRecord.Flags&kdb.RequiresHWAuth != 0
-	preauthRequired := !s.DisablePreauth ||
+	customPreauthRequired := s.customPreauthRequired()
+	preauthRequired := !s.DisablePreauth || customPreauthRequired ||
 		clientRecord.Flags&(kdb.RequiresPreAuth|kdb.RequiresHWAuth) != 0
 	timestampPA := findPA(request.PAData, paEncTimestamp)
 	spakePA := findPA(request.PAData, paSPAKE)
@@ -581,6 +585,91 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	}
 	if !ok {
 		return s.errorResponse(14, request.ReqBody.SName)
+	}
+	rock := &PreauthRock{
+		Client:        clientName,
+		Service:       serviceName,
+		ClientEntry:   &clientRecord,
+		ClientDBEntry: &clientRecord,
+		Request:       request,
+		RequestBody:   marshalDER(request.ReqBody),
+		State:         make(map[string]any),
+	}
+	if clientKey.Enctype != 0 {
+		rock.ClientKeys = []kdb.Key{clientKey}
+	}
+	seenClientKeys := make(map[int32]bool, len(rock.ClientKeys))
+	for _, key := range rock.ClientKeys {
+		seenClientKeys[key.Enctype] = true
+	}
+	for _, requestedEType := range request.ReqBody.EType {
+		key, exists := clientRecord.Keys[requestedEType]
+		if !exists || seenClientKeys[requestedEType] {
+			continue
+		}
+		key.Enctype = requestedEType
+		rock.ClientKeys = append(rock.ClientKeys, key)
+		seenClientKeys[requestedEType] = true
+	}
+	if armor != nil {
+		rock.ArmorKey = &protocol.EncryptionKey{
+			KeyType: armor.etype.ID(), KeyValue: append([]byte(nil), armor.key...),
+		}
+	}
+	customResult, customSuccesses, customErr :=
+		s.verifyPreauthModules(rock, request.PAData)
+	if customErr != nil {
+		if armor != nil {
+			return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+				nil, request.ReqBody.Nonce, armor)
+		}
+		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+	}
+	if customResult != nil && customResult.Authenticated {
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
+		if response := s.authorizationError(clientName, serviceName, true, armor); response != nil {
+			return response
+		}
+		if clientKey.Enctype == 0 && customResult.ReplacedReplyKey == nil {
+			if armor != nil {
+				return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+					nil, request.ReqBody.Nonce, armor)
+			}
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
+		s.recordPreauthSuccess(clientName, &clientRecord)
+		if auditState != nil {
+			auditState.PreauthType = customResult.PreauthType
+			auditState.AuthIndicators = append([]string(nil), customResult.AuthIndicators...)
+			auditState.Stage = AuditIssueTicket
+		}
+		replyPAs := protocol.MethodData(nil)
+		for _, success := range customSuccesses {
+			returner, ok := success.module.(ReturnPadata)
+			if !ok {
+				continue
+			}
+			data, err := returner.ReturnPadata(rock, success.result)
+			if err != nil {
+				if armor != nil {
+					return s.fastErrorResponse(kdcErrPreauthFailed, request.ReqBody.SName,
+						nil, request.ReqBody.Nonce, armor)
+				}
+				return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+			}
+			replyPAs = append(replyPAs, data...)
+		}
+		var replyKey *kdb.Key
+		if customResult.ReplacedReplyKey != nil {
+			key := *customResult.ReplacedReplyKey
+			replyKey = &key
+		}
+		return s.buildASRepWithPreauth(request, clientName, clientRecord,
+			serviceName, serviceRecord, etypeID, clientKey, serviceKey, armor,
+			true, replyKey, replyPAs, customResult.AuthIndicators,
+			customResult.HardwareAuthenticated, customResult.AuthorizationData)
 	}
 	if anonymousRequest && pkinitPA == nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil {
@@ -670,6 +759,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
 		}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, indicators)
@@ -747,6 +839,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		if auditState != nil {
 			auditState.Stage = AuditIssueTicket
 		}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		replyPA, replyErr := preauth.BuildEncryptedChallengeReplyWithKeyEType(
 			armor.etype, armor.key, matchedKeyEType, matchedKey.Key, s.now())
 		if replyErr != nil {
@@ -768,6 +863,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				EType: etypeID, Salt: stringPointer(principalSalt(clientKey, clientName)),
 			}})})
 		}
+		methodData = append(methodData, s.preauthModuleHints(rock)...)
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
@@ -786,6 +882,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				EType: etypeID, Salt: stringPointer(principalSalt(clientKey, clientName)),
 			}})})
 		}
+		methodData = append(methodData, s.preauthModuleHints(rock)...)
 		// The challenge's masked value is generated from w, not from zero;
 		// derive it using the selected long-term key.
 		etype, err := crypto.NewRegistry().Get(etypeID)
@@ -893,6 +990,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			if auditState != nil {
 				auditState.Stage = AuditIssueTicket
 			}
+			if response := s.customPreauthFailure(rock, request, armor); response != nil {
+				return response
+			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
 				append([]string(nil), s.SPAKEPreauthIndicators...))
@@ -995,6 +1095,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		replyEncryptionKey := &kdb.Key{Enctype: etypeID, Key: replyKey}
 		replyPAs := protocol.MethodData{paRep}
+		if response := s.customPreauthFailure(rock, request, armor); response != nil {
+			return response
+		}
 		return s.buildASRepWithHWAuth(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, replyEncryptionKey, replyPAs,
 			func() []string {
@@ -1051,6 +1154,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				})
 			}
 		}
+		methodData = append(methodData, s.preauthModuleHints(rock)...)
 		if armor != nil {
 			return s.fastErrorResponse(kdcErrPreauthRequired, request.ReqBody.SName, marshalDER(methodData), request.ReqBody.Nonce, armor)
 		}
@@ -1104,6 +1208,9 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 	}
 	if auditState != nil {
 		auditState.Stage = AuditIssueTicket
+	}
+	if response := s.customPreauthFailure(rock, request, armor); response != nil {
+		return response
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)
@@ -1491,12 +1598,18 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 }
 
 func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string) []byte {
-	return s.buildASRepWithHWAuth(request, clientName, clientRecord, serviceName,
+	return s.buildASRepWithPreauth(request, clientName, clientRecord, serviceName,
 		serviceRecord, etypeID, clientKey, serviceKey, armor, preauthenticated,
-		replyEncryptionKey, replyPAs, assertedIndicators, false)
+		replyEncryptionKey, replyPAs, assertedIndicators, false, nil)
 }
 
 func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool) []byte {
+	return s.buildASRepWithPreauth(request, clientName, clientRecord, serviceName,
+		serviceRecord, etypeID, clientKey, serviceKey, armor, preauthenticated,
+		replyEncryptionKey, replyPAs, assertedIndicators, hwAuthenticated, nil)
+}
+
+func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool, preauthAuthData protocol.AuthorizationData) []byte {
 	if response := s.requireAuthError(serviceRecord, assertedIndicators, armor, request.ReqBody.SName); response != nil {
 		return response
 	}
@@ -1583,6 +1696,9 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 		Request:   request,
 		Reply:     &ticketPart,
 	})
+	if len(preauthAuthData) > 0 {
+		ticketPart.AuthorizationData = append(ticketPart.AuthorizationData, preauthAuthData...)
+	}
 	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil, assertedIndicators); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
@@ -1628,7 +1744,9 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 	replyKey := clientKey
 	if replyEncryptionKey != nil {
 		replyKey = *replyEncryptionKey
-		replyKey.Enctype = etypeID
+		if _, err := crypto.NewRegistry().Get(replyKey.Enctype); err != nil {
+			return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
+		}
 	}
 	replyCipher, err := encryptWithKey(replyKey, 3, replyPlain)
 	if err != nil {
@@ -1639,7 +1757,7 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 		CRealm:  clientName.Realm,
 		CName:   *protocolPrincipal(clientName),
 		Ticket:  ticket,
-		EncPart: protocol.EncryptedData{EType: etypeID, Cipher: replyCipher},
+		EncPart: protocol.EncryptedData{EType: replyKey.Enctype, Cipher: replyCipher},
 	}
 	if len(replyPAs) > 0 {
 		reply.PAData = replyPAs

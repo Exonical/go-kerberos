@@ -813,3 +813,39 @@ verification, module dispatch, authenticated attributes, and anonymous-ticket
 suppression. No live MIT plugin-loading gate is provided because the Go
 registration model is static and the fixture does not configure MIT shared
 authdata modules.
+
+## Client and KDC preauthentication plugin parity
+
+The Go `krb5/preauth` package exposes a compile-time registered
+`ClientPreauthModule` interface modeled on MIT's
+`src/include/krb5/clpreauth_plugin.h` and `src/lib/krb5/krb/preauth2.c`.
+`Name`, `PATypes`, and `Flags` correspond to the MIT module vtable, while
+`Process` receives the server padata, an `ASReqInfo` request descriptor, and a
+`ClientRequestContext`. The context exposes the encoded request body, client
+principal, selected enctype, FAST armor key, per-request state, and
+get/set-AS-key hooks. `PA_INFO` modules run before `PA_REAL` modules; a real
+module answer is sent before the built-in timestamp, SPAKE, OTP, encrypted
+challenge, and PKINIT mechanisms. Built-ins retain precedence for their
+registered PA types. `TryAgainer` is exported as a separate optional interface
+for forward compatibility, but the AS retry loop does not invoke it yet.
+
+The KDC exposes `kdc.KDCPreauthModule` through `Server.PreauthModules`, with
+`PreauthRock` and `VerifyResult` modeled on
+`src/include/krb5/kdcpreauth_plugin.h` and
+`src/kdc/kdc_preauth.c`. `Edata` contributes hints to
+`KDC_ERR_PREAUTH_REQUIRED`; `Verify` can authenticate the request and return
+indicators, authorization data, or a replacement reply key. The
+`PA_REQUIRED`, `PA_SUFFICIENT`, `PA_HARDWARE`, and `PA_REPLACES_KEY` flags are
+represented, and successful hardware modules set `TKT_FLG_HW_AUTH` while
+successful modules set `TKT_FLG_PRE_AUTH`. `ReturnPadata` is a separate
+optional interface corresponding to MIT's `return_padata` callback.
+
+Registration is intentionally static and type-safe; MIT's dynamic plugin
+loader, module profile relations, asynchronous callbacks, and shared-object
+ABI are not used. The broader MIT client-vtable surfaces for `gic_opts`,
+`prep_questions`, responder UI, and asynchronous lifecycle callbacks remain
+deferred because the Go AS exchange has no corresponding interactive or event
+loop contract. Unit and in-process exchange tests cover hint generation,
+client answer dispatch, informational-before-real ordering, required-module
+failures, verification failures, hardware ticket flags, and audit indicator
+propagation.

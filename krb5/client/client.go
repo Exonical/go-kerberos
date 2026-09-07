@@ -52,6 +52,9 @@ type Client struct {
 	// Canonicalize requests KDC canonicalization and permits the KDC to
 	// return a canonical client principal in an AS-REP.
 	Canonicalize bool
+	// PreauthModules contains compile-time registered client preauthentication
+	// modules. Built-in mechanisms retain precedence for their PA types.
+	PreauthModules []preauth.ClientPreauthModule
 }
 
 // Credentials contains the initial credentials returned by an AS exchange.
@@ -167,6 +170,26 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		if err != nil {
 			return nil, fmt.Errorf("AS exchange string-to-key: %w", err)
 		}
+		modulePA, handled, updatedKey, err := c.processClientPreauthModules(
+			request, methodData, clientPrincipal, etypeID, key, nil, kerberosError)
+		if err != nil {
+			return nil, fmt.Errorf("AS exchange module preauthentication: %w", err)
+		}
+		if handled {
+			request.PAData = appendClientPreauthCookie(modulePA, methodData)
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			return c.decodeASRep(response, clientPrincipal, request.ReqBody.Nonce,
+				updatedKey.KeyType, updatedKey.KeyValue, now)
+		}
+		etypeID = updatedKey.KeyType
+		etype, err = registry.Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		key = updatedKey.KeyValue
 		if challengePA := preauth.FindPAData(methodData, preauth.PADataSPAKE); challengePA != nil {
 			if len(challengePA.PADataValue) == 0 {
 				goto timestampFallback
@@ -245,7 +268,9 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			if err != nil {
 				return nil, err
 			}
-			request.PAData = protocol.MethodData{{PADataType: preauth.PADataSPAKE, PADataValue: responseDER}}
+			request.PAData = append(protocol.MethodData{
+				{PADataType: preauth.PADataSPAKE, PADataValue: responseDER},
+			}, modulePA...)
 			if cookie := preauth.FindPAData(methodData, preauth.PADataCookie); cookie != nil {
 				request.PAData = append(request.PAData, *cookie)
 			}
@@ -260,7 +285,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		if err != nil {
 			return nil, err
 		}
-		request.PAData = protocol.MethodData{timestamp}
+		request.PAData = append(protocol.MethodData{timestamp}, modulePA...)
 		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 		if err != nil {
 			return nil, err
@@ -424,11 +449,31 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 				return nil, fmt.Errorf("AS service exchange string-to-key: %w", err)
 			}
 		}
+		modulePA, handled, updatedKey, err := c.processClientPreauthModules(
+			request, methodData, clientPrincipal, etypeID, key, nil, kerberosError)
+		if err != nil {
+			return nil, fmt.Errorf("AS service exchange module preauthentication: %w", err)
+		}
+		if handled {
+			request.PAData = appendClientPreauthCookie(modulePA, methodData)
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			return c.decodeASRepForService(response, clientPrincipal, service,
+				request.ReqBody.Nonce, updatedKey.KeyType, updatedKey.KeyValue, now)
+		}
+		etypeID = updatedKey.KeyType
+		etype, err = registry.Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
+		key = updatedKey.KeyValue
 		timestamp, err := preauth.BuildEncryptedTimestamp(etype, key, now, 0)
 		if err != nil {
 			return nil, err
 		}
-		request.PAData = protocol.MethodData{timestamp}
+		request.PAData = append(protocol.MethodData{timestamp}, modulePA...)
 		response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
 		if err != nil {
 			return nil, err
@@ -517,12 +562,40 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		if err != nil {
 			return nil, fmt.Errorf("FAST AS exchange string-to-key: %w", err)
 		}
+		armorKey := &protocol.EncryptionKey{
+			KeyType: armor.EType.ID(), KeyValue: append([]byte(nil), armor.Key...),
+		}
+		modulePA, handled, updatedKey, err := c.processClientPreauthModules(
+			request, fastReply.PAData, clientPrincipal, etypeID, clientKey,
+			armorKey, kerberosError)
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange module preauthentication: %w", err)
+		}
+		if handled {
+			retryPAData := appendClientPreauthCookie(modulePA, fastReply.PAData)
+			fastData, err = armor.WrapASReq(request.ReqBody, retryPAData)
+			if err != nil {
+				return nil, err
+			}
+			request.PAData = protocol.MethodData{fastData}
+			response, err = c.roundTrip(ctx, clientPrincipal.Realm, request)
+			if err != nil {
+				return nil, err
+			}
+			return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce,
+				updatedKey.KeyType, updatedKey.KeyValue, armor, now)
+		}
+		etypeID = updatedKey.KeyType
+		etype, err = registry.Get(etypeID)
+		if err != nil {
+			return nil, err
+		}
 		var retryPA protocol.PAData
 		if challengePA := preauth.FindPAData(fastReply.PAData, preauth.PADataEncryptedChallenge); challengePA != nil {
 			retryPA, err = preauth.BuildEncryptedChallengeWithKeyEType(
-				armor.EType, armor.Key, etype, clientKey, now)
+				armor.EType, armor.Key, etype, updatedKey.KeyValue, now)
 		} else {
-			retryPA, err = preauth.BuildEncryptedTimestamp(etype, clientKey, now, 0)
+			retryPA, err = preauth.BuildEncryptedTimestamp(etype, updatedKey.KeyValue, now, 0)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
@@ -540,7 +613,8 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		if err != nil {
 			return nil, err
 		}
-		return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, etypeID, clientKey, armor, now)
+		return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce,
+			etypeID, updatedKey.KeyValue, armor, now)
 	}
 	return c.decodeFASTASRep(response, clientPrincipal, request.ReqBody.Nonce, initialETypeID, initialKey, armor, now)
 }
@@ -690,6 +764,97 @@ func errorMethodData(value *krberrors.KRBError) protocol.MethodData {
 		return nil
 	}
 	return data
+}
+
+func (c *Client) processClientPreauthModules(request protocol.ASReq,
+	methodData protocol.MethodData, clientPrincipal principal.Principal,
+	etypeID int32, key []byte, armorKey *protocol.EncryptionKey,
+	previousError *krberrors.KRBError) (protocol.MethodData, bool, protocol.EncryptionKey, error) {
+	if c == nil || len(c.PreauthModules) == 0 {
+		return nil, false, protocol.EncryptionKey{
+			KeyType: etypeID, KeyValue: append([]byte(nil), key...),
+		}, nil
+	}
+	bodyDER, err := asn1.Marshal(request.ReqBody)
+	if err != nil {
+		return nil, false, protocol.EncryptionKey{}, fmt.Errorf("marshal request body: %w", err)
+	}
+	moduleContext := &preauth.ClientRequestContext{
+		Client:      clientPrincipal,
+		Request:     &request,
+		RequestBody: bodyDER,
+		EType:       etypeID,
+		ArmorKey:    armorKey,
+		State:       make(map[string]any),
+		ASKey:       protocol.EncryptionKey{KeyType: etypeID, KeyValue: append([]byte(nil), key...)},
+		HasASKey:    true,
+	}
+	info := preauth.ASReqInfo{
+		Client:        clientPrincipal,
+		Request:       request,
+		RequestBody:   bodyDER,
+		PreviousError: previousError,
+	}
+	var answers protocol.MethodData
+	for _, infoPhase := range []bool{true, false} {
+		for _, pa := range methodData {
+			if clientBuiltinPAType(pa.PADataType) {
+				continue
+			}
+			for _, module := range c.PreauthModules {
+				if module == nil || !claimsPAType(module.PATypes(), pa.PADataType) {
+					continue
+				}
+				flags := module.Flags(pa.PADataType)
+				if (flags&preauth.PAInfo != 0) != infoPhase {
+					continue
+				}
+				result, processErr := module.Process(moduleContext, pa, info)
+				if processErr != nil {
+					return nil, false, protocol.EncryptionKey{}, fmt.Errorf("%s: %w", module.Name(), processErr)
+				}
+				answers = append(answers, result...)
+				if !infoPhase && len(result) > 0 {
+					updated, keyErr := moduleContext.GetASKey()
+					if keyErr != nil {
+						return nil, false, protocol.EncryptionKey{}, keyErr
+					}
+					return answers, true, updated, nil
+				}
+			}
+		}
+	}
+	if moduleContext.HasASKey {
+		key = moduleContext.ASKey.KeyValue
+	}
+	return answers, false, moduleContext.ASKey, nil
+}
+
+func claimsPAType(values []int32, typ int32) bool {
+	for _, value := range values {
+		if value == typ {
+			return true
+		}
+	}
+	return false
+}
+
+func appendClientPreauthCookie(data protocol.MethodData,
+	methodData protocol.MethodData) protocol.MethodData {
+	if cookie := preauth.FindPAData(methodData, preauth.PADataCookie); cookie != nil {
+		data = append(data, *cookie)
+	}
+	return data
+}
+
+func clientBuiltinPAType(typ int32) bool {
+	switch typ {
+	case preauth.PADataEncryptedTimestamp, preauth.PADataEncryptedChallenge,
+		preauth.PADataSPAKE, otp.PADataRequest, protocol.PADataPKASReq:
+		return true
+	default:
+		return false
+	}
 }
 
 func freshnessTokenFromError(value *krberrors.KRBError) []byte {
