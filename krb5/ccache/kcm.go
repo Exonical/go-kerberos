@@ -549,13 +549,19 @@ func (h *Handle) Initialize(p principal.Principal) error {
 	return err
 }
 
-// Store adds one credential to a KCM cache.
+// Store adds one credential to a FILE, DIR, MEMORY, KCM, or KEYRING cache.
 func (h *Handle) Store(credential Credential) error {
 	if h != nil && h.typ == TypeKeyring {
 		return h.keyring.store(credential)
 	}
 	if h == nil {
 		return errors.New("ccache: store requires a cache")
+	}
+	if h.typ == TypeFile || h.typ == TypeDir || h.typ == TypeMemory {
+		return h.modifyCache(func(cache *Cache) error {
+			cache.Credentials = append(cache.Credentials, credential)
+			return nil
+		})
 	}
 	if h.typ != TypeKCM {
 		cache, err := h.Read()
@@ -573,9 +579,10 @@ func (h *Handle) Store(credential Credential) error {
 	return err
 }
 
-// Retrieve finds a credential using KCM matching flags.  The implementation
-// first asks the daemon for cached credentials, then retries without the
-// KCM_GC_CACHED bit for older daemons.
+// Retrieve finds a credential using MIT matching flags from a FILE, DIR,
+// MEMORY, KCM, or KEYRING cache. The KCM implementation first asks the daemon
+// for cached credentials, then retries without the KCM_GC_CACHED bit for
+// older daemons.
 func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 	if h != nil && h.typ == TypeKeyring {
 		cache, err := h.Read()
@@ -646,7 +653,7 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 	return credential, nil
 }
 
-// Remove removes the first credential matching match and flags.
+// Remove removes every credential matching match and flags.
 func (h *Handle) Remove(match Credential, flags uint32) error {
 	if h != nil && h.typ == TypeKeyring {
 		if flags&MITMatchSupportedKTypes != 0 {
@@ -663,6 +670,11 @@ func (h *Handle) Remove(match Credential, flags uint32) error {
 	}
 	if h == nil {
 		return errors.New("ccache: remove requires a cache")
+	}
+	if h.typ == TypeFile || h.typ == TypeDir || h.typ == TypeMemory {
+		return h.modifyCache(func(cache *Cache) error {
+			return removeCredentials(cache, match, flags)
+		})
 	}
 	if h.typ != TypeKCM {
 		cache, err := h.Read()
@@ -1195,13 +1207,22 @@ func (s *KCMServer) dispatchPeer(request []byte, uid uint32) ([]byte, int32) {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		removed := false
+		writeIndex := 0
 		for i := 0; i < len(cache.creds); i++ {
 			cred, err := unmarshalCredentialBytes(cache.creds[i])
 			if err == nil && credentialMatches(cred, tag, flags) {
-				cache.creds = append(cache.creds[:i], cache.creds[i+1:]...)
-				cache.credUUIDs = append(cache.credUUIDs[:i], cache.credUUIDs[i+1:]...)
-				return nil, 0
+				removed = true
+				continue
 			}
+			cache.creds[writeIndex] = cache.creds[i]
+			cache.credUUIDs[writeIndex] = cache.credUUIDs[i]
+			writeIndex++
+		}
+		if removed {
+			cache.creds = cache.creds[:writeIndex]
+			cache.credUUIDs = cache.credUUIDs[:writeIndex]
+			return nil, 0
 		}
 		return nil, kcmErrNotFound
 	case kcmOpSetDefaultCache:

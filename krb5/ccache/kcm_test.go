@@ -200,6 +200,10 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 		if _, code := server.dispatch(storeRequest); code != 0 {
 			t.Fatalf("store status = %d", code)
 		}
+		duplicateRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
+		if _, code := server.dispatch(duplicateRequest); code != 0 {
+			t.Fatalf("duplicate store status = %d", code)
+		}
 	}
 	other := cache.Credentials[0]
 	other.Server.Components = []string{"other"}
@@ -212,7 +216,7 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 		t.Fatalf("second store status = %d", code)
 	}
 	uuids, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
-	if code != 0 || len(uuids) != 2*kcmUUIDLen {
+	if code != 0 || len(uuids) != 3*kcmUUIDLen {
 		t.Fatalf("UUID list = %x, status %d", uuids, code)
 	}
 	match, err := marshalMatchCredential(cache.Credentials[0])
@@ -226,8 +230,8 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 		t.Fatalf("remove status = %d", code)
 	}
 	remaining, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
-	if code != 0 || !bytes.Equal(remaining, uuids[kcmUUIDLen:]) {
-		t.Fatalf("remaining UUID list = %x, want %x (status %d)", remaining, uuids[kcmUUIDLen:], code)
+	if code != 0 || !bytes.Equal(remaining, uuids[2*kcmUUIDLen:]) {
+		t.Fatalf("remaining UUID list = %x, want %x (status %d)", remaining, uuids[2*kcmUUIDLen:], code)
 	}
 }
 

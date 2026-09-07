@@ -32,6 +32,9 @@ func main() {
 func parseDeleteArgs(args []string) (deleteOptions, error) {
 	var options deleteOptions
 	for i := 0; i < len(args); i++ {
+		if args[i] == "" {
+			return deleteOptions{}, errors.New("empty argument")
+		}
 		switch args[i] {
 		case "-c", "-e", "-f":
 			if i+1 >= len(args) || args[i+1] == "" {
@@ -76,7 +79,11 @@ func runDelete(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cache, err := ccache.ResolveWithConfig(options.Cache, nil)
+	cfg, err := ccacheutil.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("while loading configuration: %w", err)
+	}
+	cache, err := ccache.ResolveWithConfig(options.Cache, cfg)
 	if err != nil {
 		return fmt.Errorf("while opening cache: %w", err)
 	}

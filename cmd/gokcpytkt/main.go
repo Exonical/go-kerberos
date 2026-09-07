@@ -33,6 +33,9 @@ func main() {
 func parseCopyArgs(args []string) (copyOptions, error) {
 	var options copyOptions
 	for i := 0; i < len(args); i++ {
+		if args[i] == "" {
+			return copyOptions{}, errors.New("empty argument")
+		}
 		switch args[i] {
 		case "-c", "-e", "-f":
 			if i+1 >= len(args) || args[i+1] == "" {
@@ -81,7 +84,11 @@ func runCopy(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	source, err := ccache.ResolveWithConfig(options.From, nil)
+	cfg, err := ccacheutil.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("while loading configuration: %w", err)
+	}
+	source, err := ccache.ResolveWithConfig(options.From, cfg)
 	if err != nil {
 		return fmt.Errorf("while opening source cache: %w", err)
 	}
@@ -90,7 +97,7 @@ func runCopy(args []string, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("while reading source cache: %w", err)
 	}
-	destination, err := ccache.Resolve(options.Dest)
+	destination, err := ccache.ResolveWithConfig(options.Dest, cfg)
 	if err != nil {
 		return fmt.Errorf("while opening destination cache: %w", err)
 	}

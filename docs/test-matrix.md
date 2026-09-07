@@ -581,8 +581,10 @@ with these limitations documented rather than silently emulated. `gokutil`
 editing currently accepts only FILE keytabs. Destroying a MEMORY ccache marks
 all existing handles empty; a subsequent write through an old handle creates a
 new cache for that name, while other old handles remain destroyed.
-`gokcpytkt` and `gokdeltkt` implement MIT service-ticket copy and deletion,
-including server-name-only and supported-enctype matching. MSLSA caches remain
+The integration suite exercises `gokcpytkt` and `gokdeltkt` against MIT-issued
+tickets, including copy/delete verification with MIT `klist`. They implement
+MIT service-ticket copy and deletion, including server-name-only and
+supported-enctype matching. MSLSA caches remain
 read-only, so using one as a destination for `gokcpytkt` reports the documented
 read-only store error.
 

@@ -78,6 +78,34 @@ func TestGoCacheCommandsAgainstMITCollection(t *testing.T) {
 	}
 }
 
+func TestGoTicketCopyDeleteAgainstMIT(t *testing.T) {
+	realm := testenv.Start(t)
+	realm.Run(t, "alice-password\n", "/usr/bin/kinit", "-c", realm.Cache, "alice")
+	realm.Run(t, "", "/usr/bin/kvno", "-c", realm.Cache, "host/service.test")
+	destination := filepath.Join(realm.Dir, "ticket-tools.ccache")
+	client := principal.Principal{
+		Realm: testenv.RealmName, NameType: principal.NTPrincipal,
+		Components: []string{"alice"},
+	}
+	if err := ccache.WriteName("FILE:"+destination, &ccache.Cache{DefaultPrincipal: client}); err != nil {
+		t.Fatal(err)
+	}
+	realm.Run(t, "", "go", "run", goCommandPath(t, "gokcpytkt"),
+		"-c", "FILE:"+realm.Cache, "FILE:"+destination,
+		"krbtgt/"+testenv.RealmName+"@"+testenv.RealmName,
+		"host/service.test@"+testenv.RealmName)
+	listing := realm.Run(t, "", "/usr/bin/klist", "-c", destination)
+	if !strings.Contains(listing, "host/service.test@"+testenv.RealmName) {
+		t.Fatalf("MIT klist did not show copied service ticket:\n%s", listing)
+	}
+	realm.Run(t, "", "go", "run", goCommandPath(t, "gokdeltkt"),
+		"-c", "FILE:"+destination, "host/service.test@"+testenv.RealmName)
+	listing = realm.Run(t, "", "/usr/bin/klist", "-c", destination)
+	if strings.Contains(listing, "host/service.test@"+testenv.RealmName) {
+		t.Fatalf("MIT klist still showed deleted service ticket:\n%s", listing)
+	}
+}
+
 func TestGoUtilKeytabConsumedByMIT(t *testing.T) {
 	realm := testenv.Start(t)
 	path := filepath.Join(realm.Dir, "gokutil.keytab")

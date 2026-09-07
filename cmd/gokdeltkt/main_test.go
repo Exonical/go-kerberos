@@ -67,6 +67,12 @@ func TestDeleteQuietlySuppressesParseErrors(t *testing.T) {
 	}
 }
 
+func TestDeleteRejectsEmptyArgument(t *testing.T) {
+	if _, err := parseDeleteArgs([]string{""}); err == nil {
+		t.Fatal("parseDeleteArgs unexpectedly accepted an empty argument")
+	}
+}
+
 func mustDeletePrincipal(t *testing.T, value string) *principal.Principal {
 	t.Helper()
 	result, err := principal.Parse(value)

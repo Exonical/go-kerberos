@@ -1,7 +1,9 @@
 package ccache
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
@@ -184,6 +186,54 @@ func TestRetrieveAndRemoveFileDirMemory(t *testing.T) {
 				t.Fatalf("credentials after removal = %d, want 0", len(value.Credentials))
 			}
 		})
+	}
+}
+
+func TestConcurrentFileStoresPreserveCredentials(t *testing.T) {
+	client := mustMatchPrincipal(t, "alice@EXAMPLE.COM")
+	path := filepath.Join(t.TempDir(), "cache")
+	cache, err := Resolve("FILE:" + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	if err := cache.Write(&Cache{DefaultPrincipal: *client}); err != nil {
+		t.Fatal(err)
+	}
+
+	const count = 32
+	var wait sync.WaitGroup
+	errs := make(chan error, count)
+	for i := 0; i < count; i++ {
+		i := i
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			server := principal.Principal{
+				Realm:      client.Realm,
+				NameType:   principal.NTSrvHst,
+				Components: []string{"host", fmt.Sprintf("service-%d", i)},
+			}
+			errs <- cache.Store(Credential{
+				Client:  *client,
+				Server:  server,
+				Enctype: crypto.EnctypeAES256SHA1,
+			})
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	value, err := cache.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Credentials) != count {
+		t.Fatalf("stored credentials = %d, want %d", len(value.Credentials), count)
 	}
 }
 
