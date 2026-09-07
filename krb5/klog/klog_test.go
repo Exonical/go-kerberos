@@ -68,9 +68,10 @@ func TestFileAppendDestination(t *testing.T) {
 }
 
 func TestNewFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kdc")
 	cfg, err := config.Parse([]byte(`[logging]
  default = STDERR
- kdc = FILE=/tmp/kdc
+ kdc = FILE=` + path + `
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +82,7 @@ func TestNewFromConfig(t *testing.T) {
 	}
 	defer logger.Close()
 	if len(logger.destinations) != 1 || logger.destinations[0].spec.Kind != File ||
-		!strings.HasSuffix(logger.destinations[0].spec.Path, "/kdc") {
+		!strings.HasSuffix(logger.destinations[0].spec.Path, "kdc") {
 		t.Fatalf("destinations = %#v", logger.destinations)
 	}
 }

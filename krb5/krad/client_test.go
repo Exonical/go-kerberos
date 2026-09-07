@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -70,6 +71,9 @@ func TestClientUDPAndTCP(t *testing.T) {
 }
 
 func TestClientUnixEmptySecret(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-domain RADIUS sockets are unavailable on Windows")
+	}
 	path := filepath.Join(t.TempDir(), "radius.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {

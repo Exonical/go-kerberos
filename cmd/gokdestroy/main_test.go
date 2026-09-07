@@ -21,10 +21,11 @@ func TestParseDestroyArgs(t *testing.T) {
 
 func TestDestroyQuietMissingCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing")
-	if err := runDestroy([]string{"-c", path}, os.Stderr); err == nil {
+	name := "FILE:" + path
+	if err := runDestroy([]string{"-c", name}, os.Stderr); err == nil {
 		t.Fatal("missing cache unexpectedly succeeded without quiet mode")
 	}
-	if err := runDestroy([]string{"-q", "-c", path}, os.Stderr); err != nil {
+	if err := runDestroy([]string{"-q", "-c", name}, os.Stderr); err != nil {
 		t.Fatalf("quiet missing cache: %v", err)
 	}
 }

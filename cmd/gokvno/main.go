@@ -118,7 +118,7 @@ func resolveVNOCachePath(value string, uid int) string {
 func loadVNOConfig() (*config.Config, error) {
 	path := os.Getenv("KRB5_CONFIG")
 	if path == "" {
-		path = "/etc/krb5.conf"
+		return config.ParseDefault(false)
 	}
 	cfg, err := config.ParseFile(path)
 	if err != nil {

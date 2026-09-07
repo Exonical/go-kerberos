@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -283,6 +284,11 @@ func TestDefaultReplayCacheUsesTMPDIR(t *testing.T) {
 }
 
 func TestDefaultReplayCacheExpandsMITPathTokens(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if _, err := config.ExpandPathTokens("%{euid}"); err != nil {
+			t.Skip("Windows runner has no token-owner SID")
+		}
+	}
 	previous, present := os.LookupEnv("KRB5RCACHENAME")
 	_ = os.Unsetenv("KRB5RCACHENAME")
 	t.Cleanup(func() {
@@ -307,7 +313,7 @@ func TestDefaultReplayCacheExpandsMITPathTokens(t *testing.T) {
 	}
 	want := filepath.Join(os.TempDir(), "krb5_"+strconv.Itoa(os.Geteuid())+"_"+strconv.Itoa(os.Getuid())+
 		"_"+strconv.Itoa(os.Getuid())+"_"+current.Username)
-	if file2.Path != want {
+	if filepath.Clean(file2.Path) != want {
 		t.Fatalf("expanded cache path = %q, want %q", file2.Path, want)
 	}
 	cfg.DefaultRCacheName = "file2:%{unknown}"

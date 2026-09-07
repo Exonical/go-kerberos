@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,6 +62,9 @@ func TestCreateDoesNotReplaceExistingDatabase(t *testing.T) {
 }
 
 func TestLoadReplacesWith0600Atomically(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve Unix file permission bits")
+	}
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source")
 	target := filepath.Join(dir, "target")

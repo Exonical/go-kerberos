@@ -272,6 +272,11 @@ func HostRealm(ctx context.Context, cfg *config.Config, host string, opts Option
 		if realm, ok := fallbackRealm(ctx, cfg, host, opts); ok {
 			return realm, false, nil
 		}
+	}
+	if realm := registryDefaultRealm(); realm != "" {
+		return realm, false, nil
+	}
+	if cfg != nil {
 		if cfg.DefaultRealm != "" {
 			return cfg.DefaultRealm, false, nil
 		}
@@ -329,13 +334,15 @@ func fallbackRealm(ctx context.Context, cfg *config.Config, host string, opts Op
 // FallbackRealm returns the non-authoritative realm selected by MIT's domain
 // fallback, or the configured default realm.
 func FallbackRealm(cfg *config.Config, host string) (string, bool) {
-	if cfg == nil {
-		return "", false
+	if cfg != nil {
+		if realm, ok := cfg.RealmForHostWithFallback(host); ok {
+			return realm, true
+		}
 	}
-	if realm, ok := cfg.RealmForHostWithFallback(host); ok {
+	if realm := registryDefaultRealm(); realm != "" {
 		return realm, true
 	}
-	if cfg.DefaultRealm != "" {
+	if cfg != nil && cfg.DefaultRealm != "" {
 		return cfg.DefaultRealm, true
 	}
 	return "", false

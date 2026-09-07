@@ -26,7 +26,8 @@ func kcmRequest(op uint16, args ...[]byte) []byte {
 }
 
 func TestKCMRoundTripAndCollection(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "kcm.sock")
+	skipWindowsUnixSocket(t)
+	socket := shortKCMSocket(t)
 	server := NewKCMServer(socket)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -425,7 +426,8 @@ func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
 
 func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint32, error)) (*KCMServer, string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "kcm.sock")
+	skipWindowsUnixSocket(t)
+	socket := shortKCMSocket(t)
 	server := NewKCMServer(socket)
 	server.IsolatePeers = isolate
 	if peerUID != nil {
@@ -445,6 +447,27 @@ func startKCMTestServer(t *testing.T, isolate bool, peerUID func(net.Conn) (uint
 		<-done
 	})
 	return server, socket
+}
+
+func skipWindowsUnixSocket(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("KCM Unix sockets are unavailable on Windows")
+	}
+}
+
+func shortKCMSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "kcm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s")
+	if len(socket) >= 104 {
+		t.Skipf("KCM socket path exceeds macOS sockaddr limit: %q", socket)
+	}
+	return socket
 }
 
 func TestKCMServerSamePeerClientsShareNamespace(t *testing.T) {

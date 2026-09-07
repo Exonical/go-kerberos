@@ -85,7 +85,7 @@ func Resolve(name string) (*Handle, error) {
 func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
 	expand := false
 	if name == "" {
-		name = os.Getenv("KRB5CCNAME")
+		name = osDefaultCCacheName()
 	}
 	if name == "" && cfg != nil {
 		name = cfg.DefaultCCacheName
@@ -105,6 +105,11 @@ func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
 		return ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
 	}
 	return Resolve(name)
+}
+
+// SetDefaultName stores the user's platform default credential-cache name.
+func SetDefaultName(name string) error {
+	return setOSDefaultCCacheName(name)
 }
 
 func resolveFile(path string) (*Handle, error) {

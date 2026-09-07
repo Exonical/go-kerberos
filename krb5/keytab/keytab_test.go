@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,11 @@ func TestResolveWithConfigExpandsDefaultKeytab(t *testing.T) {
 }
 
 func TestResolveClientWithConfigUsesMITNameChain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if _, err := config.ExpandPathTokens("%{euid}"); err != nil {
+			t.Skip("Windows runner has no token-owner SID")
+		}
+	}
 	path := filepath.Join(t.TempDir(), "client.keytab")
 	if err := os.WriteFile(path, []byte{0x05, 0x02}, 0600); err != nil {
 		t.Fatal(err)

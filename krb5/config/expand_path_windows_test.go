@@ -9,6 +9,10 @@ import (
 )
 
 func TestExpandPathTokensWindows(t *testing.T) {
+	sid, err := ExpandPathTokens("%{USERID}")
+	if err != nil && strings.Contains(err.Error(), "empty SID") {
+		t.Skip("Windows runner has no token-owner SID")
+	}
 	for _, token := range []string{
 		"APPDATA", "COMMON_APPDATA", "LOCAL_APPDATA", "SYSTEM", "WINDOWS",
 		"USERCONFIG", "COMMONCONFIG", "LIBDIR", "BINDIR", "SBINDIR",
@@ -38,7 +42,7 @@ func TestExpandPathTokensWindows(t *testing.T) {
 	if strings.Contains(value, "/") {
 		t.Fatalf("expanded Windows path contains slash: %q", value)
 	}
-	sid, err := ExpandPathTokens("%{USERID}")
+	sid, err = ExpandPathTokens("%{USERID}")
 	if err != nil {
 		t.Fatal(err)
 	}
