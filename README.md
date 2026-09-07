@@ -179,6 +179,9 @@ deployments; upstream MIT krb5 does not apply this gate.
 ### CLIs
 - `gokinit`, `goklist`, and `gokvno` — drop-in style equivalents of the MIT
   tools, interoperable with MIT ccaches and keytabs.
+- `gokprop` and `gokpropd` — MIT-compatible full KDC dump propagation. The
+  receiver stays in the foreground; `gokpropd -D` is accepted as a
+  compatibility no-op and `-t` receives one transfer and exits.
 
 ## Usage
 
