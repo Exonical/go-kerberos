@@ -11,6 +11,7 @@ import (
 	kasn1 "github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -262,6 +263,24 @@ func TestNegoExRejectsMalformedVectorsAndSignatures(t *testing.T) {
 	if _, err := DecodeNegoEx(bad); err == nil {
 		t.Fatal("invalid NegoEx scheme vector accepted")
 	}
+	if _, err := EncodeNegoEx([]NegoExMessage{{
+		Type:        NegoExInitiatorNego,
+		AuthSchemes: make([]NegoExAuthScheme, 65536),
+	}}); err == nil {
+		t.Fatal("oversized NegoEx auth-scheme vector accepted")
+	}
+	if _, err := EncodeNegoEx([]NegoExMessage{{
+		Type:       NegoExInitiatorNego,
+		Extensions: make([]NegoExExtension, 65536),
+	}}); err == nil {
+		t.Fatal("oversized NegoEx extension vector accepted")
+	}
+	if _, err := EncodeNegoEx([]NegoExMessage{{
+		Type:   NegoExAlert,
+		Alerts: make([]NegoExAlertEntry, 65536),
+	}}); err == nil {
+		t.Fatal("oversized NegoEx alert vector accepted")
+	}
 }
 
 func TestNegoExKerberosHandshake(t *testing.T) {
@@ -347,6 +366,49 @@ func TestNegoExVerifyTamperAndSequenceRejection(t *testing.T) {
 	}
 	if _, err := DecodeNegoEx(sequenceToken); err == nil {
 		t.Fatal("out-of-sequence NegoEx message accepted")
+	}
+}
+
+func TestNegoExNonMutualHandshake(t *testing.T) {
+	creds, kt := syntheticCredentials(t)
+	now := time.Unix(1700000040, 0).UTC()
+	initiator, err := NewInitiatorWithOptions(creds,
+		gssapi.GSSIntegrityFlag|gssapi.GSSConfidentialityFlag,
+		InitiatorOptions{NegoEx: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptor := NewAcceptorWithOptions(kt, AcceptorOptions{NegoEx: true})
+	_, reply, err := acceptor.Accept(first, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := initiator.Continue(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, finalReply, err := acceptor.Accept(final, now); err != nil || finalReply != nil {
+		t.Fatalf("non-mutual NegoEx final accept = %v, reply %x", err, finalReply)
+	}
+}
+
+func TestNegoExRequiresAcceptorOptIn(t *testing.T) {
+	creds, kt := syntheticCredentials(t)
+	now := time.Unix(1700000050, 0).UTC()
+	initiator, err := NewInitiatorWithOptions(creds, gssapiFlags(), InitiatorOptions{NegoEx: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewAcceptor(kt).Accept(first, now); err == nil {
+		t.Fatal("NegoEx accepted without acceptor opt-in")
 	}
 }
 

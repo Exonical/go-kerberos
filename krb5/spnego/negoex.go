@@ -152,6 +152,9 @@ func encodeNegoExMessage(message NegoExMessage) ([]byte, error) {
 	switch message.Type {
 	case NegoExInitiatorNego, NegoExAcceptorNego:
 		headerSize = negoExNegoHeaderSize
+		if len(message.AuthSchemes) > 0xffff || len(message.Extensions) > 0xffff {
+			return nil, fmt.Errorf("NegoEx: vector count exceeds uint16")
+		}
 		for _, extension := range message.Extensions {
 			if extension.Type&negoExCriticalExtension != 0 {
 				return nil, fmt.Errorf("NegoEx: unsupported critical extension %#x", extension.Type)
@@ -205,6 +208,9 @@ func encodeNegoExMessage(message NegoExMessage) ([]byte, error) {
 		headerSize = negoExAlertHeaderSize
 		if len(message.Alerts) == 0 {
 			return nil, fmt.Errorf("NegoEx: alert message has no alerts")
+		}
+		if len(message.Alerts) > 0xffff {
+			return nil, fmt.Errorf("NegoEx: alert count exceeds uint16")
 		}
 		payload = append(make([]byte, 0, headerSize), message.AuthScheme[:]...)
 		put32(&payload, message.AlertCode)

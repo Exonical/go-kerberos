@@ -508,8 +508,10 @@ func (i *Initiator) Continue(token []byte) ([]byte, error) {
 		}
 		for _, message := range messages {
 			if message.Type == NegoExChallenge {
-				if err := i.mech.VerifyToken(message.Token); err != nil {
-					return nil, err
+				if len(message.Token) != 0 {
+					if err := i.mech.VerifyToken(message.Token); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -596,6 +598,7 @@ type Acceptor struct {
 	mechTypes []asn1.ObjectIdentifier
 	needMIC   bool
 	negoex    *negoExState
+	negoExOpt bool
 }
 
 // NewAcceptor creates an acceptor backed by a Kerberos service keytab.
@@ -606,7 +609,7 @@ func NewAcceptor(kt *keytab.Keytab) *Acceptor {
 // NewAcceptorWithOptions creates an acceptor with underlying Kerberos
 // channel-binding and replay-cache options.
 func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Acceptor {
-	return &Acceptor{mech: gssapi.NewAcceptorWithOptions(kt, options)}
+	return &Acceptor{mech: gssapi.NewAcceptorWithOptions(kt, options), negoExOpt: options.NegoEx}
 }
 
 // Accept processes an initiator token and returns an optional response token.
@@ -664,7 +667,7 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 		return nil, nil, fmt.Errorf("SPNEGO acceptor: %w", err)
 	}
 	init := decoded.Init
-	if len(init.MechTypes) > 0 && init.MechTypes[0].Equal(negoexOID) {
+	if a.negoExOpt && len(init.MechTypes) > 0 && init.MechTypes[0].Equal(negoexOID) {
 		messages, err := DecodeNegoEx(init.MechToken)
 		if err != nil {
 			return nil, nil, err
