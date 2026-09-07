@@ -14,21 +14,25 @@ func TestMultiMasterKeyDumpLoad(t *testing.T) {
 	if err := db.CreatePrincipal("user@EXAMPLE.COM", "password"); err != nil {
 		t.Fatal(err)
 	}
-	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	oldEType, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, err := etype.StringToKey([]byte("old"), []byte("EXAMPLE.COMKM"), nil)
+	old, err := oldEType.StringToKey([]byte("old"), []byte("EXAMPLE.COMKM"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	newKey, err := etype.StringToKey([]byte("new"), []byte("EXAMPLE.COMKM"), nil)
+	newEType, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newKey, err := newEType.StringToKey([]byte("new"), []byte("EXAMPLE.COMKM"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.MasterKeys = []kdb.Key{
 		{Enctype: crypto.EnctypeAES256SHA1, KVNO: 2, Key: newKey},
-		{Enctype: crypto.EnctypeAES256SHA1, KVNO: 1, Key: old},
+		{Enctype: crypto.EnctypeAES128SHA1, KVNO: 1, Key: old},
 	}
 	db.ActiveMKeys = []kdb.ActKVNO{{KVNO: 1, ActTime: 0}, {KVNO: 2, ActTime: 2}}
 	name, _ := principalForTest("user@EXAMPLE.COM")
@@ -57,12 +61,73 @@ func TestMultiMasterKeyDumpLoad(t *testing.T) {
 		record.Keys[crypto.EnctypeAES256SHA1].Key) {
 		t.Fatal("principal key did not round-trip")
 	}
-	oldStore, err := ParseWithMasterKey(dump, crypto.EnctypeAES256SHA1, old)
+	oldStore, err := ParseWithMasterKey(dump, crypto.EnctypeAES128SHA1, old)
 	if err != nil {
 		t.Fatalf("load with old master key: %v", err)
 	}
 	if len(oldStore.MasterKeys) != 2 {
 		t.Fatalf("old-key master key count %d", len(oldStore.MasterKeys))
+	}
+	if oldStore.SuppliedMKVNO != 1 {
+		t.Fatalf("supplied master key version %d", oldStore.SuppliedMKVNO)
+	}
+	passwordStore, err := ParseWithMasterPassword(dump, "old")
+	if err != nil {
+		t.Fatalf("load with old password: %v", err)
+	}
+	if passwordStore.SuppliedMKVNO != 1 ||
+		passwordStore.MasterEnctype != crypto.EnctypeAES128SHA1 {
+		t.Fatalf("password load supplied key = kvno %d enctype %d",
+			passwordStore.SuppliedMKVNO, passwordStore.MasterEnctype)
+	}
+}
+
+func TestOrdinaryDuplicateKeyDataRoundTrip(t *testing.T) {
+	db := kdb.NewDatabase("EXAMPLE.COM")
+	if err := db.CreatePrincipal("user@EXAMPLE.COM", "password"); err != nil {
+		t.Fatal(err)
+	}
+	name, err := principalForTest("user@EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, ok, err := db.Lookup(name)
+	if err != nil || !ok {
+		t.Fatalf("lookup: %v %v", ok, err)
+	}
+	original := record.Keys[crypto.EnctypeAES256SHA1]
+	older := original
+	older.KVNO = 1
+	latest := original
+	latest.KVNO = 2
+	record.Keys[crypto.EnctypeAES256SHA1] = latest
+	record.KeyData = []kdb.Key{latest, older}
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	masterType, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	master, err := masterType.StringToKey([]byte("master"), []byte("EXAMPLE.COMKM"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dump, err := DumpWithMasterKey(db, crypto.EnctypeAES256SHA1, master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := ParseWithMasterKey(dump, crypto.EnctypeAES256SHA1, master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := store.Lookup(name)
+	if err != nil || !ok {
+		t.Fatalf("loaded lookup: %v %v", ok, err)
+	}
+	if len(loaded.KeyData) != 2 || loaded.KeyData[0].KVNO != 2 ||
+		loaded.KeyData[1].KVNO != 1 {
+		t.Fatalf("duplicate key data lost or reordered: %#v", loaded.KeyData)
 	}
 }
 

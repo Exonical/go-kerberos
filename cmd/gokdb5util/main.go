@@ -82,7 +82,7 @@ func run(args []string, in io.Reader, out, errOut io.Writer) error {
 	case "use_mkey":
 		return useMKey(opts, rest, in, out, errOut)
 	case "list_mkeys":
-		return listMKeys(opts, out)
+		return listMKeys(opts, in, out)
 	case "update_princ_encryption":
 		return updatePrincipalEncryption(opts, rest, in, out, errOut)
 	case "purge_mkeys":
@@ -322,9 +322,9 @@ func stashDB(opts options, in io.Reader) error {
 	if err != nil {
 		return err
 	}
-	kvno := uint32(1)
-	if len(store.MasterKeys) > 0 {
-		kvno = store.MasterKeys[0].KVNO
+	kvno := store.SuppliedMKVNO
+	if kvno == 0 {
+		kvno = 1
 	}
 	return mitdump.WriteStashFile(opts.stash, store.Realm, store.MasterEnctype, kvno, store.MasterKey)
 }
@@ -518,6 +518,9 @@ func useMKey(opts options, rest []string, in io.Reader, out, errOut io.Writer) e
 	if len(updated) == 0 || updated[0].ActTime > time.Now().Unix() {
 		return errors.New("there must be one master key currently active")
 	}
+	if _, err := kdb.EncodeACTKVNO(updated); err != nil {
+		return fmt.Errorf("invalid activation time: %w", err)
+	}
 	db.ActiveMKeys = updated
 	if err := writeDumpAtomicWithMasterKey(opts.db, db, db.MasterKeys[0], true); err != nil {
 		return err
@@ -541,8 +544,8 @@ func parseMKeyTime(value string, now time.Time) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("could not parse date-time string %q", value)
 }
 
-func listMKeys(opts options, out io.Writer) error {
-	db, _, err := loadMutable(opts, strings.NewReader(""), os.Stderr)
+func listMKeys(opts options, in io.Reader, out io.Writer) error {
+	db, _, err := loadMutable(opts, in, os.Stderr)
 	if err != nil {
 		return err
 	}
@@ -694,8 +697,8 @@ func purgeMKeys(opts options, rest []string, in io.Reader, out, errOut io.Writer
 		used[kvno] = true
 	}
 	stashKVNO := uint32(1)
-	if len(store.MasterKeys) > 0 {
-		stashKVNO = store.MasterKeys[0].KVNO
+	if store.SuppliedMKVNO != 0 {
+		stashKVNO = store.SuppliedMKVNO
 	}
 	var kept []kdb.Key
 	purged := 0
@@ -714,7 +717,7 @@ func purgeMKeys(opts options, rest []string, in io.Reader, out, errOut io.Writer
 		return nil
 	}
 	if !used[stashKVNO] {
-		return errors.New("master key stash file needs updating")
+		return errors.New("master key stash file needs updating, command aborting")
 	}
 	if !force {
 		fmt.Fprint(out, "Purge unused master keys? ")
@@ -770,7 +773,13 @@ func tabDump(opts options, rest []string, out io.Writer) error {
 	if dumpType == "" {
 		return errors.New("tabdump requires a dump type")
 	}
-	store, err := mitdump.LoadWithMasterPassword(opts.db, opts.pass)
+	var store *mitdump.FileStore
+	var err error
+	if opts.pass != "" {
+		store, err = mitdump.LoadWithMasterPassword(opts.db, opts.pass)
+	} else {
+		store, err = mitdump.Load(opts.db)
+	}
 	if err != nil {
 		return err
 	}

@@ -44,6 +44,7 @@ type FileStore struct {
 	policies      map[string]kdb.PolicyRecord
 	MasterEnctype int32
 	MasterKey     []byte
+	SuppliedMKVNO uint32
 	MasterKeys    []kdb.Key
 	ActiveMKeys   []kdb.ActKVNO
 	MKeyAux       []kdb.MKeyAuxEntry
@@ -182,12 +183,16 @@ func dumpWithMasterKey(db *kdb.Database, masterEnctype int32,
 	}
 	latest := masterKeys[0]
 	records := make([]kdb.PrincipalRecord, 0, len(db.ListPrincipals())+1)
+	tlData, err := masterKeyTLData(db, masterKeys)
+	if err != nil {
+		return nil, err
+	}
 	records = append(records, kdb.PrincipalRecord{
 		Name:    *masterName,
 		Keys:    map[int32]kdb.Key{latest.Enctype: latest},
 		KeyData: append([]kdb.Key(nil), masterKeys...),
 		KVNO:    latest.KVNO,
-		TLData:  masterKeyTLData(db, masterKeys),
+		TLData:  tlData,
 	})
 	for _, name := range db.ListPrincipals() {
 		parsed, err := principal.Parse(name)
@@ -314,22 +319,24 @@ func writePrincipalRecord(out io.Writer, record kdb.PrincipalRecord,
 	}
 
 	keys := make([]kdb.Key, 0, len(record.Keys)+len(record.KeyData))
-	if isKMPrincipal(record.Name) && len(record.KeyData) > 0 {
+	if len(record.KeyData) > 0 {
 		keys = append(keys, record.KeyData...)
 	} else {
 		for _, key := range record.Keys {
 			keys = append(keys, key)
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if isKMPrincipal(record.Name) && keys[i].KVNO != keys[j].KVNO {
-			return keys[i].KVNO > keys[j].KVNO
-		}
-		if keys[i].Enctype != keys[j].Enctype {
-			return keys[i].Enctype < keys[j].Enctype
-		}
-		return keys[i].KVNO < keys[j].KVNO
-	})
+	if isKMPrincipal(record.Name) || len(record.KeyData) == 0 {
+		sort.Slice(keys, func(i, j int) bool {
+			if isKMPrincipal(record.Name) && keys[i].KVNO != keys[j].KVNO {
+				return keys[i].KVNO > keys[j].KVNO
+			}
+			if keys[i].Enctype != keys[j].Enctype {
+				return keys[i].Enctype < keys[j].Enctype
+			}
+			return keys[i].KVNO < keys[j].KVNO
+		})
+	}
 	if len(keys) > int(^uint16(0)) {
 		return fmt.Errorf("MIT dump principal %q has too many keys", name)
 	}
@@ -398,28 +405,30 @@ func isKMPrincipal(name principal.Principal) bool {
 		name.Components[1] == "M"
 }
 
-func masterKeyTLData(db *kdb.Database, keys []kdb.Key) []kdb.TLData {
+func masterKeyTLData(db *kdb.Database, keys []kdb.Key) ([]kdb.TLData, error) {
 	if len(keys) == 0 {
-		return nil
+		return nil, nil
 	}
 	mkvno, err := kdb.EncodeMKVNO(keys[0].KVNO)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	data := []kdb.TLData{{Type: kdb.MKVNOType, Data: mkvno}}
 	active := append([]kdb.ActKVNO(nil), db.ActiveMKeys...)
 	if len(active) == 0 {
 		active = []kdb.ActKVNO{{KVNO: uint16(keys[0].KVNO), ActTime: 0}}
 	}
-	if encoded, err := kdb.EncodeACTKVNO(active); err == nil {
-		data = append(data, kdb.TLData{Type: kdb.ACTKVNOType, Data: encoded})
+	encoded, err := kdb.EncodeACTKVNO(active)
+	if err != nil {
+		return nil, err
 	}
+	data = append(data, kdb.TLData{Type: kdb.ACTKVNOType, Data: encoded})
 	aux := append([]kdb.MKeyAuxEntry(nil), db.MKeyAux...)
 	if len(aux) == 0 && len(keys) > 1 {
 		for _, old := range keys[1:] {
 			contents, err := encodeMasterKeyData(old, keys[0])
 			if err != nil {
-				continue
+				return nil, err
 			}
 			aux = append(aux, kdb.MKeyAuxEntry{
 				MKeyKVNO: uint16(old.KVNO), LatestKeyKVNO: uint16(keys[0].KVNO),
@@ -427,10 +436,14 @@ func masterKeyTLData(db *kdb.Database, keys []kdb.Key) []kdb.TLData {
 			})
 		}
 	}
-	if encoded, err := kdb.EncodeMKEYAux(aux); err == nil && len(encoded) > 0 {
+	encoded, err = kdb.EncodeMKEYAux(aux)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > 0 {
 		data = append(data, kdb.TLData{Type: kdb.MKEYAuxType, Data: encoded})
 	}
-	return data
+	return data, nil
 }
 
 func encodeMasterKeyData(wrapping, target kdb.Key) ([]byte, error) {
@@ -612,7 +625,7 @@ func ParseWithStash(data []byte, stashPath string) (*FileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseWithMasterKey(store, stash.Enctype, stash.Key)
+	return parseWithMasterKey(store, stash.Enctype, stash.Key, stash.KVNO)
 }
 
 // LoadWithMasterKey reads an MIT dump and decrypts its key data with an
@@ -783,7 +796,16 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 		crypto.EnctypeCamellia256,
 	}
 	if identified {
-		candidates = []int32{masterEnctype}
+		candidates = append([]int32{masterEnctype}, candidates...)
+		seen := map[int32]bool{masterEnctype: true}
+		unique := candidates[:1]
+		for _, candidate := range candidates[1:] {
+			if !seen[candidate] {
+				seen[candidate] = true
+				unique = append(unique, candidate)
+			}
+		}
+		candidates = unique
 	}
 	var lastErr error
 	for _, candidate := range candidates {
@@ -798,7 +820,7 @@ func ParseWithMasterPassword(data []byte, password string) (*FileStore, error) {
 			lastErr = fmt.Errorf("MIT dump master key: %w", err)
 			continue
 		}
-		parsed, err := parseWithMasterKey(store, candidate, masterKey)
+		parsed, err := parseWithMasterKey(store, candidate, masterKey, 0)
 		if err == nil {
 			return parsed, nil
 		}
@@ -817,27 +839,23 @@ func ParseWithMasterKey(data []byte, masterEnctype int32, masterKey []byte) (*Fi
 	if err != nil {
 		return nil, err
 	}
-	return parseWithMasterKey(store, masterEnctype, masterKey)
+	return parseWithMasterKey(store, masterEnctype, masterKey, 0)
 }
 
-func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte) (*FileStore, error) {
+func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte,
+	suppliedKVNO uint32) (*FileStore, error) {
 	if store == nil {
 		return nil, fmt.Errorf("MIT dump store is nil")
 	}
 	if err := validateMasterKey(masterEnctype, masterKey); err != nil {
 		return nil, err
 	}
-	if identified, ok, err := dumpMasterEnctype(store); err != nil {
-		return nil, err
-	} else if ok && identified != masterEnctype {
-		return nil, fmt.Errorf("MIT dump master enctype %d does not match supplied enctype %d",
-			identified, masterEnctype)
-	}
 	masterEType, err := crypto.NewRegistry().Get(masterEnctype)
 	if err != nil {
 		return nil, fmt.Errorf("MIT dump master enctype: %w", err)
 	}
-	masterKeys, aux, err := recoverMasterKeys(store, masterEType, masterKey)
+	masterKeys, aux, recoveredKVNO, err := recoverMasterKeys(store, masterEType,
+		masterKey, suppliedKVNO)
 	if err != nil {
 		return nil, err
 	}
@@ -849,6 +867,7 @@ func parseWithMasterKey(store *FileStore, masterEnctype int32, masterKey []byte)
 	store.records = records
 	store.MasterEnctype = masterEnctype
 	store.MasterKey = append([]byte(nil), masterKey...)
+	store.SuppliedMKVNO = recoveredKVNO
 	store.MasterKeys = make([]kdb.Key, 0, len(masterKeys))
 	for _, key := range masterKeys {
 		store.MasterKeys = append(store.MasterKeys, key)
@@ -1079,7 +1098,8 @@ func decryptKeyData(key kdb.Key, wrapping crypto.EType, wrappingKey []byte) (kdb
 }
 
 func recoverMasterKeys(store *FileStore, supplied crypto.EType,
-	suppliedKey []byte) (map[uint32]kdb.Key, []kdb.MKeyAuxEntry, error) {
+	suppliedKey []byte, suppliedKVNO uint32) (map[uint32]kdb.Key,
+	[]kdb.MKeyAuxEntry, uint32, error) {
 	var master kdb.PrincipalRecord
 	found := false
 	for _, record := range store.records {
@@ -1090,8 +1110,12 @@ func recoverMasterKeys(store *FileStore, supplied crypto.EType,
 		}
 	}
 	if !found {
-		return map[uint32]kdb.Key{1: {Enctype: supplied.ID(), KVNO: 1,
-			Key: append([]byte(nil), suppliedKey...)}}, nil, nil
+		if suppliedKVNO == 0 {
+			suppliedKVNO = 1
+		}
+		return map[uint32]kdb.Key{suppliedKVNO: {Enctype: supplied.ID(),
+				KVNO: suppliedKVNO, Key: append([]byte(nil), suppliedKey...)}}, nil,
+			suppliedKVNO, nil
 	}
 	keys := master.KeyData
 	if len(keys) == 0 {
@@ -1105,17 +1129,22 @@ func recoverMasterKeys(store *FileStore, supplied crypto.EType,
 			var err error
 			aux, err = kdb.DecodeMKEYAux(item.Data)
 			if err != nil {
-				return nil, nil, fmt.Errorf("MIT dump master key auxiliary data: %w", err)
+				return nil, nil, 0, fmt.Errorf("MIT dump master key auxiliary data: %w", err)
 			}
 		}
 	}
 	var latest kdb.Key
-	if len(keys) > 0 {
-		candidate := keys[0]
-		if candidate.Enctype == supplied.ID() {
-			if decoded, err := decryptKeyData(candidate, supplied, suppliedKey); err == nil {
-				latest = decoded
+	recoveredKVNO := suppliedKVNO
+	for _, candidate := range keys {
+		if candidate.Enctype != supplied.ID() {
+			continue
+		}
+		if decoded, err := decryptKeyData(candidate, supplied, suppliedKey); err == nil {
+			latest = decoded
+			if recoveredKVNO == 0 {
+				recoveredKVNO = decoded.KVNO
 			}
+			break
 		}
 	}
 	if len(latest.Key) == 0 {
@@ -1124,12 +1153,15 @@ func recoverMasterKeys(store *FileStore, supplied crypto.EType,
 				Key: item.LatestKeyData}
 			if decoded, err := decryptKeyData(key, supplied, suppliedKey); err == nil {
 				latest = decoded
+				if recoveredKVNO == 0 {
+					recoveredKVNO = uint32(item.MKeyKVNO)
+				}
 				break
 			}
 		}
 	}
 	if len(latest.Key) == 0 {
-		return nil, aux, fmt.Errorf("MIT dump master key could not recover latest key")
+		return nil, aux, 0, fmt.Errorf("MIT dump master key could not recover latest key")
 	}
 	latestKVNO := latest.KVNO
 	if latestKVNO == 0 {
@@ -1138,7 +1170,7 @@ func recoverMasterKeys(store *FileStore, supplied crypto.EType,
 				var err error
 				latestKVNO, err = kdb.DecodeMKVNO(item.Data)
 				if err != nil {
-					return nil, aux, fmt.Errorf("MIT dump master key version metadata: %w", err)
+					return nil, aux, 0, fmt.Errorf("MIT dump master key version metadata: %w", err)
 				}
 			}
 		}
@@ -1146,16 +1178,16 @@ func recoverMasterKeys(store *FileStore, supplied crypto.EType,
 	result := map[uint32]kdb.Key{latestKVNO: latest}
 	latestEType, err := crypto.NewRegistry().Get(latest.Enctype)
 	if err != nil {
-		return nil, aux, err
+		return nil, aux, 0, err
 	}
 	for _, key := range keys {
 		decoded, err := decryptKeyData(key, latestEType, latest.Key)
 		if err != nil {
-			return nil, aux, err
+			return nil, aux, 0, err
 		}
 		result[decoded.KVNO] = decoded
 	}
-	return result, aux, nil
+	return result, aux, recoveredKVNO, nil
 }
 
 // Lookup implements kdb.Store.
