@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -227,6 +228,9 @@ func TestParseFileIncludeErrors(t *testing.T) {
 }
 
 func TestExpandPathTokensPOSIX(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX path-token semantics are unavailable on Windows")
+	}
 	t.Setenv("TMPDIR", "/tmp/kerberos-token-test")
 	current, err := user.Current()
 	if err != nil {

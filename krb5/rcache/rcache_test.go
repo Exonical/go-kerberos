@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -283,6 +284,11 @@ func TestDefaultReplayCacheUsesTMPDIR(t *testing.T) {
 }
 
 func TestDefaultReplayCacheExpandsMITPathTokens(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if _, err := config.ExpandPathTokens("%{euid}"); err != nil {
+			t.Skip("Windows runner has no token-owner SID")
+		}
+	}
 	previous, present := os.LookupEnv("KRB5RCACHENAME")
 	_ = os.Unsetenv("KRB5RCACHENAME")
 	t.Cleanup(func() {

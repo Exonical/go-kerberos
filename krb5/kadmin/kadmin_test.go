@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,7 +188,7 @@ func TestKTAddWritesReadableKeytab(t *testing.T) {
 	if err := db.CreatePrincipal("user", "secret"); err != nil {
 		t.Fatal(err)
 	}
-	path := t.TempDir() + "/test.keytab"
+	path := filepath.Join(t.TempDir(), "test.keytab")
 	var out bytes.Buffer
 	engine := New(Config{Ops: NewLocal(db), Local: true, Realm: "EXAMPLE.COM", Stdout: &out, Stderr: &bytes.Buffer{}})
 	if _, err := engine.Execute("ktadd -k " + path + " -norandkey user"); err != nil {

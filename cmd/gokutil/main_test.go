@@ -32,12 +32,13 @@ func TestParseUtilArgs(t *testing.T) {
 
 func TestUtilAddPasswordAndDeleteSlot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.keytab")
-	args := []string{"addent", "-password", "-k", path, "-p", "alice@TEST",
+	name := "FILE:" + path
+	args := []string{"addent", "-password", "-k", name, "-p", "alice@TEST",
 		"-kvno", "2", "-e", "aes256-cts-hmac-sha1-96"}
 	if err := runUtil(args, &bytes.Buffer{}, strings.NewReader("password\n")); err != nil {
 		t.Fatal(err)
 	}
-	kt, err := keytab.Resolve(path)
+	kt, err := keytab.Resolve(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,11 +57,11 @@ func TestUtilAddPasswordAndDeleteSlot(t *testing.T) {
 	if !bytes.Equal(entries[0].Key, want) {
 		t.Fatalf("password-derived key = %x, want %x", entries[0].Key, want)
 	}
-	if err := runUtil([]string{"delent", "-k", path, "-slot", "1"},
+	if err := runUtil([]string{"delent", "-k", name, "-slot", "1"},
 		&bytes.Buffer{}, strings.NewReader("")); err != nil {
 		t.Fatal(err)
 	}
-	kt, err = keytab.Resolve(path)
+	kt, err = keytab.Resolve(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestUtilAddPasswordAndDeleteSlot(t *testing.T) {
 
 func TestUtilRejectsWrongExplicitKeyLength(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.keytab")
-	err := runUtil([]string{"addent", "-k", path, "-p", "alice@TEST",
+	err := runUtil([]string{"addent", "-k", "FILE:" + path, "-p", "alice@TEST",
 		"-kvno", "1", "-e", "18", "-key", "00"}, &bytes.Buffer{}, strings.NewReader(""))
 	if err == nil {
 		t.Fatal("wrong key length accepted")
@@ -80,13 +81,14 @@ func TestUtilRejectsWrongExplicitKeyLength(t *testing.T) {
 
 func TestUtilPasswordReadsOneLineWithoutWaitingForEOF(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.keytab")
-	err := runUtil([]string{"addent", "-password", "-k", path, "-p", "alice@TEST",
+	name := "FILE:" + path
+	err := runUtil([]string{"addent", "-password", "-k", name, "-p", "alice@TEST",
 		"-kvno", "1", "-e", "18"}, &bytes.Buffer{},
 		&oneLineReader{value: " pass \n"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	kt, err := keytab.Resolve(path)
+	kt, err := keytab.Resolve(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +124,8 @@ func TestUtilRejectsNonFileKeytabs(t *testing.T) {
 
 func TestUtilWriteFailurePreservesExistingKeytab(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.keytab")
-	if err := runUtil([]string{"addent", "-k", path, "-p", "alice@TEST",
+	name := "FILE:" + path
+	if err := runUtil([]string{"addent", "-k", name, "-p", "alice@TEST",
 		"-kvno", "1", "-e", "18", "-key", strings.Repeat("00", 32)},
 		&bytes.Buffer{}, strings.NewReader("")); err != nil {
 		t.Fatal(err)
@@ -131,7 +134,7 @@ func TestUtilWriteFailurePreservesExistingKeytab(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = writeUtilKeytab(path, &keytab.Keytab{Entries: []keytab.Entry{{
+	err = writeUtilKeytab(name, &keytab.Keytab{Entries: []keytab.Entry{{
 		Timestamp: -1,
 	}}})
 	if err == nil {

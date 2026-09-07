@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -27,10 +28,15 @@ func TestResolveCacheNames(t *testing.T) {
 		name string
 		typ  Type
 	}{
-		{filepath.Join(dir, "file.ccache"), TypeFile},
 		{"FILE:" + filepath.Join(dir, "file.ccache"), TypeFile},
 		{"DIR:" + dir, TypeDir},
 		{"MEMORY:unit-test", TypeMemory},
+	}
+	if runtime.GOOS != "windows" {
+		tests = append([]struct {
+			name string
+			typ  Type
+		}{{filepath.Join(dir, "file.ccache"), TypeFile}}, tests...)
 	}
 	for _, test := range tests {
 		cache, err := Resolve(test.name)
