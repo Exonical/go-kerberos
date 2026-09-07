@@ -22,6 +22,8 @@ const (
 	ADCAMMACProtected uint32 = 0x20
 )
 
+var ErrAttributeNotFound = errors.New("authdata: attribute not found")
+
 // Module is the required portion of a client authorization-data module.
 // Optional operations are supplied by AttributeSetter, AttributeDeleter, and
 // InternalExporter.
@@ -72,6 +74,7 @@ func (c *Context) Modules() []Module {
 
 type importedAuthData struct {
 	entry         protocol.AuthorizationDataEntry
+	usage         uint32
 	authenticated bool
 	issuer        *principal.Principal
 }
@@ -81,14 +84,14 @@ func (c *Context) Import(data protocol.AuthorizationData, usage uint32,
 	if c == nil {
 		return errors.New("authdata: nil context")
 	}
-	items, err := c.unwrap(data, false, nil, ticket, key)
+	items, err := c.unwrap(data, usage, false, nil, ticket, key)
 	if err != nil {
 		return err
 	}
 	for _, module := range c.modules {
 		for _, item := range items {
 			flags := module.Flags(item.entry.ADType)
-			if flags&usage == 0 {
+			if flags&item.usage == 0 {
 				continue
 			}
 			if err := module.ImportAuthData(protocol.AuthorizationData{item.entry},
@@ -103,27 +106,41 @@ func (c *Context) Import(data protocol.AuthorizationData, usage uint32,
 	return nil
 }
 
-func (c *Context) unwrap(data protocol.AuthorizationData, authenticated bool,
+func (c *Context) unwrap(data protocol.AuthorizationData, usage uint32, authenticated bool,
 	issuer *principal.Principal, ticket *protocol.EncTicketPart,
 	key protocol.EncryptionKey) ([]importedAuthData, error) {
 	var result []importedAuthData
 	for _, entry := range data {
 		switch entry.ADType {
 		case protocol.ADIfRelevant:
-			if protocolData, err := c.unwrapCAMMAC(protocol.AuthorizationData{entry},
-				authenticated, issuer, ticket, key); err == nil {
-				result = append(result, protocolData...)
-				continue
-			}
 			var inner protocol.AuthorizationData
 			if err := asn1.Unmarshal(entry.ADData, &inner); err != nil {
 				return nil, fmt.Errorf("authdata IF-RELEVANT: %w", err)
 			}
-			items, err := c.unwrap(inner, authenticated, issuer, ticket, key)
-			if err != nil {
-				return nil, err
+			for _, innerEntry := range inner {
+				if innerEntry.ADType == protocol.ADCAMMAC {
+					wrapped, marshalErr := asn1.Marshal(protocol.AuthorizationData{innerEntry})
+					if marshalErr != nil {
+						return nil, marshalErr
+					}
+					if protocolData, verifyErr := c.unwrapCAMMAC(
+						protocol.AuthorizationData{{
+							ADType: protocol.ADIfRelevant,
+							ADData: wrapped,
+						}},
+						usage, authenticated, issuer, ticket, key,
+					); verifyErr == nil {
+						result = append(result, protocolData...)
+						continue
+					}
+				}
+				items, err := c.unwrap(protocol.AuthorizationData{innerEntry},
+					usage, authenticated, issuer, ticket, key)
+				if err != nil {
+					return nil, err
+				}
+				result = append(result, items...)
 			}
-			result = append(result, items...)
 		case protocol.ADKDCIssued:
 			var issued protocol.KDCIssued
 			if err := asn1.Unmarshal(entry.ADData, &issued); err != nil {
@@ -133,12 +150,12 @@ func (c *Context) unwrap(data protocol.AuthorizationData, authenticated bool,
 			if err != nil {
 				return nil, err
 			}
+			etype, etypeErr := checksumEType(issued.Checksum.ChecksumType)
+			if etypeErr != nil {
+				return nil, etypeErr
+			}
 			verified := false
 			if len(key.KeyValue) > 0 {
-				etype, etypeErr := crypto.NewRegistry().Get(key.KeyType)
-				if etypeErr != nil {
-					return nil, etypeErr
-				}
 				if verifyErr := etype.VerifyChecksum(key.KeyValue, 19, encoded,
 					issued.Checksum.Checksum); verifyErr != nil {
 					return nil, fmt.Errorf("authdata KDC-ISSUED checksum: %w", verifyErr)
@@ -156,7 +173,11 @@ func (c *Context) unwrap(data protocol.AuthorizationData, authenticated bool,
 			} else {
 				nextIssuer = issuer
 			}
-			items, err := c.unwrap(issued.Elements, authenticated || verified,
+			nextUsage := usage
+			if verified {
+				nextUsage |= ADUsageKDCIssued
+			}
+			items, err := c.unwrap(issued.Elements, nextUsage, authenticated || verified,
 				nextIssuer, ticket, key)
 			if err != nil {
 				return nil, err
@@ -166,24 +187,19 @@ func (c *Context) unwrap(data protocol.AuthorizationData, authenticated bool,
 			// An unwrapped CAMMAC cannot be authenticated without its
 			// containing AD-IF-RELEVANT value.
 			result = append(result, importedAuthData{
-				entry: entry, authenticated: authenticated, issuer: issuer,
+				entry: entry, usage: usage, authenticated: authenticated, issuer: issuer,
 			})
 		default:
 			result = append(result, importedAuthData{
-				entry: entry, authenticated: authenticated, issuer: issuer,
+				entry: entry, usage: usage, authenticated: authenticated, issuer: issuer,
 			})
-		}
-	}
-	if len(result) == 0 {
-		if protected, err := c.unwrapCAMMAC(data, authenticated, issuer, ticket, key); err == nil {
-			result = append(result, protected...)
 		}
 	}
 	return result, nil
 }
 
 func (c *Context) unwrapCAMMAC(data protocol.AuthorizationData,
-	authenticated bool, issuer *principal.Principal, ticket *protocol.EncTicketPart,
+	usage uint32, authenticated bool, issuer *principal.Principal, ticket *protocol.EncTicketPart,
 	key protocol.EncryptionKey) ([]importedAuthData, error) {
 	if len(key.KeyValue) == 0 || ticket == nil || !cammac.HasCAMMAC(data) {
 		return nil, cammac.ErrNotFound
@@ -195,7 +211,28 @@ func (c *Context) unwrapCAMMAC(data protocol.AuthorizationData,
 	if err != nil {
 		return nil, err
 	}
-	return c.unwrap(protected, true, issuer, ticket, key)
+	return c.unwrap(protected, usage|ADCAMMACProtected, true, issuer, ticket, key)
+}
+
+func checksumEType(checksumType int32) (crypto.EType, error) {
+	var enctype int32
+	switch checksumType {
+	case crypto.ChecksumHMACSHA196AES128:
+		enctype = crypto.EnctypeAES128SHA1
+	case crypto.ChecksumHMACSHA196AES256:
+		enctype = crypto.EnctypeAES256SHA1
+	case crypto.ChecksumCMACCamellia128:
+		enctype = crypto.EnctypeCamellia128
+	case crypto.ChecksumCMACCamellia256:
+		enctype = crypto.EnctypeCamellia256
+	case crypto.ChecksumHMACSHA256128AES128:
+		enctype = crypto.EnctypeAES128SHA256
+	case crypto.ChecksumHMACSHA384192AES256:
+		enctype = crypto.EnctypeAES256SHA384
+	default:
+		return nil, fmt.Errorf("authdata: unsupported keyed checksum type %d", checksumType)
+	}
+	return crypto.NewRegistry().Get(enctype)
 }
 
 func (c *Context) Export(usage uint32) (protocol.AuthorizationData, error) {
@@ -234,8 +271,11 @@ func (c *Context) GetAttribute(attribute string) (value, display []byte,
 		if err == nil {
 			return value, display, authenticated, complete, nil
 		}
+		if !errors.Is(err, ErrAttributeNotFound) {
+			return nil, nil, false, false, err
+		}
 	}
-	return nil, nil, false, false, errors.New("authdata: attribute not found")
+	return nil, nil, false, false, ErrAttributeNotFound
 }
 
 func (c *Context) SetAttribute(attribute string, value []byte, complete bool) error {
@@ -243,10 +283,12 @@ func (c *Context) SetAttribute(attribute string, value []byte, complete bool) er
 		if setter, ok := module.(AttributeSetter); ok {
 			if err := setter.SetAttribute(attribute, value, complete); err == nil {
 				return nil
+			} else if !errors.Is(err, ErrAttributeNotFound) {
+				return err
 			}
 		}
 	}
-	return errors.New("authdata: attribute not found")
+	return ErrAttributeNotFound
 }
 
 func (c *Context) DeleteAttribute(attribute string) error {
@@ -254,10 +296,12 @@ func (c *Context) DeleteAttribute(attribute string) error {
 		if deleter, ok := module.(AttributeDeleter); ok {
 			if err := deleter.DeleteAttribute(attribute); err == nil {
 				return nil
+			} else if !errors.Is(err, ErrAttributeNotFound) {
+				return err
 			}
 		}
 	}
-	return errors.New("authdata: attribute not found")
+	return ErrAttributeNotFound
 }
 
 func (c *Context) ExportInternal(restrictAuthenticated bool) (any, error) {

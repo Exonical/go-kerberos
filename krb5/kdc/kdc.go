@@ -2609,14 +2609,16 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	ticketPart.Flags = flags
 	s.handleAuthData(&AuthDataRequest{
-		Flags:     AuthDataTGSReq,
-		Client:    principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
-		Server:    serviceName,
-		ClientKey: nil,
-		ServerKey: &serviceKey,
-		Request:   request,
-		TGT:       &tgtPart,
-		Reply:     &ticketPart,
+		Flags:         AuthDataTGSReq,
+		Client:        principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
+		Server:        serviceName,
+		SubjectServer: delegationEvidence,
+		ClientKey:     nil,
+		ServerKey:     &serviceKey,
+		SubjectKey:    pacVerifyKey,
+		Request:       request,
+		TGT:           &tgtPart,
+		Reply:         &ticketPart,
 	})
 	ticketPart.AuthorizationData = append(ticketPart.AuthorizationData, tgtAuthData...)
 	ticketEncryptionKey := serviceKey
