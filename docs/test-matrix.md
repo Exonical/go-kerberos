@@ -132,9 +132,14 @@ non-hardware preauthentication; an absent mechanism receives
 `KDC_ERR_PREAUTH_REQUIRED` (25) with the available method hints. Renewable,
 postdated, and validation behavior is covered
 by unit and MIT integration tests. The optional `kdc.Server.Authorize` hook
-mirrors MIT's `kdcpolicy` plugin interface semantics for authenticated AS
-exchanges and validated TGS requests, preserving protocol-range KRB-ERROR
-codes and returning FAST-armored policy errors when denied.
+handles coarse authorization, while `kdc.Server.KDCPolicyModules` provides
+ordered MIT-style AS and TGS issuance policy modules. Modules can deny with a
+protocol KRB-ERROR and status string, or cumulatively cap ticket and renewable
+lifetimes. Policy status is retained in audit events without being sent on the
+wire. The Go tests cover ordered dispatch, cumulative lifetime constraints,
+request context fields, and policy denial/audit propagation; no live `t_kdcpolicy.py`
+gate is enabled because the fixture does not dynamically load MIT policy
+modules.
 
 KDC UDP and TCP dispatches key the complete request packet in a bounded,
 two-minute lookaside cache. Successful AS-REP and TGS-REP responses are

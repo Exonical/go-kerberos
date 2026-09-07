@@ -2991,7 +2991,7 @@ func TestBuildTGSRepPropagatesClientLookupError(t *testing.T) {
 			Components: []string{"host", "service.test"}},
 		service, crypto.EnctypeAES256SHA1, serviceKey,
 		protocol.EncryptionKey{KeyType: crypto.EnctypeAES256SHA1, KeyValue: serviceKey.Key},
-		8, nil, &issuedClient, nil, nil, nil, nil, nil)
+		8, nil, &issuedClient, nil, nil, nil, nil, nil, nil)
 	var kerberosError protocol.KRBError
 	if err := asn1.Unmarshal(response, &kerberosError); err != nil {
 		t.Fatalf("decode KRB-ERROR: %v", err)

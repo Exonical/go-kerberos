@@ -150,6 +150,8 @@ type Server struct {
 	// Hook KRBError codes in the protocol range are returned unchanged; other
 	// errors default to KDC_ERR_POLICY or KRB_ERR_GENERIC as appropriate.
 	Authorize func(client, service principal.Principal, asExchange bool) error
+	// KDCPolicyModules apply ordered MIT-style AS and TGS issuance policy.
+	KDCPolicyModules []KDCPolicyModule
 	// OTPValidator enables RFC 6560 preauthentication for the named
 	// principals. OTP is accepted only inside FAST.
 	OTPValidator func(principal.Principal, string) error
@@ -677,7 +679,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return s.buildASRepWithPreauth(request, clientName, clientRecord,
 			serviceName, serviceRecord, etypeID, clientKey, serviceKey, armor,
 			true, replyKey, replyPAs, customResult.AuthIndicators,
-			customResult.HardwareAuthenticated, customResult.AuthorizationData)
+			customResult.HardwareAuthenticated, customResult.AuthorizationData, auditState)
 	}
 	if anonymousRequest && pkinitPA == nil {
 		if s.PKINITCertificate == nil || s.PKINITSigner == nil {
@@ -772,7 +774,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		replyKey := &kdb.Key{Enctype: armor.etype.ID(), Key: append([]byte(nil), armor.key...)}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, indicators)
+			armor.etype.ID(), clientKey, serviceKey, armor, true, replyKey, nil, indicators, auditState)
 	}
 	if otpEnabled && !requiresHWAuth && armor == nil && !anonymousRequest {
 		return s.errorResponse(kdcErrPreauthFailed, request.ReqBody.SName)
@@ -858,7 +860,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		}
 		return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 			etypeID, clientKey, serviceKey, armor, true, nil, protocol.MethodData{replyPA},
-			configuredIndicator(s.EncryptedChallengeIndicator))
+			configuredIndicator(s.EncryptedChallengeIndicator), auditState)
 	}
 	if !anonymousRequest && !requiresHWAuth && s.EnableSPAKE && spakePA == nil && timestampPA == nil &&
 		pkinitPA == nil && preauthRequired {
@@ -1003,7 +1005,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
 				etypeID, clientKey, serviceKey, armor, true, &kdb.Key{Enctype: etypeID, Key: k0}, nil,
-				append([]string(nil), s.SPAKEPreauthIndicators...))
+				append([]string(nil), s.SPAKEPreauthIndicators...), auditState)
 		}
 	}
 	if pkinitPA != nil {
@@ -1113,7 +1115,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 					return nil
 				}
 				return append(append([]string(nil), s.PKINITIndicators...), certIndicators...)
-			}(), hwauth)
+			}(), hwauth, auditState)
 	}
 	if timestampPA == nil {
 		if !preauthRequired {
@@ -1127,7 +1129,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 				auditState.Stage = AuditIssueTicket
 			}
 			return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-				etypeID, clientKey, serviceKey, armor, false, nil, nil, nil)
+				etypeID, clientKey, serviceKey, armor, false, nil, nil, nil, auditState)
 		}
 		var methodData protocol.MethodData
 		// MIT does not advertise encrypted-timestamp inside FAST.  Offering
@@ -1221,7 +1223,7 @@ func (s *Server) handleASReqCore(request protocol.ASReq, raw []byte, auditState 
 		return response
 	}
 	return s.buildASRep(request, clientName, clientRecord, serviceName, serviceRecord,
-		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil)
+		etypeID, clientKey, serviceKey, armor, true, nil, nil, nil, auditState)
 }
 
 func (s *Server) unwrapFASTASReq(request protocol.ASReq, raw []byte) (protocol.ASReq, *fastContext, int32) {
@@ -1605,21 +1607,25 @@ func (s *Server) issueCAMMAC(ticketPart *protocol.EncTicketPart, serviceKey kdb.
 	return nil
 }
 
-func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string) []byte {
+func (s *Server) buildASRep(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, auditStates ...*AuditState) []byte {
 	return s.buildASRepWithPreauth(request, clientName, clientRecord, serviceName,
 		serviceRecord, etypeID, clientKey, serviceKey, armor, preauthenticated,
-		replyEncryptionKey, replyPAs, assertedIndicators, false, nil)
+		replyEncryptionKey, replyPAs, assertedIndicators, false, nil, auditStates...)
 }
 
-func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool) []byte {
+func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool, auditStates ...*AuditState) []byte {
 	return s.buildASRepWithPreauth(request, clientName, clientRecord, serviceName,
 		serviceRecord, etypeID, clientKey, serviceKey, armor, preauthenticated,
-		replyEncryptionKey, replyPAs, assertedIndicators, hwAuthenticated, nil)
+		replyEncryptionKey, replyPAs, assertedIndicators, hwAuthenticated, nil, auditStates...)
 }
 
-func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool, preauthAuthData protocol.AuthorizationData) []byte {
+func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName principal.Principal, clientRecord kdb.PrincipalRecord, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, clientKey, serviceKey kdb.Key, armor *fastContext, preauthenticated bool, replyEncryptionKey *kdb.Key, replyPAs protocol.MethodData, assertedIndicators []string, hwAuthenticated bool, preauthAuthData protocol.AuthorizationData, auditStates ...*AuditState) []byte {
 	if response := s.requireAuthError(serviceRecord, assertedIndicators, armor, request.ReqBody.SName); response != nil {
 		return response
+	}
+	var auditState *AuditState
+	if len(auditStates) > 0 {
+		auditState = auditStates[0]
 	}
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
@@ -1667,6 +1673,14 @@ func (s *Server) buildASRepWithPreauth(request protocol.ASReq, clientName princi
 		&clientRecord, &serviceRecord)
 	renewTill := s.renewTillRecords(request.ReqBody.KDCOptions, request.ReqBody.RTime,
 		request.ReqBody.Till, startTime.Time, endTime.Time, &clientRecord, &serviceRecord)
+	if err := s.applyASPolicies(request, clientName, serviceName, clientRecord,
+		serviceRecord, assertedIndicators, now, &endTime, &renewTill, auditState); err != nil {
+		if armor != nil {
+			return s.fastErrorResponseWithText(policyErrorCode(err), request.ReqBody.SName,
+				nil, armor.nonce, armor, err.Error())
+		}
+		return s.errorResponseWithText(policyErrorCode(err), request.ReqBody.SName, err.Error())
+	}
 	if s.Policy != nil && !s.Policy.AllowRenewable {
 		renewTill = nil
 	}
@@ -2486,7 +2500,7 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		}
 		auditState.Stage = AuditIssueTicket
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey, authenticator.SubKey)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey, auditState, authenticator.SubKey)
 }
 
 func samePrincipalIdentity(left, right principal.Principal) bool {
@@ -2632,7 +2646,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key, authenticatorSubKeys ...*protocol.EncryptionKey) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key, auditState *AuditState, authenticatorSubKeys ...*protocol.EncryptionKey) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -2651,6 +2665,10 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	} else if ok {
 		clientRecord = &record
+	}
+	authIndicators, err := authIndicatorsFromElements(verifiedCAMMACElements)
+	if err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 	}
 	authTime := ticketPart.AuthTime
 	if !authTime.Present {
@@ -2713,6 +2731,15 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		serviceRecord.Flags&kdb.DisallowRenewable != 0 {
 		flags &^= types.TicketRenewable
 		renewTill = nil
+	}
+	if err := s.applyTGSPolicies(request, serviceName, serviceRecord, headerTicket,
+		authIndicators, now, &endTime, &renewTill, auditState); err != nil {
+		code := policyErrorCode(err)
+		if armor != nil {
+			return s.fastErrorResponseWithText(code, request.ReqBody.SName, nil,
+				armor.nonce, armor, err.Error())
+		}
+		return s.errorResponseWithText(code, request.ReqBody.SName, err.Error())
 	}
 	addresses := append(protocol.HostAddresses(nil), ticketPart.CAddr...)
 	if request.ReqBody.KDCOptions&(types.KDCForwarded|types.KDCProxy) != 0 {
@@ -2786,10 +2813,6 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	}
 	if findPA(request.PAData, protocol.PADataForUser) == nil &&
 		findPA(request.PAData, protocol.PADataS4UX509User) == nil {
-		authIndicators, err := authIndicatorsFromElements(verifiedCAMMACElements)
-		if err != nil {
-			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
-		}
 		if response := s.requireAuthError(serviceRecord, authIndicators,
 			armor, request.ReqBody.SName); response != nil {
 			return response
