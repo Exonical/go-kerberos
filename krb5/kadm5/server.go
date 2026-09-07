@@ -50,8 +50,6 @@ type Server struct {
 	Database Backend
 	// Trace is invoked synchronously from concurrent request goroutines;
 	// callbacks must be safe for concurrent use.
-	// Trace is invoked synchronously from concurrent request goroutines;
-	// callbacks must be safe for concurrent use.
 	Trace          trace.Callback
 	Keytab         *keytab.Keytab
 	AdminPrincipal principal.Principal

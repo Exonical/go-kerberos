@@ -90,8 +90,6 @@ type Server struct {
 	DB    kdb.Store
 	// Trace is invoked synchronously from concurrent request goroutines;
 	// callbacks must be safe for concurrent use.
-	// Trace is invoked synchronously from concurrent request goroutines;
-	// callbacks must be safe for concurrent use.
 	Trace         trace.Callback
 	Logger        *klog.Logger
 	Now           func() time.Time
