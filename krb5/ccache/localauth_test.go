@@ -62,7 +62,7 @@ func TestSelectForServerClosesNonSelectedKCMHandles(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("KCM Unix sockets are unavailable on Windows")
 	}
-	socket := filepath.Join(t.TempDir(), "kcm.sock")
+	socket := shortKCMSocket(t)
 	server := NewKCMServer(socket)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
