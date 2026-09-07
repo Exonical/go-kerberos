@@ -67,6 +67,9 @@ type multiKDCPreauthModule struct {
 	paType    int32
 	indicator string
 	authType  int32
+	flags     int
+	hasFlags  bool
+	count     *int
 }
 
 type replacementKDCPreauthModule struct{}
@@ -113,11 +116,19 @@ func (keySettingKDCPreauthModule) Verify(*PreauthRock, protocol.PAData) (*Verify
 
 func (m multiKDCPreauthModule) Name() string     { return m.name }
 func (m multiKDCPreauthModule) PATypes() []int32 { return []int32{m.paType} }
-func (m multiKDCPreauthModule) Flags(int32) int  { return PARequired }
+func (m multiKDCPreauthModule) Flags(int32) int {
+	if m.hasFlags {
+		return m.flags
+	}
+	return PARequired
+}
 func (m multiKDCPreauthModule) Edata(*PreauthRock, int32) (protocol.PAData, error) {
 	return protocol.PAData{PADataType: m.paType, PADataValue: []byte("hint")}, nil
 }
 func (m multiKDCPreauthModule) Verify(_ *PreauthRock, pa protocol.PAData) (*VerifyResult, error) {
+	if m.count != nil {
+		(*m.count)++
+	}
 	if string(pa.PADataValue) != "answer" {
 		return nil, stderrors.New("unexpected module answer")
 	}
@@ -448,6 +459,159 @@ func TestHardwarePreauthModuleSetsTicketFlag(t *testing.T) {
 	part := asReplyPart(t, finalResponse)
 	if part.Flags&types.TicketHWAuthent == 0 {
 		t.Fatal("module AS reply lacks hardware-authenticated flag")
+	}
+}
+
+func TestRequiresHardwareAuthRejectsNonHardwareCustomPreauth(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	record, ok, err := db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	record.Flags |= kdb.RequiresHWAuth
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	server.PreauthModules = []KDCPreauthModule{testKDCPreauthModule{flags: PARequired}}
+	service := principal.Principal{Realm: server.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", server.Realm}}
+	request := asRequest(user, service, 14)
+	request.PAData = protocol.MethodData{{PADataType: testPluginPAType, PADataValue: []byte("answer")}}
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want preauth failed", failure.ErrorCode)
+	}
+}
+
+func TestRequiresHardwareAuthAcceptsHardwareCustomPreauth(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, kclient := testServer(t, now)
+	db := server.DB.(*kdb.Database)
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	record, ok, err := db.Lookup(user)
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	record.Flags |= kdb.RequiresHWAuth
+	if err := db.UpdatePrincipal(record); err != nil {
+		t.Fatal(err)
+	}
+	server.PreauthModules = []KDCPreauthModule{
+		testKDCPreauthModule{flags: PARequired | PAHardware},
+	}
+	kclient.PreauthModules = []preauth.ClientPreauthModule{testClientPreauthModule{}}
+	var finalResponse []byte
+	kclient.Exchange = func(_ context.Context, _ string, payload []byte) ([]byte, error) {
+		finalResponse = server.HandleMessage(payload)
+		return finalResponse, nil
+	}
+	if _, err := kclient.ASExchange(context.Background(), user, "alice-password"); err != nil {
+		t.Fatal(err)
+	}
+	part := asReplyPart(t, finalResponse)
+	if part.Flags&types.TicketHWAuthent == 0 {
+		t.Fatal("custom hardware preauth did not set HW-AUTHENT")
+	}
+}
+
+func TestKeylessCustomPreauthReplacementKey(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	server.DB = keylessPKINITStore{base: server.DB, client: user}
+	server.PreauthModules = []KDCPreauthModule{replacementKDCPreauthModule{}}
+	service := principal.Principal{Realm: server.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", server.Realm}}
+	request := asRequest(user, service, 16)
+	request.PAData = protocol.MethodData{{PADataType: 2003, PADataValue: []byte("answer")}}
+	var reply protocol.ASRep
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &reply); err != nil {
+		t.Fatalf("keyless replacement exchange: %v", err)
+	}
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := etype.Decrypt(bytes.Repeat([]byte{0x5a}, 16), 3, reply.EncPart.Cipher); err != nil {
+		t.Fatalf("replacement-key AS-REP decrypt: %v", err)
+	}
+}
+
+func TestKeylessCustomPreauthHintsAdvertiseModule(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	server.DB = keylessPKINITStore{base: server.DB, client: user}
+	server.PreauthModules = []KDCPreauthModule{replacementKDCPreauthModule{}}
+	service := principal.Principal{Realm: server.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", server.Realm}}
+	request := asRequest(user, service, 18)
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != int32(25) {
+		t.Fatalf("keyless hint error = %d, want preauth required", failure.ErrorCode)
+	}
+	var methodData protocol.MethodData
+	if err := asn1.Unmarshal(failure.EData, &methodData); err != nil {
+		t.Fatal(err)
+	}
+	if findPA(methodData, 2003) == nil {
+		t.Fatalf("keyless hints = %#v, missing replacement module", methodData)
+	}
+}
+
+func TestKeylessCustomPreauthWithoutReplacementKeyFailsPreauth(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	server.DB = keylessPKINITStore{base: server.DB, client: user}
+	server.PreauthModules = []KDCPreauthModule{testKDCPreauthModule{flags: PARequired}}
+	service := principal.Principal{Realm: server.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", server.Realm}}
+	request := asRequest(user, service, 17)
+	request.PAData = protocol.MethodData{{PADataType: testPluginPAType, PADataValue: []byte("answer")}}
+	var failure protocol.KRBError
+	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
+		t.Fatalf("keyless non-replacement error = %d, want preauth failed", failure.ErrorCode)
+	}
+}
+
+func TestSufficientCustomPreauthStopsFurtherModules(t *testing.T) {
+	now := time.Unix(2000000000, 0).UTC()
+	server, _ := testServer(t, now)
+	firstCount, secondCount := 0, 0
+	server.PreauthModules = []KDCPreauthModule{
+		multiKDCPreauthModule{name: "first", paType: 2001, indicator: "one",
+			authType: 3001, flags: PASufficient, hasFlags: true, count: &firstCount},
+		multiKDCPreauthModule{name: "second", paType: 2002, indicator: "two",
+			authType: 3002, flags: 0, hasFlags: true, count: &secondCount},
+	}
+	user := principal.Principal{Realm: server.Realm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	service := principal.Principal{Realm: server.Realm, NameType: principal.NTSrvInstance,
+		Components: []string{"krbtgt", server.Realm}}
+	request := asRequest(user, service, 15)
+	request.PAData = protocol.MethodData{
+		{PADataType: 2001, PADataValue: []byte("answer")},
+		{PADataType: 2002, PADataValue: []byte("answer")},
+	}
+	var reply protocol.ASRep
+	raw := server.HandleMessage(mustMarshal(t, request))
+	if err := asn1.Unmarshal(raw, &reply); err != nil {
+		t.Fatalf("AS response: %v", err)
+	}
+	if reply.MsgType != 11 || firstCount != 1 || secondCount != 0 {
+		t.Fatalf("reply/counts = %d/%d/%d", reply.MsgType, firstCount, secondCount)
 	}
 }
 

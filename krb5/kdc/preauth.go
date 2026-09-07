@@ -150,6 +150,9 @@ func (s *Server) verifyPreauthModules(rock *PreauthRock,
 				successes = append(successes, preauthModuleSuccess{
 					module: module, paType: pa.PADataType, result: result,
 				})
+				if flags&PASufficient != 0 {
+					return &aggregate, successes, nil
+				}
 			}
 		}
 	}
