@@ -71,6 +71,11 @@ func (e Exchange) Request(ctx context.Context, conn net.PacketConn, address net.
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("transport request: %w", err)
 	}
+	if e.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.Timeout)
+		defer cancel()
+	}
 	if conn == nil {
 		return nil, fmt.Errorf("transport request: nil packet connection")
 	}

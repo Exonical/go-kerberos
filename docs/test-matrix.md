@@ -33,6 +33,7 @@ registry gate.
 | FAST-armored TGS exchange (RFC 6113) | Go unit + Go KDC | MIT `kvno` ordinary TGS path | Go unit |
 | PA-ENCRYPTED-CHALLENGE (RFC 6113) | Go FAST AS client/KDC round trip, wrong-password and outside-FAST rejection | MIT `kinit -T` gate with KRB5_TRACE showing the type-138 challenge exchange (the factor is built into MIT libkrb5 rather than a separate plugin); existing Go FAST-to-MIT coverage exercises fallback when MIT does not advertise type 138 | Usage-54/55 CF2 crypto and response verification |
 | KDC policy and ticket lifecycle | unit + MIT integration | unit coverage | MIT pass |
+| MIT configuration relations (`kdc.conf` and `krb5.conf`) | KDC PAC/transited/anonymous/referral policy; client preauth ordering, request deadlines, address selection, and default KDC options | Profile parsing and runtime mapping are unit-tested; GSS `ignore_acceptor_hostname`, `enforce_ok_as_delegate`, and `client_aware_channel_bindings` remain intentionally skipped because they require broader GSS credential/API changes | Go config, client, transport, and KDC unit coverage |
 | Cross-realm TGS | unit + multi-hop coverage | unit coverage | unit coverage |
 | KDB persistence (MIT dump and stash) | unit + golden | MIT pass (master enctypes 17/18/19/20); Go loads an MIT dump with the real `.k5.REALM` stash | Go dump -> MIT `kdb5_util load` + `kinit`; keytab-format stash round trip |
 | AP exchange and persistent replay cache | Go AP-REQ/AP-REP tests; default in-memory replay detection; MIT-compatible file2 layout, SipHash seed, expiry, collision growth, and concurrent locking tests | `TestMITFile2ReplayCacheAgainstGo` uses MIT `python3-gssapi` as a Kerberos acceptor to populate a `file2:` cache, then verifies Go rejects the same AP token as a replay | Exact file2 record-layout golden, replay/expiry/wraparound, truncation, and same-tag race coverage |
@@ -479,10 +480,31 @@ so this slice has no live MIT gate.
 `config.ParseKDCConf` is covered against generated MIT profile syntax,
 including `[kdcdefaults]` inheritance into `[realms]`, port lists, ticket
 lifetime values, master-key enctype, supported enctypes, authentication
-indicator relations, and preservation of unknown realm settings.
-`kdc.Server.ApplyKDCConf` is covered for listener ports, lifetime settings,
-and authentication indicators that have direct Go server equivalents. The
-integration harness uses the same profile-format KDC configuration with a
+indicator relations, PAC/transited/anonymous policy, host-referral lists,
+and preservation of unknown realm settings. `kdc.Server.ApplyKDCConf`
+applies those supported relations, including `disable_pac`,
+`reject_bad_transit`, `restrict_anonymous_to_tgt`, `host_based_services`, and
+`no_host_referral`. Referral list matching follows MIT token boundaries and
+wildcard behavior.
+
+Client profile coverage includes `preferred_preauth_types` stable padata
+ordering, `request_timeout` as one deadline across UDP/TCP retries,
+`noaddresses`/`extra_addresses` address selection, and
+`kdc_default_options` request defaults. MIT's local-address behavior excludes
+loopback and link-local addresses, while explicit extra addresses are added
+without replacing discovered local addresses.
+
+The requested GSS configuration relations `ignore_acceptor_hostname`,
+`enforce_ok_as_delegate`, and `client_aware_channel_bindings` remain
+intentionally unimplemented in this slice. The current Go GSS constructors
+use explicit acceptor principals/options and already implement channel
+bindings; adding profile-driven hostname matching or delegation policy would
+require an API and credential-selection redesign rather than a localized
+configuration gate. MIT reference points are
+`src/lib/gssapi/krb5/acquire_cred.c`, `init_sec_context.c`, and
+`accept_sec_context.c`.
+
+The integration harness uses the same profile-format KDC configuration with a
 disposable MIT KDC; DNS itself is intentionally not a live integration
 dependency.
 
@@ -746,6 +768,28 @@ and follows MIT default-realm selection, rejecting ambiguous multi-realm
 profiles without an explicit default. The Go iprop master remains in-memory;
 ulogs can be inspected when produced by MIT or explicitly created with the Go
 API.
+
+`gokprop` and `gokpropd` provide standalone full-resync propagation around
+`krb5/kprop`. `gokprop` uses the local host keytab to obtain a
+`host/<replica>` service ticket, sends the configured
+`/var/lib/krb5kdc/replica_datatrans`-style dump to port 754 by default, prints
+MIT's success line, and writes `<dump>.last_prop`. `gokpropd` authenticates
+against its service keytab and `kpropd.acl`, writes the transfer to a
+`from_master`-style replica file, and validates/loads it in-process; `-p`
+executes an external `kdb5_util load -d <database> <dump>` command instead.
+Both commands accept explicit realm, file, keytab, port, database, ACL, and
+PID-file settings. The Go receiver always runs in the foreground, so `-D` is
+an accepted no-op, and `-t` handles one transfer. This follows
+`src/kprop/kprop.c` and `src/kprop/kpropd.c` from MIT Kerberos 1.22.2.
+
+MIT's `kpropd` incremental iprop polling mode is intentionally not enabled by
+the standalone command in this slice. The existing Go `krb5/iprop` APIs
+support authenticated updates and full-resync adapters, but do not provide a
+complete profile-driven `kiprop` RPC polling daemon. `-A` is accepted for
+option compatibility and does not claim incremental behavior; use the
+full-resync path above. No MIT live command gate is enabled when a disposable
+MIT kpropd fixture is unavailable; protocol interoperability is covered by
+the existing `krb5/kprop` gates.
 
 ## Authorization-data plugin parity
 
