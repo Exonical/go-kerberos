@@ -34,6 +34,7 @@ type Handle struct {
 	name           string
 	path           string
 	dir            string
+	cfg            *config.Config
 	memory         *memoryCache
 	memoryHandleMu sync.RWMutex
 	kcm            *kcmHandle
@@ -105,10 +106,20 @@ func ResolveWithConfig(name string, cfg *config.Config) (*Handle, error) {
 			return nil, err
 		}
 	}
+	var (
+		handle *Handle
+		err    error
+	)
 	if strings.HasPrefix(name, "KCM:") && cfg != nil {
-		return ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
+		handle, err = ResolveKCM(strings.TrimPrefix(name, "KCM:"), cfg.KCMSocket)
+	} else {
+		handle, err = Resolve(name)
 	}
-	return Resolve(name)
+	if err != nil {
+		return nil, err
+	}
+	handle.cfg = cfg
+	return handle, nil
 }
 
 // SetDefaultName stores the user's platform default credential-cache name.
@@ -212,7 +223,8 @@ func (h *Handle) Type() Type {
 	return h.typ
 }
 
-// Read loads the cache contents. MEMORY reads return a snapshot.
+// Read loads the cache contents from FILE, DIR, MEMORY, KCM, or KEYRING.
+// MEMORY reads return a snapshot.
 func (h *Handle) Read() (*Cache, error) {
 	if h == nil {
 		return nil, errors.New("ccache: nil handle")
@@ -243,8 +255,8 @@ func (h *Handle) Read() (*Cache, error) {
 	return Read(file)
 }
 
-// Write replaces the cache contents. MEMORY writes publish an isolated
-// snapshot; file-backed caches use mode 0600.
+// Write replaces the cache contents for FILE, DIR, MEMORY, KCM, or KEYRING.
+// MEMORY writes publish an isolated snapshot; file-backed caches use mode 0600.
 func (h *Handle) Write(cache *Cache) error {
 	if h == nil {
 		return errors.New("ccache: nil handle")
@@ -290,6 +302,52 @@ func (h *Handle) Write(cache *Cache) error {
 		return err
 	}
 	return file.Close()
+}
+
+func (h *Handle) modifyCache(fn func(*Cache) error) error {
+	if h.typ == TypeMemory {
+		memoryMu.Lock()
+		h.memoryHandleMu.Lock()
+		memory := h.memory
+		memory.mu.Lock()
+		defer func() {
+			memory.mu.Unlock()
+			h.memoryHandleMu.Unlock()
+			memoryMu.Unlock()
+		}()
+		if memory.destroyed || memory.cache == nil {
+			return os.ErrNotExist
+		}
+		cache := cloneCache(memory.cache)
+		if err := fn(cache); err != nil {
+			return err
+		}
+		memory.cache = cache
+		return nil
+	}
+	if h.typ == TypeFile || h.typ == TypeDir {
+		unlock, err := lockCachePath(h.path)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		cache, err := h.Read()
+		if err != nil {
+			return err
+		}
+		if err := fn(cache); err != nil {
+			return err
+		}
+		return h.Write(cache)
+	}
+	cache, err := h.Read()
+	if err != nil {
+		return err
+	}
+	if err := fn(cache); err != nil {
+		return err
+	}
+	return h.Write(cache)
 }
 
 func (h *Handle) memoryRef() *memoryCache {
