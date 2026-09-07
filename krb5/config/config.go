@@ -44,6 +44,12 @@ type Config struct {
 	PermittedEnctypes       []int32
 	DefaultTKTEnctypes      []int32
 	DefaultTGSEnctypes      []int32
+	PreferredPreauthTypes   []int32
+	RequestTimeout          time.Duration
+	NoAddresses             bool
+	NoAddressesSet          bool
+	ExtraAddresses          []string
+	KDCDefaultOptions       uint32
 	Realms                  map[string][]string
 	DomainRealm             map[string]string
 	Capaths                 map[string][]string
@@ -690,6 +696,25 @@ func applyOption(cfg *Config, section, key string, values []string) error {
 			cfg.DefaultTGSEnctypes = parseEnctypes(values)
 		case "default_tkt_enctypes":
 			cfg.DefaultTKTEnctypes = parseEnctypes(values)
+		case "preferred_preauth_types":
+			cfg.PreferredPreauthTypes = parseInt32List(values)
+		case "request_timeout":
+			duration, err := ParseDuration(value)
+			if err != nil {
+				return err
+			}
+			cfg.RequestTimeout = duration
+		case "noaddresses":
+			cfg.NoAddresses = parseBool(value)
+			cfg.NoAddressesSet = true
+		case "extra_addresses":
+			cfg.ExtraAddresses = append([]string(nil), values...)
+		case "kdc_default_options":
+			options, err := strconv.ParseUint(value, 0, 32)
+			if err != nil {
+				return fmt.Errorf("invalid kdc_default_options")
+			}
+			cfg.KDCDefaultOptions = uint32(options)
 		}
 	case "domain_realm":
 		// Profile keys are case-insensitive for this section, but preserve
@@ -756,6 +781,21 @@ func (cfg *Config) LibDefaultValues(realm, option string) []string {
 	return nil
 }
 
+// NoAddressesEnabled reports the effective MIT default for noaddresses.
+func (cfg *Config) NoAddressesEnabled(realm string) bool {
+	if cfg == nil {
+		return true
+	}
+	values := cfg.LibDefaultValues(realm, "noaddresses")
+	if len(values) == 0 {
+		if cfg.NoAddressesSet {
+			return cfg.NoAddresses
+		}
+		return true
+	}
+	return parseBool(values[len(values)-1])
+}
+
 func addNestedSubsection(cfg *Config, subsection, nested, key string, values []string) {
 	if !strings.EqualFold(nested, "auth_to_local_names") {
 		return
@@ -794,6 +834,21 @@ func parseEnctypes(values []string) []int32 {
 			result = append(result, 26)
 		default:
 			if number, err := strconv.ParseInt(value, 10, 32); err == nil {
+				result = append(result, int32(number))
+			}
+		}
+	}
+	return result
+}
+
+func parseInt32List(values []string) []int32 {
+	result := make([]int32, 0, len(values))
+	for _, value := range values {
+		for _, field := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t'
+		}) {
+			number, err := strconv.ParseInt(field, 0, 32)
+			if err == nil {
 				result = append(result, int32(number))
 			}
 		}

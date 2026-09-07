@@ -25,6 +25,67 @@ import (
 
 const testRealm = "TEST.REALM"
 
+func TestClientConfigRelationsShapeASRequest(t *testing.T) {
+	cfg, err := config.Parse([]byte(`[libdefaults]
+noaddresses = true
+kdc_default_options = 0x4000
+preferred_preauth_types = 14, 17
+request_timeout = 2s
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Config: cfg}
+	name := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}
+	request, err := c.BuildASRequest(name, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReqBody.KDCOptions&types.KDCCanonicalize == 0 &&
+		request.ReqBody.KDCOptions&types.KDCOptions(0x4000) == 0 {
+		t.Fatalf("kdc_default_options not applied: %#x", request.ReqBody.KDCOptions)
+	}
+	if request.ReqBody.Addresses != nil {
+		t.Fatalf("noaddresses request carried addresses: %#v", request.ReqBody.Addresses)
+	}
+	if got := c.requestTimeout(testRealm); got != 2*time.Second {
+		t.Fatalf("request timeout = %v", got)
+	}
+	got := c.sortPreferredPadata(testRealm, protocol.MethodData{
+		{PADataType: 17}, {PADataType: 99}, {PADataType: 14}, {PADataType: 17},
+	})
+	if got[0].PADataType != 14 || got[1].PADataType != 17 ||
+		got[2].PADataType != 99 || got[3].PADataType != 17 {
+		t.Fatalf("preferred padata order = %#v", got)
+	}
+}
+
+func TestClientConfigExtraAddresses(t *testing.T) {
+	cfg, err := config.Parse([]byte(`[libdefaults]
+noaddresses = false
+extra_addresses = 192.0.2.10 2001:db8::10
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Config: cfg}
+	addresses := c.requestAddresses(testRealm)
+	found4, found6 := false, false
+	for _, address := range addresses {
+		if address.AddrType == 2 && string(address.Address) == string([]byte{192, 0, 2, 10}) {
+			found4 = true
+		}
+		if address.AddrType == 24 && string(address.Address) == string([]byte{
+			0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+		}) {
+			found6 = true
+		}
+	}
+	if !found4 || !found6 {
+		t.Fatalf("extra addresses missing: %#v", addresses)
+	}
+}
+
 func TestASExchangePreauthRetry(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	clientPrincipal := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,6 +154,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 		if err != nil {
 			return nil, fmt.Errorf("AS exchange preauthentication: %w", err)
 		}
+		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
 		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
 		if err != nil {
 			return nil, err
@@ -401,6 +403,7 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 		if err != nil {
 			return nil, fmt.Errorf("AS service exchange preauthentication: %w", err)
 		}
+		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
 		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
 		if err != nil {
 			return nil, err
@@ -501,6 +504,7 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 		if err != nil {
 			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
 		}
+		fastReply.PAData = c.sortPreferredPadata(clientPrincipal.Realm, fastReply.PAData)
 		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry)
 		if err != nil {
 			return nil, err
@@ -1215,7 +1219,7 @@ func (c *Client) newTGSReqWithBodyOptions(tgt *Credentials, service principal.Pr
 	if _, err := io.ReadFull(crypto.RandomSource, nonceBytes); err != nil {
 		return protocol.TGSReq{}, 0, nil, protocol.EncryptionKey{}, fmt.Errorf("TGS exchange nonce: %w", err)
 	}
-	options := types.KDCRenewableOK
+	options := types.KDCRenewableOK | c.defaultKDCOptions(realm)
 	if c.canonicalizeEnabled() || referral {
 		options |= types.KDCCanonicalize
 	}
@@ -1449,7 +1453,7 @@ func (c *Client) exchangeRawPayload(ctx context.Context, realm string, payload [
 	}
 	defer conn.Close()
 	exchange := transport.Exchange{
-		Dialer: c.Dialer, Timeout: 5 * time.Second, UDPPreferenceLimit: 1,
+		Dialer: c.Dialer, Timeout: c.requestTimeout(realm), UDPPreferenceLimit: 1,
 	}
 	if c.Config.UDPPreferenceLimit > 0 {
 		exchange.UDPPreferenceLimit = c.Config.UDPPreferenceLimit
@@ -1698,7 +1702,7 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 		}
 		forwardable = c.Config.Forwardable
 	}
-	options := types.KDCRenewableOK
+	options := types.KDCRenewableOK | c.defaultKDCOptions(clientPrincipal.Realm)
 	if forwardable {
 		options |= types.KDCForwardable
 	}
@@ -1715,11 +1719,143 @@ func (c *Client) newASReqForService(clientPrincipal, service principal.Principal
 				NameType:   int32(service.NameType),
 				NameString: append([]string(nil), service.Components...),
 			},
-			Till:  types.KerberosTime{Time: now.Add(lifetime), Present: true},
-			Nonce: randomNonce(nonceBytes),
-			EType: c.asRequestEnctypes(),
+			Till:      types.KerberosTime{Time: now.Add(lifetime), Present: true},
+			Nonce:     randomNonce(nonceBytes),
+			Addresses: c.requestAddresses(clientPrincipal.Realm),
+			EType:     c.asRequestEnctypes(),
 		},
 	}, nil
+}
+
+func (c *Client) defaultKDCOptions(realm string) types.KDCOptions {
+	if c == nil || c.Config == nil {
+		return 0
+	}
+	values := c.Config.LibDefaultValues(realm, "kdc_default_options")
+	if len(values) == 0 {
+		return types.KDCOptions(c.Config.KDCDefaultOptions)
+	}
+	var options uint64
+	for _, value := range values {
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 0, 32)
+		if err == nil {
+			options |= parsed
+		}
+	}
+	return types.KDCOptions(options)
+}
+
+func (c *Client) requestAddresses(realm string) protocol.HostAddresses {
+	if c == nil || c.Config == nil || c.Config.NoAddressesEnabled(realm) {
+		return nil
+	}
+	values := c.Config.LibDefaultValues(realm, "extra_addresses")
+	if len(values) == 0 {
+		values = append([]string(nil), c.Config.ExtraAddresses...)
+	}
+	addresses := make(protocol.HostAddresses, 0)
+	add := func(ip net.IP) {
+		if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			return
+		}
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+			for _, existing := range addresses {
+				if existing.AddrType == 2 && string(existing.Address) == string(ip) {
+					return
+				}
+			}
+			addresses = append(addresses, protocol.HostAddress{AddrType: 2, Address: append([]byte(nil), ip...)})
+			return
+		}
+		for _, existing := range addresses {
+			if existing.AddrType == 24 && string(existing.Address) == string(ip) {
+				return
+			}
+		}
+		addresses = append(addresses, protocol.HostAddress{AddrType: 24, Address: append([]byte(nil), ip...)})
+	}
+	for _, value := range values {
+		for _, field := range strings.Fields(value) {
+			add(net.ParseIP(field))
+		}
+	}
+	if interfaces, err := net.InterfaceAddrs(); err == nil {
+		for _, address := range interfaces {
+			switch value := address.(type) {
+			case *net.IPNet:
+				add(value.IP)
+			case *net.IPAddr:
+				add(value.IP)
+			}
+		}
+	}
+	return addresses
+}
+
+func (c *Client) requestTimeout(realm string) time.Duration {
+	if c == nil || c.Config == nil {
+		return 5 * time.Second
+	}
+	values := c.Config.LibDefaultValues(realm, "request_timeout")
+	if len(values) == 0 {
+		if c.Config.RequestTimeout > 0 {
+			return c.Config.RequestTimeout
+		}
+		return 5 * time.Second
+	}
+	timeout, err := config.ParseDuration(values[len(values)-1])
+	if err != nil || timeout <= 0 {
+		return 5 * time.Second
+	}
+	return timeout
+}
+
+func (c *Client) sortPreferredPadata(realm string, data protocol.MethodData) protocol.MethodData {
+	preferred := []int32{17, 16, 15, 14}
+	if c != nil && c.Config != nil {
+		values := c.Config.LibDefaultValues(realm, "preferred_preauth_types")
+		if len(values) == 0 {
+			preferred = append([]int32(nil), c.Config.PreferredPreauthTypes...)
+		} else {
+			preferred = parsePreferredPadata(values)
+		}
+		if len(preferred) == 0 {
+			preferred = []int32{17, 16, 15, 14}
+		}
+	}
+	result := append(protocol.MethodData(nil), data...)
+	for target, padataType := range preferred {
+		match := -1
+		for i := target; i < len(result); i++ {
+			if result[i].PADataType == padataType {
+				match = i
+				break
+			}
+		}
+		if match < 0 {
+			continue
+		}
+		value := result[match]
+		copy(result[target+1:match+1], result[target:match])
+		result[target] = value
+	}
+	return result
+}
+
+func parsePreferredPadata(values []string) []int32 {
+	result := make([]int32, 0, len(values))
+	for _, value := range values {
+		for _, field := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t'
+		}) {
+			parsed, err := strconv.ParseInt(field, 0, 32)
+			if err == nil {
+				result = append(result, int32(parsed))
+			}
+		}
+	}
+	return result
 }
 
 func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.ASReq) ([]byte, error) {
@@ -1755,7 +1891,7 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 	defer conn.Close()
 	exchange := transport.Exchange{
 		Dialer:             c.Dialer,
-		Timeout:            5 * time.Second,
+		Timeout:            c.requestTimeout(realm),
 		UDPPreferenceLimit: 1,
 	}
 	if c.Config.UDPPreferenceLimit > 0 {

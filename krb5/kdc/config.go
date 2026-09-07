@@ -26,6 +26,12 @@ func (s *Server) ApplyKDCConf(profile *config.KDCConfig, realm string) error {
 	if settings.MaxRenewableLife > 0 {
 		s.MaxRenewableLife = settings.MaxRenewableLife
 	}
+	s.DisablePAC = settings.DisablePAC
+	s.RejectBadTransit = settings.RejectBadTransit
+	s.RejectBadTransitSet = true
+	s.RestrictAnonymousToTGT = settings.RestrictAnonymousToTGT
+	s.HostBasedServices = append([]string(nil), settings.HostBasedServices...)
+	s.NoHostReferral = append([]string(nil), settings.NoHostReferral...)
 	s.UDPPorts = append([]int(nil), settings.KDCPorts...)
 	s.TCPPorts = append([]int(nil), settings.KDCTCPPorts...)
 	s.EncryptedChallengeIndicator = settings.EncryptedChallengeIndicator

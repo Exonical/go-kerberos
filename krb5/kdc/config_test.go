@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
+	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
 func TestApplyKDCConf(t *testing.T) {
@@ -13,6 +14,9 @@ func TestApplyKDCConf(t *testing.T) {
     kdc_ports = 88
     kdc_tcp_ports = 89
     max_life = 10h
+    reject_bad_transit = false
+    host_based_services = host ldap
+    no_host_referral = nfs
 [realms]
     EXAMPLE.COM = {
     max_renewable_life = 2d
@@ -22,6 +26,10 @@ func TestApplyKDCConf(t *testing.T) {
         pkinit_indicator = pkinit
         pkinit_dh_min_bits = P-256
         otp_indicator = otp
+        disable_pac = true
+        restrict_anonymous_to_tgt = true
+        host_based_services = ftp
+        no_host_referral = ldap
     }
 `))
 	if err != nil {
@@ -38,7 +46,57 @@ func TestApplyKDCConf(t *testing.T) {
 		fmt.Sprint(server.SPAKEPreauthIndicators) != "[password hardware]" ||
 		fmt.Sprint(server.PKINITIndicators) != "[pkinit]" ||
 		server.PKINITDHMinBits != "P-256" ||
-		fmt.Sprint(server.OTPIndicators) != "[otp]" {
+		fmt.Sprint(server.OTPIndicators) != "[otp]" ||
+		!server.DisablePAC || !server.RestrictAnonymousToTGT ||
+		server.RejectBadTransit ||
+		fmt.Sprint(server.HostBasedServices) != "[host ldap ftp]" ||
+		fmt.Sprint(server.NoHostReferral) != "[nfs ldap]" {
 		t.Fatalf("server settings = %#v", server)
+	}
+}
+
+func TestKDCConfigRelationRuntimeGates(t *testing.T) {
+	server := &Server{
+		Realm:             "EXAMPLE.COM",
+		HostBasedServices: []string{"host", "ldap"},
+		NoHostReferral:    []string{"ldap"},
+	}
+	host := principal.Principal{
+		Realm: "OTHER.COM", NameType: principal.NTSrvHst,
+		Components: []string{"host", "server.example"},
+	}
+	if !server.referralAllowed(host, true, false) {
+		t.Fatal("host referral unexpectedly denied")
+	}
+	ldap := host
+	ldap.Components = append([]string(nil), host.Components...)
+	ldap.Components[0] = "ldap"
+	if server.referralAllowed(ldap, true, false) {
+		t.Fatal("no_host_referral did not suppress referral")
+	}
+	unknown := host
+	unknown.Components = append([]string(nil), host.Components...)
+	unknown.Components[0] = "ftp"
+	unknown.NameType = principal.NTUnknown
+	if server.referralAllowed(unknown, true, false) {
+		t.Fatal("unlisted NT-UNKNOWN referral allowed")
+	}
+	server.HostBasedServices = []string{"*"}
+	if !server.referralAllowed(unknown, true, false) {
+		t.Fatal("wildcard host referral denied")
+	}
+	if server.referralAllowed(host, false, false) ||
+		server.referralAllowed(host, true, true) {
+		t.Fatal("referral gate ignored request options")
+	}
+	if server.rejectBadTransit() {
+		// The zero-value server preserves MIT's default.
+	} else {
+		t.Fatal("reject_bad_transit default disabled")
+	}
+	server.RejectBadTransit = false
+	server.RejectBadTransitSet = true
+	if server.rejectBadTransit() {
+		t.Fatal("reject_bad_transit override ignored")
 	}
 }
