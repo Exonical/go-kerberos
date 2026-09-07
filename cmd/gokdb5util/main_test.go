@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/kdb/mitdump"
 )
 
@@ -137,5 +138,178 @@ func TestDestroyConfirmation(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMasterKeyLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "old", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "old", "add_mkey", "-e", "18"},
+		strings.NewReader("new\nnew\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "version 2") {
+		t.Fatalf("add_mkey output = %q", out.String())
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "use_mkey", "2", "now"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "update_princ_encryption", "-f", "-v"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	store, err := mitdump.LoadWithMasterPassword(dbPath, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range store.Records() {
+		if record.Name.String() == "K/M@EXAMPLE.COM" {
+			continue
+		}
+		kvno, err := kdb.MKVNO(record.TLData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kvno != 2 {
+			t.Fatalf("%s MKVNO = %d", record.Name, kvno)
+		}
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "-P", "new", "purge_mkeys", "-f"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "1 key(s) purged.") {
+		t.Fatalf("purge_mkeys output = %q", out.String())
+	}
+}
+
+func TestStashUsesSuppliedMasterKeyVersion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	stashPath := filepath.Join(dir, "stash")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "old", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-P", "old", "add_mkey"},
+		strings.NewReader("new\nnew\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-sf", stashPath, "-P", "old", "stash"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	stash, err := mitdump.ReadStash(stashPath, "EXAMPLE.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stash.KVNO != 1 {
+		t.Fatalf("stash KVNO = %d, want 1", stash.KVNO)
+	}
+}
+
+func TestPurgeProtectsSuppliedMasterKeyVersion(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "old", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-P", "old", "add_mkey"},
+		strings.NewReader("new\nnew\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-P", "new", "add_mkey"},
+		strings.NewReader("newer\nnewer\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-P", "newer", "use_mkey", "3", "now"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"-d", dbPath, "-P", "newer", "update_princ_encryption", "-f"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"-d", dbPath, "-P", "old", "purge_mkeys", "-f"},
+		strings.NewReader(""), &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "master key stash file needs updating") {
+		t.Fatalf("purge error = %v", err)
+	}
+}
+
+func TestUseMKeyRejectsOutOfRangeActivationTime(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "password", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	before, err := mitdump.LoadWithMasterPassword(dbPath, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"-d", dbPath, "-P", "password", "use_mkey", "1", "99999999999"},
+		strings.NewReader(""), &out, &out)
+	if err == nil {
+		t.Fatal("out-of-range activation time accepted")
+	}
+	after, err := mitdump.LoadWithMasterPassword(dbPath, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.ActiveMKeys) != len(before.ActiveMKeys) ||
+		after.ActiveMKeys[0] != before.ActiveMKeys[0] {
+		t.Fatalf("activation schedule changed: before=%v after=%v",
+			before.ActiveMKeys, after.ActiveMKeys)
+	}
+}
+
+func TestListMKeysUsesCommandInputForPasswordPrompt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "password", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "list_mkeys"},
+		strings.NewReader("password\n"), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Master keys for Principal: K/M@EXAMPLE.COM") {
+		t.Fatalf("list_mkeys output = %q", out.String())
+	}
+}
+
+func TestTabDumpDoesNotRequireMasterPassword(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "principal")
+	var out bytes.Buffer
+	if err := run([]string{"-r", "EXAMPLE.COM", "-d", dbPath, "-P", "password", "create"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := run([]string{"-d", dbPath, "tabdump", "princ_flags"},
+		strings.NewReader(""), &out, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "principal\tflags") {
+		t.Fatalf("tabdump output = %q", out.String())
 	}
 }
