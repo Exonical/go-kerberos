@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 )
@@ -95,10 +96,10 @@ func normalizeTag(tag []byte) []byte {
 
 // Default resolves the MIT-style default replay cache name.
 func Default(cfg *config.Config) (Cache, error) {
-	if value, ok := os.LookupEnv("KRB5RCACHENAME"); ok {
+	if value, ok := secureenv.Lookup("KRB5RCACHENAME"); ok {
 		return Resolve(value)
 	}
-	if kind, ok := os.LookupEnv("KRB5RCACHETYPE"); ok {
+	if kind, ok := secureenv.Lookup("KRB5RCACHETYPE"); ok {
 		return Resolve(kind + ":")
 	}
 	if cfg != nil && cfg.DefaultRCacheName != "" {
@@ -292,9 +293,9 @@ func (c *Memory) Store(tag []byte, now time.Time, skew time.Duration) error {
 }
 
 func defaultPath() string {
-	dir := os.Getenv("KRB5RCACHEDIR")
+	dir := secureenv.Get("KRB5RCACHEDIR")
 	if dir == "" {
-		dir = os.Getenv("TMPDIR")
+		dir = secureenv.Get("TMPDIR")
 	}
 	if dir == "" {
 		for _, candidate := range []string{"/var/tmp", "/usr/tmp", "/var/usr/tmp", "/tmp"} {

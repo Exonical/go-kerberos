@@ -9,6 +9,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 )
 
 var (
@@ -24,7 +26,7 @@ var (
 func defaultConfigFiles(secure bool) []string {
 	files := make([]string, 0, 5)
 	if !secure {
-		if path := os.Getenv("KRB5_CONFIG"); path != "" {
+		if path := secureenv.Get("KRB5_CONFIG"); path != "" {
 			files = append(files, path)
 		}
 		if path := windowsConfigRegistryValue(registry.CURRENT_USER, "config"); path != "" {

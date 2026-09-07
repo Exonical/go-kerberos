@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -82,7 +83,7 @@ func FileCallback(w io.Writer) Callback {
 // The file is opened once per path and shared process-wide; it remains open
 // for the process lifetime.
 func FromEnv() (Callback, error) {
-	path := os.Getenv("KRB5_TRACE")
+	path := secureenv.Get("KRB5_TRACE")
 	if path == "" {
 		return nil, nil
 	}

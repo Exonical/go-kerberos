@@ -24,8 +24,8 @@ func TestParseUtilEnctype(t *testing.T) {
 
 func TestParseUtilArgs(t *testing.T) {
 	options, err := parseUtilArgs([]string{"-k", "FILE:test.keytab", "-p", "alice@TEST",
-		"-kvno", "3", "-e", "18", "-key", "00ff"})
-	if err != nil || options.KVNO != 3 || options.Key != "00ff" {
+		"-kvno", "3", "-e", "18", "-key"})
+	if err != nil || options.KVNO != 3 || !options.Key {
 		t.Fatalf("options = %#v, err = %v", options, err)
 	}
 }
@@ -113,7 +113,7 @@ func TestUtilRejectsNonFileKeytabs(t *testing.T) {
 		{"list", "-k", "MEMORY:keytab"},
 		{"write_kt", "-k", "MEMORY:keytab"},
 		{"addent", "-k", "MEMORY:keytab", "-p", "alice@TEST",
-			"-kvno", "1", "-e", "18", "-key", strings.Repeat("00", 32)},
+			"-kvno", "1", "-e", "18", "-key"},
 		{"delent", "-k", "MEMORY:keytab", "-slot", "1"},
 	} {
 		if err := runUtil(command, &bytes.Buffer{}, strings.NewReader("")); err == nil {
@@ -126,8 +126,8 @@ func TestUtilWriteFailurePreservesExistingKeytab(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.keytab")
 	name := "FILE:" + path
 	if err := runUtil([]string{"addent", "-k", name, "-p", "alice@TEST",
-		"-kvno", "1", "-e", "18", "-key", strings.Repeat("00", 32)},
-		&bytes.Buffer{}, strings.NewReader("")); err != nil {
+		"-kvno", "1", "-e", "18", "-key"},
+		&bytes.Buffer{}, strings.NewReader(strings.Repeat("00", 32)+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(path)

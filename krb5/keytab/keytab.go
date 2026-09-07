@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
@@ -84,9 +85,9 @@ func resolveWithConfig(name string, cfg *config.Config, client bool) (*Keytab, e
 	expand := false
 	if name == "" {
 		if client {
-			name = os.Getenv("KRB5_CLIENT_KTNAME")
+			name = secureenv.Get("KRB5_CLIENT_KTNAME")
 		} else {
-			name = os.Getenv("KRB5_KTNAME")
+			name = secureenv.Get("KRB5_KTNAME")
 		}
 	}
 	if name == "" && cfg != nil {

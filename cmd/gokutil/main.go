@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Exonical/go-kerberos/cmd/internal/secretinput"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -24,7 +25,7 @@ type utilOptions struct {
 	KVNO         uint64
 	Enctype      string
 	PasswordMode bool
-	Key          string
+	Key          bool
 	Slot         int
 }
 
@@ -97,11 +98,7 @@ func parseUtilArgs(args []string) (utilOptions, error) {
 		case "-password":
 			options.PasswordMode = true
 		case "-key":
-			if i+1 >= len(args) {
-				return utilOptions{}, errors.New("-key requires hex data")
-			}
-			i++
-			options.Key = args[i]
+			options.Key = true
 		case "-slot":
 			if i+1 >= len(args) {
 				return utilOptions{}, errors.New("-slot requires a value")
@@ -194,7 +191,7 @@ func addUtilEntry(options utilOptions, stdin io.Reader) error {
 	if options.Principal == "" || options.Enctype == "" {
 		return errors.New("addent requires -p and -e")
 	}
-	if options.PasswordMode && options.Key != "" {
+	if options.PasswordMode && options.Key {
 		return errors.New("-password and -key are mutually exclusive")
 	}
 	if _, err := keytabFilePath(options.Keytab); err != nil {
@@ -209,8 +206,13 @@ func addUtilEntry(options utilOptions, stdin io.Reader) error {
 		return err
 	}
 	var key []byte
-	if options.Key != "" {
-		key, err = hex.DecodeString(options.Key)
+	if options.Key {
+		value, readErr := secretinput.Read(stdin, os.Stderr,
+			fmt.Sprintf("Key for %s (hex): ", p.String()), false)
+		if readErr != nil {
+			return readErr
+		}
+		key, err = hex.DecodeString(value)
 		if err != nil {
 			return fmt.Errorf("decode key: %w", err)
 		}

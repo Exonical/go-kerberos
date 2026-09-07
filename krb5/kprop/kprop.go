@@ -210,7 +210,7 @@ func DialAndSend(ctx context.Context, address string, creds *client.Credentials,
 type Server struct {
 	Keytab    *keytab.Keytab
 	Realm     string
-	Authorize func(principal.Principal) error
+	Authorize func(principal.Principal, int32) error
 	Load      func(io.Reader, uint64) error
 	Now       func() time.Time
 	ErrorLog  func(error)
@@ -308,7 +308,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) (err error) {
 		return errors.New("kprop: AP-REQ did not request mutual authentication")
 	}
 	if s.Authorize != nil {
-		if err := s.Authorize(request.Client); err != nil {
+		if err := s.Authorize(request.Client, request.SessionKey.KeyType); err != nil {
 			_ = s.writeError(ctx, conn, 45, err.Error())
 			return fmt.Errorf("kprop authorization: %w", err)
 		}
