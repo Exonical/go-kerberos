@@ -9,6 +9,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/ap"
 	"github.com/Exonical/go-kerberos/krb5/asn1"
+	"github.com/Exonical/go-kerberos/krb5/authdata"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
@@ -66,6 +67,7 @@ type Acceptor struct {
 	replayCache     rcache.Cache
 	replayCacheName string
 	channelBindings *ChannelBindings
+	authDataModules []authdata.Module
 }
 
 // AcceptorOptions controls optional replay-cache selection for GSS
@@ -75,6 +77,7 @@ type AcceptorOptions struct {
 	ReplayCacheName string
 	ChannelBindings *ChannelBindings
 	NegoEx          bool
+	AuthDataModules []authdata.Module
 }
 
 // ErrBadBindings identifies channel bindings which do not match.
@@ -101,6 +104,7 @@ type Context struct {
 	endtime              time.Time
 	sendSeq              uint64
 	recvSeq              uint64
+	nameAttributes       *authdata.Context
 }
 
 // NewInitiator creates an initiator for the supplied service credentials.
@@ -195,6 +199,7 @@ func NewAcceptorWithOptions(kt *keytab.Keytab, options AcceptorOptions) *Accepto
 		replayCache:     options.ReplayCache,
 		replayCacheName: options.ReplayCacheName,
 		channelBindings: cloneChannelBindings(options.ChannelBindings),
+		authDataModules: append([]authdata.Module(nil), options.AuthDataModules...),
 	}
 }
 
@@ -463,6 +468,13 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 		source:     verified.Client,
 		target:     verified.Server,
 		endtime:    verified.EndTime.Time,
+	}
+	if len(a.authDataModules) != 0 {
+		ctx.nameAttributes = authdata.NewContext(a.authDataModules...)
+		if err := ctx.nameAttributes.Import(verified.AuthorizationData, authdata.ADUsageAPReq,
+			nil, verified.SessionKey); err != nil {
+			return nil, principal.Principal{}, nil, fmt.Errorf("GSS name authorization data: %w", err)
+		}
 	}
 	if len(delegation) != 0 {
 		var delegated []*client.Credentials

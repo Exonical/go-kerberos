@@ -3,8 +3,10 @@
 package authdata
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/cammac"
@@ -311,4 +313,41 @@ func (c *Context) ExportInternal(restrictAuthenticated bool) (any, error) {
 		}
 	}
 	return nil, errors.New("authdata: internal export unsupported")
+}
+
+// ExportAttributes returns a deterministic internal representation of the
+// current name attributes. It is used by GSS composite-name tokens; it is not
+// a Kerberos authorization-data wire encoding.
+func (c *Context) ExportAttributes() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("authdata: nil context")
+	}
+	types := c.AttributeTypes()
+	sort.Strings(types)
+	var result []byte
+	for _, attribute := range types {
+		value, _, authenticated, complete, err := c.GetAttribute(attribute)
+		if err != nil {
+			if errors.Is(err, ErrAttributeNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(len(attribute)))
+		result = append(result, length[:]...)
+		result = append(result, attribute...)
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		result = append(result, length[:]...)
+		result = append(result, value...)
+		flags := byte(0)
+		if authenticated {
+			flags |= 1
+		}
+		if complete {
+			flags |= 2
+		}
+		result = append(result, flags)
+	}
+	return result, nil
 }

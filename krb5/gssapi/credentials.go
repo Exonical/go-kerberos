@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Exonical/go-kerberos/krb5/authdata"
+	"github.com/Exonical/go-kerberos/krb5/ccache"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -28,12 +30,19 @@ const (
 // or both. Initiator credentials retain the TGT used to obtain service
 // credentials so they can also be used for S4U acquisition.
 type Credential struct {
-	client *client.Client
-	creds  *client.Credentials
-	tgt    *client.Credentials
-	keytab *keytab.Keytab
-	name   *principal.Principal
-	usage  CredentialUsage
+	client           *client.Client
+	creds            *client.Credentials
+	tgt              *client.Credentials
+	keytab           *keytab.Keytab
+	name             *principal.Principal
+	usage            CredentialUsage
+	cache            *ccache.Cache
+	cacheName        string
+	keytabName       string
+	clientKeytabName string
+	rcacheName       string
+	password         string
+	nameAttributes   *authdata.Context
 }
 
 // AcquireInitiatorCredentialWithPassword obtains initial credentials using an
@@ -86,7 +95,11 @@ func AcquireAcceptorCredentialFromFile(path string, name *principal.Principal) (
 		if err != nil {
 			return nil, fmt.Errorf("GSS acquire acceptor credential: %w", err)
 		}
-		return AcquireAcceptorCredential(kt, name)
+		cred, err := AcquireAcceptorCredential(kt, name)
+		if err == nil {
+			cred.keytabName = path
+		}
+		return cred, err
 	}
 	if strings.HasPrefix(path, "FILE:") {
 		path = strings.TrimPrefix(path, "FILE:")
@@ -100,7 +113,11 @@ func AcquireAcceptorCredentialFromFile(path string, name *principal.Principal) (
 	if err != nil {
 		return nil, fmt.Errorf("GSS acquire acceptor credential: %w", err)
 	}
-	return AcquireAcceptorCredential(kt, name)
+	cred, err := AcquireAcceptorCredential(kt, name)
+	if err == nil {
+		cred.keytabName = path
+	}
+	return cred, err
 }
 
 // AcquireDefaultAcceptorCredential opens KRB5_KTNAME or the conventional
