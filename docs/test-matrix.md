@@ -769,6 +769,28 @@ profiles without an explicit default. The Go iprop master remains in-memory;
 ulogs can be inspected when produced by MIT or explicitly created with the Go
 API.
 
+`gokprop` and `gokpropd` provide standalone full-resync propagation around
+`krb5/kprop`. `gokprop` uses the local host keytab to obtain a
+`host/<replica>` service ticket, sends the configured
+`/var/lib/krb5kdc/replica_datatrans`-style dump to port 754 by default, prints
+MIT's success line, and writes `<dump>.last_prop`. `gokpropd` authenticates
+against its service keytab and `kpropd.acl`, writes the transfer to a
+`from_master`-style replica file, and validates/loads it in-process; `-p`
+executes an external `kdb5_util load -d <database> <dump>` command instead.
+Both commands accept explicit realm, file, keytab, port, database, ACL, and
+PID-file settings. The Go receiver always runs in the foreground, so `-D` is
+an accepted no-op, and `-t` handles one transfer. This follows
+`src/kprop/kprop.c` and `src/kprop/kpropd.c` from MIT Kerberos 1.22.2.
+
+MIT's `kpropd` incremental iprop polling mode is intentionally not enabled by
+the standalone command in this slice. The existing Go `krb5/iprop` APIs
+support authenticated updates and full-resync adapters, but do not provide a
+complete profile-driven `kiprop` RPC polling daemon. `-A` is accepted for
+option compatibility and does not claim incremental behavior; use the
+full-resync path above. No MIT live command gate is enabled when a disposable
+MIT kpropd fixture is unavailable; protocol interoperability is covered by
+the existing `krb5/kprop` gates.
+
 ## Authorization-data plugin parity
 
 The KDC exposes MIT-shaped `kdcauthdata` modules through the compile-time
