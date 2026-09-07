@@ -761,6 +761,18 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 	if err != nil {
 		return nil, err
 	}
+	if fastReply.Finished != nil {
+		clientPrincipal = principalFromProtocol(fastReply.Finished.CName)
+		clientPrincipal.Realm = fastReply.Finished.CRealm
+		reply.CRealm = fastReply.Finished.CRealm
+		reply.CName = fastReply.Finished.CName
+	}
+	if fastReply.Finished != nil {
+		data, err = asn1.Marshal(reply)
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange reply: %w", err)
+		}
+	}
 	return c.decodeASRep(data, clientPrincipal, nonce, replyKey.KeyType, replyKey.KeyValue, now)
 }
 
@@ -1507,6 +1519,12 @@ func (c *Client) decodeFASTTGSRep(data []byte, clientPrincipal, service, request
 	replyKey, err = armor.ReplyKey(replyKey, fastReply.StrengthenKey)
 	if err != nil {
 		return nil, false, err
+	}
+	if fastReply.Finished != nil {
+		clientPrincipal = principalFromProtocol(fastReply.Finished.CName)
+		clientPrincipal.Realm = fastReply.Finished.CRealm
+		reply.CRealm = fastReply.Finished.CRealm
+		reply.CName = fastReply.Finished.CName
 	}
 	rewrapped, err := asn1.Marshal(reply)
 	if err != nil {

@@ -184,7 +184,7 @@ func TestDispatchSetStringDeletion(t *testing.T) {
 			key := "delete-me"
 			body.nullableString(&key)
 			body.nullableString(nil)
-			reply := server.dispatch(client, setString, body.bytes())
+			reply := server.dispatch(client, setString, body.bytes(), true)
 			reader := xdrReader{b: reply}
 			api, err := reader.u32()
 			if err != nil {

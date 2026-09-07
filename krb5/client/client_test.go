@@ -240,6 +240,82 @@ func TestASExchangeFASTEchoesKDCookie(t *testing.T) {
 	}
 }
 
+func TestDecodeFASTTGSRepUsesFinishedClient(t *testing.T) {
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	armorKey := bytes.Repeat([]byte{0x11}, etype.KeySize())
+	replyKey := bytes.Repeat([]byte{0x22}, etype.KeySize())
+	ticket := protocol.Ticket{
+		TktVNO: 5, Realm: testRealm,
+		SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance),
+			NameString: []string{"host", "server"}},
+		EncPart: protocol.EncryptedData{EType: etype.ID(), Cipher: []byte{1}},
+	}
+	ticketDER := mustMarshal(t, ticket)
+	now := time.Unix(1000, 0).UTC()
+	partDER := mustMarshal(t, protocol.EncTGSRepPart{
+		Key:      protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: replyKey},
+		Nonce:    7,
+		AuthTime: kerberosTime(now),
+		EndTime:  kerberosTime(now.Add(time.Hour)),
+		SRealm:   testRealm,
+		SName: protocol.PrincipalName{NameType: int32(principal.NTSrvInstance),
+			NameString: []string{"host", "server"}},
+	})
+	encPart, err := etype.Encrypt(replyKey, 9, partDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedChecksum, err := etype.Checksum(armorKey, fast.UsageFinished, ticketDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastResponseDER := mustMarshal(t, protocol.KrbFastResponse{
+		Nonce: 7,
+		Finished: &protocol.KrbFastFinished{
+			Timestamp: kerberosTime(now),
+			CRealm:    testRealm,
+			CName:     protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"alice"}},
+			TicketChecksum: protocol.Checksum{
+				ChecksumType: checksumType(etype.ID()),
+				Checksum:     finishedChecksum,
+			},
+		},
+	})
+	fastCipher, err := etype.Encrypt(armorKey, fast.UsageRep, fastResponseDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastPA := mustMarshal(t, protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+		EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: fastCipher},
+	}})
+	replyDER := mustMarshal(t, protocol.TGSRep{
+		PVNO: 5, MsgType: 13, CRealm: testRealm,
+		CName:   protocol.PrincipalName{NameType: int32(principal.NTPrincipal), NameString: []string{"wrong"}},
+		PAData:  protocol.MethodData{{PADataType: fast.PAFXFast, PADataValue: fastPA}},
+		Ticket:  ticket,
+		EncPart: protocol.EncryptedData{EType: etype.ID(), Cipher: encPart},
+	})
+	service := principal.Principal{
+		Realm: testRealm, NameType: principal.NTSrvInstance,
+		Components: []string{"host", "server"},
+	}
+	got, referral, err := (&Client{}).decodeFASTTGSRep(
+		replyDER,
+		principal.Principal{Realm: testRealm, Components: []string{"wrong"}},
+		service, service, true, 7,
+		protocol.EncryptionKey{KeyType: etype.ID(), KeyValue: replyKey},
+		&fast.Armor{EType: etype, Key: armorKey}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if referral || got.Client.String() != "alice@"+testRealm {
+		t.Fatalf("result = %#v, referral = %v", got, referral)
+	}
+}
+
 func testASExchangeFASTEchoesKDCookie(t *testing.T, encryptedChallenge bool) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	user := principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}}

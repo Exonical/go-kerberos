@@ -248,8 +248,21 @@ func TestS4U2SelfVerifiesReplyChecksumFromFASTResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TGS armor: %v", err)
 	}
+	ticketDER := mustMarshal(t, direct.Ticket)
+	ticketChecksum, err := armor.EType.Checksum(armor.Key, fast.UsageFinished, ticketDER)
+	if err != nil {
+		t.Fatalf("FAST ticket checksum: %v", err)
+	}
 	fastResponse, err := asn1.Marshal(protocol.KrbFastResponse{
 		PAData: direct.PAData, Nonce: 42,
+		Finished: &protocol.KrbFastFinished{
+			Timestamp: types.KerberosTime{Time: time.Unix(1, 0).UTC(), Present: true},
+			CRealm:    direct.CRealm, CName: direct.CName,
+			TicketChecksum: protocol.Checksum{
+				ChecksumType: checksumType(armor.EType.ID()),
+				Checksum:     ticketChecksum,
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("FAST response: %v", err)
@@ -266,7 +279,6 @@ func TestS4U2SelfVerifiesReplyChecksumFromFASTResponse(t *testing.T) {
 	}
 	armored := direct
 	armored.PAData = protocol.MethodData{{PADataType: fast.PAFXFast, PADataValue: wrapper}}
-	ticketDER := mustMarshal(t, armored.Ticket)
 	reply, err := armor.UnwrapReply(armored.PAData, ticketDER, 42)
 	if err != nil {
 		t.Fatalf("unwrap FAST response: %v", err)
