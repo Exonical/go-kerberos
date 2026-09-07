@@ -59,6 +59,7 @@ type Client struct {
 	PreauthModules []preauth.ClientPreauthModule
 	// Trace receives MIT-style diagnostic messages. When nil, KRB5_TRACE is
 	// consulted lazily.
+	// Set Trace before first use; it must not be replaced while exchanges are in flight.
 	Trace     trace.Callback
 	traceOnce *sync.Once
 	envTrace  trace.Callback
@@ -909,7 +910,6 @@ func retryPKINITDHParameters(value *krberrors.KRBError, retries int, client *pki
 
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
-	c.tracef("Requesting tickets for %s, referrals on", trace.Principal(service))
 	candidates, err := c.serviceCandidates(ctx, service)
 	if err != nil {
 		return nil, err
@@ -969,6 +969,7 @@ func (c *Client) tgsExchangeOnceWithMode(ctx context.Context, tgt *Credentials,
 		return nil, fmt.Errorf("TGS exchange: missing service realm")
 	}
 	service = serviceWithRealm(service, realm)
+	c.tracef("Requesting tickets for %s, referrals on", trace.Principal(service))
 	visited := make(map[string]bool)
 	currentTGT := tgt
 	currentRealm := currentTGT.Server.Realm
@@ -1620,7 +1621,13 @@ func (c *Client) exchangeRawPayload(ctx context.Context, realm string, payload [
 	}
 	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
 		c.tracef("Sending HTTPS request to %s", endpoint)
-		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+		response, err := c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+		if err != nil {
+			c.tracef("KDC exchange error: %v", err)
+			return nil, err
+		}
+		c.tracef("Received answer (%d bytes) from %s", len(response), endpoint)
+		return response, nil
 	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
@@ -2093,7 +2100,14 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 		return nil, fmt.Errorf("AS exchange: no KDC configured for realm %q", realm)
 	}
 	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
-		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+		c.tracef("Sending HTTPS request to %s", endpoint)
+		response, err := c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
+		if err != nil {
+			c.tracef("KDC exchange error: %v", err)
+			return nil, err
+		}
+		c.tracef("Received answer (%d bytes) from %s", len(response), endpoint)
+		return response, nil
 	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {

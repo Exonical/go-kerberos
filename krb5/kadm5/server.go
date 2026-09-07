@@ -48,7 +48,8 @@ const (
 // every operation; otherwise only AdminPrincipal is authorized.
 type Server struct {
 	Database Backend
-	// Trace receives MIT-style diagnostic messages when non-nil.
+	// Trace is invoked synchronously from concurrent request goroutines;
+	// callbacks must be safe for concurrent use.
 	Trace          trace.Callback
 	Keytab         *keytab.Keytab
 	AdminPrincipal principal.Principal

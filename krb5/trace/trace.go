@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,11 @@ import (
 type Callback func(message string)
 
 var (
-	now         = time.Now
+	now           = time.Now
+	fileCallbacks = struct {
+		sync.Mutex
+		values map[string]Callback
+	}{values: make(map[string]Callback)}
 	padataNames = map[int32]string{
 		1:   "PA-TGS-REQ",
 		2:   "PA-ENC-TIMESTAMP",
@@ -74,16 +79,29 @@ func FileCallback(w io.Writer) Callback {
 }
 
 // FromEnv opens the file named by KRB5_TRACE and returns a file callback.
+// The file is opened once per path and shared process-wide; it remains open
+// for the process lifetime.
 func FromEnv() (Callback, error) {
 	path := os.Getenv("KRB5_TRACE")
 	if path == "" {
 		return nil, nil
 	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	fileCallbacks.Lock()
+	defer fileCallbacks.Unlock()
+	if callback, ok := fileCallbacks.values[path]; ok {
+		return callback, nil
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	return FileCallback(file), nil
+	callback := FileCallback(file)
+	fileCallbacks.values[path] = callback
+	return callback, nil
 }
 
 // Principal renders a principal in MIT's unparsed form.
