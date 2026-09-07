@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -31,6 +32,9 @@ func TestParsePropArgsExplicitValues(t *testing.T) {
 }
 
 func TestTouchLastProp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve Unix file permission bits")
+	}
 	path := filepath.Join(t.TempDir(), "dump")
 	if err := touchLastProp(path); err != nil {
 		t.Fatal(err)
