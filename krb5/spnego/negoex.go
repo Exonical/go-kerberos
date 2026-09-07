@@ -37,24 +37,6 @@ const (
 	negoExCriticalExtension      uint32 = 0x80000000
 )
 
-const (
-	INITIATOR_NEGO                 = NegoExInitiatorNego
-	ACCEPTOR_NEGO                  = NegoExAcceptorNego
-	INITIATOR_META_DATA            = NegoExInitiatorMetaData
-	ACCEPTOR_META_DATA             = NegoExAcceptorMetaData
-	CHALLENGE                      = NegoExChallenge
-	AP_REQUEST                     = NegoExAPRequest
-	VERIFY                         = NegoExVerify
-	ALERT                          = NegoExAlert
-	MESSAGE_SIGNATURE              = negoExSignature
-	EXTENSION_LENGTH               = 12
-	EXTENSION_FLAG_CRITICAL        = negoExCriticalExtension
-	NEGO_MESSAGE_HEADER_LENGTH     = negoExNegoHeaderSize
-	EXCHANGE_MESSAGE_HEADER_LENGTH = negoExExchangeHeaderSize
-	VERIFY_MESSAGE_HEADER_LENGTH   = negoExVerifyHeaderSize
-	ALERT_MESSAGE_HEADER_LENGTH    = negoExAlertHeaderSize
-)
-
 // NegoExAuthScheme is a little-endian GUID identifying an authentication
 // mechanism in a NegoEx message.
 type NegoExAuthScheme [16]byte
