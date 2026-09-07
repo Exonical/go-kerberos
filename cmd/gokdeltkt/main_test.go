@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 )
 
 func TestDeleteTicketsFromFileCache(t *testing.T) {
+	setDeleteTestConfig(t)
 	client := mustDeletePrincipal(t, "alice@EXAMPLE.COM")
 	first := mustDeletePrincipal(t, "host/one@EXAMPLE.COM")
 	second := mustDeletePrincipal(t, "host/two@EXAMPLE.COM")
@@ -38,6 +40,7 @@ func TestDeleteTicketsFromFileCache(t *testing.T) {
 }
 
 func TestDeleteMissingTicketReturnsError(t *testing.T) {
+	setDeleteTestConfig(t)
 	client := mustDeletePrincipal(t, "alice@EXAMPLE.COM")
 	path := filepath.Join(t.TempDir(), "cache")
 	if err := ccache.WriteName("FILE:"+path, &ccache.Cache{DefaultPrincipal: *client}); err != nil {
@@ -53,6 +56,7 @@ func TestDeleteMissingTicketReturnsError(t *testing.T) {
 }
 
 func TestDeleteQuietlySuppressesParseErrors(t *testing.T) {
+	setDeleteTestConfig(t)
 	client := mustDeletePrincipal(t, "alice@EXAMPLE.COM")
 	path := filepath.Join(t.TempDir(), "cache")
 	if err := ccache.WriteName("FILE:"+path, &ccache.Cache{DefaultPrincipal: *client}); err != nil {
@@ -65,6 +69,15 @@ func TestDeleteQuietlySuppressesParseErrors(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("quiet parse stderr = %q", stderr.String())
 	}
+}
+
+func setDeleteTestConfig(t *testing.T) {
+	t.Helper()
+	profile := filepath.Join(t.TempDir(), "krb5.conf")
+	if err := os.WriteFile(profile, []byte("[libdefaults]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_CONFIG", profile)
 }
 
 func TestDeleteRejectsEmptyArgument(t *testing.T) {
