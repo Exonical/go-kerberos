@@ -261,7 +261,7 @@ func loadReceivedDump(reader io.Reader, size uint64, options propdOptions) error
 	}
 	args := buildLoadArgs(options)
 	command := exec.Command(options.KDBUtil, args...)
-	if output, err := command.CombinedOutput(); err != nil {
+	if output, err := command.CombinedOutput(); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.dangerous-exec-command -- -p intentionally selects an administrator-configured kdb5_util-compatible loader
 		return fmt.Errorf("%s load: %w: %s", options.KDBUtil, err, strings.TrimSpace(string(output)))
 	}
 	return nil
@@ -280,7 +280,7 @@ func buildLoadArgs(options propdOptions) []string {
 }
 
 func writePID(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return fmt.Errorf("create pid directory: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
@@ -290,7 +290,7 @@ func writePID(path string) error {
 }
 
 func writeFileAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.correctness.permissions.incorrect-default-permission -- 0700 directory is intentionally restrictive
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
