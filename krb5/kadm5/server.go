@@ -25,22 +25,23 @@ import (
 
 const (
 	// ServerMaxRecord is the largest RPC record accepted by Server.
-	ServerMaxRecord = 16 << 20
-	authGet         = 43787521
-	authAdd         = 43787522
-	authModify      = 43787523
-	authDelete      = 43787524
-	authChangePass  = 43787572
-	authSetKey      = 43787577
-	authExtract     = 43787587
-	authList        = 43787571
-	protectKeys     = 43787588
-	apiUnsupported  = 43787530
-	passTooShort    = 43787542
-	passClass       = 43787543
-	passReuse       = 43787545
-	passTooSoon     = 43787546
-	authInitial     = 43787581
+	ServerMaxRecord  = 16 << 20
+	authGet          = 43787521
+	authAdd          = 43787522
+	authModify       = 43787523
+	authDelete       = 43787524
+	authChangePass   = 43787572
+	authSetKey       = 43787577
+	authExtract      = 43787587
+	authList         = 43787571
+	authInsufficient = 43787525
+	protectKeys      = 43787588
+	apiUnsupported   = 43787530
+	passTooShort     = 43787542
+	passClass        = 43787543
+	passReuse        = 43787545
+	passTooSoon      = 43787546
+	authInitial      = 43787581
 )
 
 // Server implements the kadm5 RPC service over a TCP listener.
@@ -617,9 +618,6 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		return statusReply(s.API, apiUnsupported)
 	}
 	status := func(code uint32) []byte { return statusReply(api, code) }
-	if isChangePasswordService(service) && !changePasswordProcedure(proc) {
-		return status(authChangePass)
-	}
 	readPrincipal := func() (principal.Principal, error) { return r.principal() }
 	switch proc {
 	case initProcedure:
@@ -628,6 +626,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(0)
 	case createPrincipal:
+		if isChangePasswordService(service) {
+			return status(authAdd)
+		}
 		entry, err := decodeEntry(&r, api)
 		if err != nil {
 			return status(43787548)
@@ -678,6 +679,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		_ = mask
 		return status(0)
 	case createPrincipal3:
+		if isChangePasswordService(service) {
+			return status(authAdd)
+		}
 		entry, err := decodeEntry(&r, api)
 		if err != nil {
 			return status(43787548)
@@ -733,6 +737,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(err))
 	case deletePrincipal:
+		if isChangePasswordService(service) {
+			return status(authDelete)
+		}
 		p, err := readPrincipal()
 		if err != nil || r.done() != nil {
 			return status(43787548)
@@ -741,7 +748,7 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 			return status(authDelete)
 		}
 		if code := s.checkLockdown(p); code != 0 {
-			return status(code)
+			return status(authDelete)
 		}
 		event := HookEvent{Operation: "remove", Principal: p}
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
@@ -753,6 +760,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(err))
 	case modifyPrincipal:
+		if isChangePasswordService(service) {
+			return status(authModify)
+		}
 		entry, err := decodeEntry(&r, api)
 		if err != nil {
 			return status(43787548)
@@ -770,7 +780,7 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		if record.Flags&flagLockdownKeys != 0 && mask&KADM5Attributes != 0 &&
 			uint32(entry.Attributes)&flagLockdownKeys == 0 {
-			return status(protectKeys)
+			return status(authModify)
 		}
 		applyEntry(&record, entry, mask)
 		event := HookEvent{Operation: "modify", Principal: entry.Principal, Entry: entry, Mask: mask}
@@ -783,6 +793,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(err))
 	case renamePrincipal:
+		if isChangePasswordService(service) {
+			return status(authInsufficient)
+		}
 		src, err := readPrincipal()
 		if err != nil {
 			return status(43787548)
@@ -793,6 +806,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		if !s.authorizeRename(client, src, dest) {
 			return status(authModify)
+		}
+		if code := s.checkLockdown(src); code != 0 {
+			return status(authDelete)
 		}
 		event := HookEvent{Operation: "rename", Principal: src, NewPrincipal: dest}
 		if hookErr := s.runHooks(HookPreCommit, event); hookErr != nil {
@@ -811,15 +827,13 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if _, err = r.i32(); err != nil || r.done() != nil {
 			return status(43787548)
 		}
-		if !s.authorize(client, "get", p) {
+		if (!isChangePasswordService(service) || !principalEqual(client, p)) &&
+			!s.authorize(client, "get", p) {
 			return status(authGet)
 		}
 		record, ok, err := s.Database.Lookup(p)
 		if err != nil || !ok {
 			return status(43787534)
-		}
-		if record.Flags&flagLockdownKeys != 0 {
-			record.Keys = nil
 		}
 		w := xdrWriter{}
 		w.raw(status(0))
@@ -859,6 +873,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 			return status(43787548)
 		}
 		if !s.authorize(client, "change-password", p) {
+			return status(authChangePass)
+		}
+		if code := s.checkLockdown(p); code != 0 {
 			return status(authChangePass)
 		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
@@ -918,15 +935,15 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if isChangePasswordService(service) && !principalEqual(client, p) {
 			return status(authChangePass)
 		}
-		if code := s.checkLockdown(p); code != 0 {
-			return status(code)
-		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
 		}
 		keys, err := s.Database.RandomizeKeys(p)
 		if err != nil {
 			return status(kdbCode(err))
+		}
+		if s.checkLockdown(p) == protectKeys {
+			keys = nil
 		}
 		w := xdrWriter{}
 		w.raw(status(0))
@@ -955,9 +972,6 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if isChangePasswordService(service) && !principalEqual(client, p) {
 			return status(authChangePass)
 		}
-		if code := s.checkLockdown(p); code != 0 {
-			return status(code)
-		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
 		}
@@ -965,6 +979,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		keys, err := s.Database.RandomizeKeysWithKeySalts(p, keepOld, toKDBKeySaltTuples(tuples))
 		if err != nil {
 			return status(kdbCode(err))
+		}
+		if s.checkLockdown(p) == protectKeys {
+			keys = nil
 		}
 		w := xdrWriter{}
 		w.raw(status(0))
@@ -995,11 +1012,14 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
+		if isChangePasswordService(service) {
+			return status(authSetKey)
+		}
 		if !s.authorize(client, "set-key", p) {
 			return status(authSetKey)
 		}
 		if code := s.checkLockdown(p); code != 0 {
-			return status(code)
+			return status(authSetKey)
 		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
@@ -1019,6 +1039,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if !s.authorize(client, "purgekeys", p) {
 			return status(authModify)
 		}
+		if isChangePasswordService(service) {
+			return status(authModify)
+		}
 		return status(kdbCode(s.Database.PurgeKeys(p, keepKVNO)))
 	case createAlias:
 		alias, err := readPrincipal()
@@ -1031,6 +1054,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		if !strings.EqualFold(alias.Realm, target.Realm) {
 			return status(43787549)
+		}
+		if isChangePasswordService(service) {
+			return status(authInsufficient)
 		}
 		if !s.authorizePair(client, "add-alias", alias, target) {
 			return status(authAdd)
@@ -1045,6 +1071,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(err))
 	case getPrincs:
+		if isChangePasswordService(service) {
+			return status(authList)
+		}
 		expr, err := r.nullString()
 		if err != nil || r.done() != nil {
 			return status(43787548)
@@ -1055,6 +1084,12 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		names := s.listPrincipals(expr)
 		return stringListReply(api, names)
 	case createPolicy, modifyPolicy:
+		if isChangePasswordService(service) {
+			if proc == createPolicy {
+				return status(authAdd)
+			}
+			return status(authModify)
+		}
 		policy, err := readPolicy(&r, api)
 		if err != nil {
 			return status(43787548)
@@ -1088,6 +1123,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(err))
 	case deletePolicy:
+		if isChangePasswordService(service) {
+			return status(authDelete)
+		}
 		name, err := r.nullString()
 		if err != nil || r.done() != nil {
 			return status(43787548)
@@ -1120,6 +1158,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		writePolicy(&w, policyValue(policy), api)
 		return w.bytes()
 	case getPolicies:
+		if isChangePasswordService(service) {
+			return status(authList)
+		}
 		expr, err := r.nullString()
 		if err != nil || r.done() != nil {
 			return status(43787548)
@@ -1146,6 +1187,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		w.i32(0x7fffffff)
 		return w.bytes()
 	case getStrings:
+		if isChangePasswordService(service) {
+			return status(authGet)
+		}
 		p, err := readPrincipal()
 		if err != nil || r.done() != nil {
 			return status(43787548)
@@ -1171,6 +1215,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return w.bytes()
 	case setString:
+		if isChangePasswordService(service) {
+			return status(authModify)
+		}
 		p, err := readPrincipal()
 		if err != nil {
 			return status(43787548)
@@ -1188,6 +1235,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		return status(kdbCode(s.Database.SetString(p, *key, value)))
 	case extractKeys:
+		if isChangePasswordService(service) {
+			return status(authExtract)
+		}
 		p, err := readPrincipal()
 		if err != nil {
 			return status(43787548)
@@ -1204,7 +1254,7 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 			return status(43787534)
 		}
 		if record.Flags&flagLockdownKeys != 0 {
-			return status(protectKeys)
+			return status(authExtract)
 		}
 		keys := make([]KeyData, 0, len(record.Keys))
 		for _, key := range record.Keys {
@@ -1233,11 +1283,14 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		if err != nil || r.done() != nil {
 			return status(43787548)
 		}
+		if isChangePasswordService(service) {
+			return status(authSetKey)
+		}
 		if !s.authorize(client, "set-key", p) {
 			return status(authSetKey)
 		}
 		if code := s.checkLockdown(p); code != 0 {
-			return status(code)
+			return status(authSetKey)
 		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
@@ -1264,15 +1317,6 @@ func validKadmService(service principal.Principal, realm string) bool {
 func isChangePasswordService(service principal.Principal) bool {
 	return len(service.Components) == 2 && service.Components[0] == "kadmin" &&
 		service.Components[1] == "changepw"
-}
-
-func changePasswordProcedure(proc uint32) bool {
-	switch proc {
-	case chpassPrincipal, chpassPrincipal3, chrandPrincipal, chrandPrincipal3, getPolicy:
-		return true
-	default:
-		return false
-	}
 }
 
 func statusReply(api, code uint32) []byte {
