@@ -95,6 +95,7 @@ type Context struct {
 	prfFull              protocol.EncryptionKey
 	initiator            bool
 	flags                uint32
+	ticketFlags          types.TicketFlags
 	dceStyle             bool
 	DelegatedCredentials []*client.Credentials
 	acceptorSubkey       bool
@@ -105,6 +106,11 @@ type Context struct {
 	sendSeq              uint64
 	recvSeq              uint64
 	nameAttributes       *authdata.Context
+}
+
+// InitialTicket reports whether the accepted AP-REQ used an initial ticket.
+func (c *Context) InitialTicket() bool {
+	return c != nil && c.ticketFlags&types.TicketInitial != 0
 }
 
 // NewInitiator creates an initiator for the supplied service credentials.
@@ -460,14 +466,15 @@ func (a *Acceptor) acceptWithConversation(token []byte, now time.Time, conversat
 		}
 	}
 	ctx := &Context{
-		key:        contextKey(verified.SessionKey, verified.SubKey),
-		prfPartial: contextKey(verified.SessionKey, verified.SubKey),
-		prfFull:    contextKey(verified.SessionKey, verified.SubKey),
-		flags:      flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
-		recvSeq:    sequenceValue(verified.SeqNumber),
-		source:     verified.Client,
-		target:     verified.Server,
-		endtime:    verified.EndTime.Time,
+		key:         contextKey(verified.SessionKey, verified.SubKey),
+		prfPartial:  contextKey(verified.SessionKey, verified.SubKey),
+		prfFull:     contextKey(verified.SessionKey, verified.SubKey),
+		ticketFlags: verified.Flags,
+		flags:       flags | channelBoundFlagForChecksum(verified.Checksum, a.channelBindings),
+		recvSeq:     sequenceValue(verified.SeqNumber),
+		source:      verified.Client,
+		target:      verified.Server,
+		endtime:     verified.EndTime.Time,
 	}
 	if len(a.authDataModules) != 0 {
 		ctx.nameAttributes = authdata.NewContext(a.authDataModules...)

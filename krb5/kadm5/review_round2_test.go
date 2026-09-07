@@ -127,6 +127,26 @@ func TestSelfRandKeyMinimumLifeAndKeepOldClamp(t *testing.T) {
 	}
 }
 
+func TestSelfChangePasswordRequiresInitialTicket(t *testing.T) {
+	db := kdb.NewDatabase("TEST.REALM")
+	if err := db.AddPrincipal("alice", "password"); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(db, nil)
+	server.ACL = func(_ principal.Principal, operation string, _ principal.Principal) bool {
+		return operation == "change-password"
+	}
+	p := reviewRound2Principal(t, "alice@TEST.REALM")
+	w := xdrWriter{}
+	w.u32(APIv4)
+	w.principal(p)
+	w.nullString("new-password")
+	reply := server.dispatch(p, chpassPrincipal, w.bytes(), false)
+	if got := reviewRound2Status(reply); got != authInitial {
+		t.Fatalf("CHPASS non-initial status = %d, want %d", got, authInitial)
+	}
+}
+
 func TestServeRejectsTypedNilBackend(t *testing.T) {
 	var db *kdb.Database
 	server := NewServer(db, &keytab.Keytab{})

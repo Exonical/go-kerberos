@@ -818,6 +818,9 @@ func (c *Client) VerifyPAASRepWithContext(data []byte, anchors *x509.CertPool,
 	if c == nil {
 		return nil, errors.New("pkinit: nil client")
 	}
+	if anchors == nil {
+		return nil, errors.New("pkinit: KDC certificate trust anchors are required")
+	}
 	if err := requireSingleTLV(data); err != nil {
 		return nil, err
 	}

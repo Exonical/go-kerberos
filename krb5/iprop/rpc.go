@@ -653,8 +653,14 @@ func (s *Server) handleGSS(call rpcCall, session *serverSession) ([]byte, *serve
 	var plain []byte
 	if protectedSeq+1 == verifierSeq {
 		plain, err = session.ctx.Unwrap(protected)
-		if err == nil && len(plain) >= 4 && binary.BigEndian.Uint32(plain[:4]) == seq {
+		if err == nil {
 			err = session.ctx.VerifyMIC(call.prefix, call.verifier)
+		}
+		if err == nil && len(plain) < 4 {
+			err = errors.New("iprop: short GSS payload")
+		}
+		if err == nil && binary.BigEndian.Uint32(plain[:4]) != seq {
+			err = errors.New("iprop: bad sequence")
 		}
 	} else if verifierSeq+1 == protectedSeq {
 		err = session.ctx.VerifyMIC(call.prefix, call.verifier)

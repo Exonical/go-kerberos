@@ -521,7 +521,9 @@ func TestECSPKIAndExchangeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s reply: %v", GroupName(group), err)
 		}
-		derived, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+		roots := x509.NewCertPool()
+		roots.AddCert(kdcCert)
+		derived, err := client.VerifyPAASRep(pa.PADataValue, roots, crypto.EnctypeAES256SHA1, 42)
 		if err != nil {
 			t.Fatalf("%s verify: %v", GroupName(group), err)
 		}
@@ -713,6 +715,9 @@ func TestVerifyPAASRepRejectsDegenerateServerPublicValues(t *testing.T) {
 	client, err := NewClient(clientCert, clientKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := client.VerifyPAASRep(nil, nil, crypto.EnctypeAES256SHA1, 42); err == nil {
+		t.Fatal("KDC reply verification accepted missing trust anchors")
 	}
 	kdcCert, kdcKey := testPKINITCertificate(t, "krbtgt", "PKINIT.TEST",
 		asn1.ObjectIdentifier{1, 3, 6, 1, 5, 2, 3, 5})
@@ -916,7 +921,9 @@ func TestBuildPAASRepRoundTrip(t *testing.T) {
 	if pa.PADataType != PADataASRep || len(replyKey) == 0 {
 		t.Fatalf("PA-PK-AS-REP = %#v, key length %d", pa, len(replyKey))
 	}
-	derivedKey, err := client.VerifyPAASRep(pa.PADataValue, nil, crypto.EnctypeAES256SHA1, 42)
+	roots := x509.NewCertPool()
+	roots.AddCert(kdcCert)
+	derivedKey, err := client.VerifyPAASRep(pa.PADataValue, roots, crypto.EnctypeAES256SHA1, 42)
 	if err != nil {
 		t.Fatal(err)
 	}

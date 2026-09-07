@@ -181,6 +181,13 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 					state.mu.Lock()
 					pending := state.pending
 					state.mu.Unlock()
+					var classified *kprop.ServeConnError
+					if errors.As(serveErr, &classified) && !classified.Authenticated {
+						if options.Debug {
+							fmt.Fprintln(errOut, serveErr)
+						}
+						return
+					}
 					if pending {
 						select {
 						case state.fullResync <- serveErr:

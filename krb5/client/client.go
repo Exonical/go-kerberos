@@ -761,6 +761,10 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 	if err != nil {
 		return nil, err
 	}
+	if fastReply.Finished != nil {
+		clientPrincipal = principalFromProtocol(fastReply.Finished.CName)
+		clientPrincipal.Realm = fastReply.Finished.CRealm
+	}
 	return c.decodeASRep(data, clientPrincipal, nonce, replyKey.KeyType, replyKey.KeyValue, now)
 }
 

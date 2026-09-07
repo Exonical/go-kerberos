@@ -39,6 +39,7 @@ const (
 	passClass       = 43787543
 	passReuse       = 43787545
 	passTooSoon     = 43787546
+	authInitial     = 43787581
 )
 
 // Server implements the kadm5 RPC service over a TCP listener.
@@ -193,6 +194,7 @@ func (s *Server) ServeWithIPROP(kadmListener, ipropListener net.Listener,
 type serverSession struct {
 	ctx       *gssapi.Context
 	client    principal.Principal
+	initial   bool
 	handle    []byte
 	next      uint32
 	gssSeqSet bool
@@ -336,7 +338,7 @@ func (s *Server) handleGSS(_ net.Conn, call rpcCall, session *serverSession) ([]
 			if _, err := rand.Read(handle); err != nil {
 				return nil, nil, err
 			}
-			session = &serverSession{ctx: ctx, client: client, handle: handle, next: 1}
+			session = &serverSession{ctx: ctx, client: client, initial: ctx.InitialTicket(), handle: handle, next: 1}
 		} else {
 			ctx, _, responseToken, err = acceptor.AcceptWithPrincipal(token, nowUTC())
 			if err != nil {
@@ -387,10 +389,16 @@ func (s *Server) handleGSS(_ net.Conn, call rpcCall, session *serverSession) ([]
 	var plain []byte
 	if protectedSeq+1 == verifierSeq {
 		plain, err = session.ctx.Unwrap(protected)
-		if err != nil || len(plain) < 4 || binary.BigEndian.Uint32(plain[:4]) != seq {
-			return rpcErrorReply(call.xid, 1), session, nil
+		if err == nil {
+			err = session.ctx.VerifyMIC(call.prefix, call.verifier)
 		}
-		if err := session.ctx.VerifyMIC(call.prefix, call.verifier); err != nil {
+		if err == nil && len(plain) < 4 {
+			err = errors.New("kadm5: short GSS payload")
+		}
+		if err == nil && binary.BigEndian.Uint32(plain[:4]) != seq {
+			err = errors.New("kadm5: bad sequence")
+		}
+		if err != nil {
 			return rpcErrorReply(call.xid, 1), session, nil
 		}
 	} else if verifierSeq+1 == protectedSeq {
@@ -408,7 +416,7 @@ func (s *Server) handleGSS(_ net.Conn, call rpcCall, session *serverSession) ([]
 		return rpcErrorReply(call.xid, 3), session, nil
 	}
 	session.next++
-	result := s.dispatch(session.client, call.proc, plain[4:])
+	result := s.dispatch(session.client, call.proc, plain[4:], session.initial)
 	replyPlain := append(seqBytes(seq), result...)
 	var wrapped, replyVerifier []byte
 	if verifierSeq+1 == protectedSeq {
@@ -588,7 +596,11 @@ func principalEqual(a, b principal.Principal) bool {
 	return true
 }
 
-func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) []byte {
+func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte, initialOpt ...bool) []byte {
+	initial := true
+	if len(initialOpt) > 0 {
+		initial = initialOpt[0]
+	}
 	defer s.endAuth()
 	if s.Trace != nil {
 		s.Trace(fmt.Sprintf("kadm5: request from %s procedure %d",
@@ -834,6 +846,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "change-password", p) {
 			return status(authChangePass)
 		}
+		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
+			return status(code)
+		}
 		record, ok, err := s.Database.Lookup(p)
 		if err != nil || !ok {
 			return status(43787534)
@@ -879,7 +894,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "randkey", p) {
 			return status(authChangePass)
 		}
-		if code := s.checkSelfKeyChange(client, p); code != 0 {
+		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
 		}
 		keys, err := s.Database.RandomizeKeys(p)
@@ -910,7 +925,7 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "randkey", p) {
 			return status(authChangePass)
 		}
-		if code := s.checkSelfKeyChange(client, p); code != 0 {
+		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
 		}
 		keepOld = clampSelfKeepOld(client, p, keepOld)
@@ -949,6 +964,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		}
 		if !s.authorize(client, "set-key", p) {
 			return status(authSetKey)
+		}
+		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
+			return status(code)
 		}
 		_ = tuples
 		err = s.Database.SetKeys(p, keys, keepOld)
@@ -1176,6 +1194,9 @@ func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) 
 		if !s.authorize(client, "set-key", p) {
 			return status(authSetKey)
 		}
+		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
+			return status(code)
+		}
 		out := make([]kdb.Key, 0, len(keys))
 		for _, key := range keys {
 			out = append(out, kdb.Key{Enctype: key.Enctype, KVNO: key.KVNO, Key: key.Key, Salt: string(key.Salt)})
@@ -1203,8 +1224,15 @@ func (s *Server) now() time.Time {
 }
 
 func (s *Server) checkSelfKeyChange(client, target principal.Principal) uint32 {
+	return s.checkSelfKeyChangeWithInitial(client, target, true)
+}
+
+func (s *Server) checkSelfKeyChangeWithInitial(client, target principal.Principal, initial bool) uint32 {
 	if !principalEqual(client, target) {
 		return 0
+	}
+	if !initial {
+		return authInitial
 	}
 	record, ok, err := s.Database.Lookup(target)
 	if err != nil || !ok || record.Policy == "" {
