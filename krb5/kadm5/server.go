@@ -596,11 +596,7 @@ func principalEqual(a, b principal.Principal) bool {
 	return true
 }
 
-func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte, initialOpt ...bool) []byte {
-	initial := true
-	if len(initialOpt) > 0 {
-		initial = initialOpt[0]
-	}
+func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte, initial bool) []byte {
 	defer s.endAuth()
 	if s.Trace != nil {
 		s.Trace(fmt.Sprintf("kadm5: request from %s procedure %d",

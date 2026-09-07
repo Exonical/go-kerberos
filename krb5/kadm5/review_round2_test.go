@@ -46,7 +46,7 @@ func TestCreatePrincipal3RejectsConflictingKeySaltTuples(t *testing.T) {
 		{Enctype: crypto.EnctypeAES128SHA1, SaltType: 0},
 		{Enctype: crypto.EnctypeAES128SHA1, SaltType: 2},
 	})
-	reply := server.dispatch(server.AdminPrincipal, createPrincipal3, body)
+	reply := server.dispatch(server.AdminPrincipal, createPrincipal3, body, true)
 	if got := reviewRound2Status(reply); got != 43787578 {
 		t.Fatalf("CREATE_PRINCIPAL3 status = %d, want %d", got, 43787578)
 	}
@@ -71,7 +71,7 @@ func TestChrandPrincipal3RejectsConflictingKeySaltTuples(t *testing.T) {
 		{Enctype: crypto.EnctypeAES128SHA1, SaltType: 0},
 		{Enctype: crypto.EnctypeAES128SHA1, SaltType: 2},
 	})
-	reply := server.dispatch(server.AdminPrincipal, chrandPrincipal3, w.bytes())
+	reply := server.dispatch(server.AdminPrincipal, chrandPrincipal3, w.bytes(), true)
 	if got := reviewRound2Status(reply); got != 43787578 {
 		t.Fatalf("CHRAND_PRINCIPAL3 status = %d, want %d", got, 43787578)
 	}
@@ -90,7 +90,7 @@ func TestCreateAliasAuthorizesAliasAndTarget(t *testing.T) {
 	w.u32(APIv4)
 	w.principal(reviewRound2Principal(t, "alias@TEST.REALM"))
 	w.principal(reviewRound2Principal(t, "target@TEST.REALM"))
-	reply := server.dispatch(reviewRound2Principal(t, "client@TEST.REALM"), createAlias, w.bytes())
+	reply := server.dispatch(reviewRound2Principal(t, "client@TEST.REALM"), createAlias, w.bytes(), true)
 	if got := reviewRound2Status(reply); got != authAdd {
 		t.Fatalf("CREATE_ALIAS status = %d, want %d", got, authAdd)
 	}
