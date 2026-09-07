@@ -44,6 +44,10 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	stashPath, stash, err := loadIncrementalMasterKey(realm, options)
+	if err != nil {
+		return err
+	}
 	adminHost, adminPort := ipropAdminAddress(cfg, realm, options.AdminServer)
 	entries := kt.EntriesSnapshot()
 	clientPrincipal, err := localIpropPrincipal(ctx, cfg, realm)
@@ -101,13 +105,11 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 	}
 	defer ulog.Close()
 	replica := &iprop.Replica{Client: ipropClient, Database: kdb.NewDatabase(realm),
-		Cursor: cursor, Ulog: ulog}
+		Cursor: cursor, Ulog: ulog, MasterEnctype: stash.Enctype,
+		MasterKey: append([]byte(nil), stash.Key...)}
 	state := &incrementalState{replica: replica, ulog: ulog,
 		fullResync: make(chan error, 1)}
 	replica.Persist = func() error {
-		if replica.MasterEnctype == 0 || len(replica.MasterKey) == 0 {
-			return errors.New("iprop: incremental database persistence requires a master key")
-		}
 		data, err := mitdump.DumpWithMasterKey(replica.Database,
 			replica.MasterEnctype, replica.MasterKey)
 		if err != nil {
@@ -192,8 +194,8 @@ func runIncremental(ctx context.Context, options propdOptions, cfg *config.Confi
 		}
 	}()
 	if options.Debug {
-		fmt.Fprintf(errOut, "incremental iprop master %s:%s, polling every %s\n",
-			adminHost, adminPort, poll)
+		fmt.Fprintf(errOut, "incremental iprop master %s:%s, polling every %s, master-key stash %s\n",
+			adminHost, adminPort, poll, stashPath)
 	}
 
 	backoff := 0
@@ -433,6 +435,39 @@ func ipropSettings(cfg *config.Config, realm string, options propdOptions) (stri
 		}
 	}
 	return ulogPath, poll, ulogSize, resyncTimeout, nil
+}
+
+func loadIncrementalMasterKey(realm string, options propdOptions) (string, mitdump.StashKey, error) {
+	path := strings.TrimSpace(options.Stash)
+	if path == "" {
+		path = defaultIncrementalStashPath(realm)
+	}
+	stash, err := mitdump.ReadStash(path, realm)
+	if err != nil {
+		return path, mitdump.StashKey{}, fmt.Errorf(
+			"incremental iprop requires the master key stash %s: %w", path, err)
+	}
+	return path, stash, nil
+}
+
+func defaultIncrementalStashPath(realm string) string {
+	const defaultKeyFileStub = "/var/lib/krb5kdc/.k5."
+	path := os.Getenv("KRB5_KDC_PROFILE")
+	if path == "" {
+		path = "/etc/krb5kdc/kdc.conf"
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		if profile, err := config.ParseKDCConf(data); err == nil {
+			values := profile.Defaults
+			if settings, ok := profile.Realm(realm); ok {
+				values = settings.Values
+			}
+			if stash := strings.TrimSpace(strings.Join(values["key_stash_file"], " ")); stash != "" {
+				return stash
+			}
+		}
+	}
+	return defaultKeyFileStub + realm
 }
 
 func profileIpropEnabled(realm string) bool {

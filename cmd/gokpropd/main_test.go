@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,13 +40,14 @@ func TestParsePropdArgsDefaults(t *testing.T) {
 
 func TestParsePropdArgsExplicitValues(t *testing.T) {
 	options, err := parsePropdArgs([]string{"-r", "EXAMPLE.COM", "-s", "kt",
-		"-d", "-D", "-S", "-f", "replica", "-F", "db", "-p", "loader",
+		"-sf", "stash", "-d", "-D", "-S", "-f", "replica", "-F", "db", "-p", "loader",
 		"-x", "foo", "-x", "bar", "-P", "1754", "-a", "acl", "-A", "admin",
 		"--pid-file", "pid", "-t"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if options.Realm != "EXAMPLE.COM" || options.Keytab != "kt" ||
+		options.Stash != "stash" ||
 		!options.Debug || !options.NoDaemon || !options.Standalone ||
 		options.ReplicaFile != "replica" || options.Database != "db" ||
 		options.KDBUtil != "loader" || options.Port != "1754" ||
@@ -53,6 +55,55 @@ func TestParsePropdArgsExplicitValues(t *testing.T) {
 		options.PIDFile != "pid" || !options.RunOnce ||
 		!reflect.DeepEqual(options.DBArgs, []string{"foo", "bar"}) {
 		t.Fatalf("options = %#v", options)
+	}
+}
+
+func TestLoadIncrementalMasterKeyFromStash(t *testing.T) {
+	const realm = "EXAMPLE.COM"
+	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x41}, etype.KeySize())
+	stashPath := filepath.Join(t.TempDir(), "stash")
+	if err := mitdump.WriteStashFile(stashPath, realm, etype.ID(), 7, key); err != nil {
+		t.Fatal(err)
+	}
+	path, stash, err := loadIncrementalMasterKey(realm, propdOptions{Stash: stashPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != stashPath || stash.Enctype != etype.ID() || stash.KVNO != 7 ||
+		!bytes.Equal(stash.Key, key) {
+		t.Fatalf("stash = %q, %#v", path, stash)
+	}
+	db := kdb.NewDatabase(realm)
+	if err := db.AddPrincipal("alice", "password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mitdump.DumpWithMasterKey(db, stash.Enctype, stash.Key); err != nil {
+		t.Fatalf("persistence dump: %v", err)
+	}
+}
+
+func TestLoadIncrementalMasterKeyMissingStash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-stash")
+	_, _, err := loadIncrementalMasterKey("EXAMPLE.COM", propdOptions{Stash: path})
+	if err == nil || !strings.Contains(err.Error(),
+		"incremental iprop requires the master key stash "+path) {
+		t.Fatalf("missing stash error = %v", err)
+	}
+}
+
+func TestDefaultIncrementalStashPathUsesProfile(t *testing.T) {
+	stashPath := filepath.Join(t.TempDir(), "profile-stash")
+	profilePath := filepath.Join(t.TempDir(), "kdc.conf")
+	if err := os.WriteFile(profilePath, []byte("[realms]\nEXAMPLE.COM = {\n  key_stash_file = "+stashPath+"\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KRB5_KDC_PROFILE", profilePath)
+	if got := defaultIncrementalStashPath("EXAMPLE.COM"); got != stashPath {
+		t.Fatalf("stash path = %q, want %q", got, stashPath)
 	}
 }
 

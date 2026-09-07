@@ -29,6 +29,7 @@ const (
 type propdOptions struct {
 	Realm       string
 	Keytab      string
+	Stash       string
 	Debug       bool
 	NoDaemon    bool
 	Standalone  bool
@@ -61,6 +62,8 @@ func parsePropdArgs(args []string) (propdOptions, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&options.Realm, "r", "", "realm")
 	fs.StringVar(&options.Keytab, "s", "", "keytab")
+	fs.StringVar(&options.Stash, "sf", "", "master-key stash file")
+	fs.StringVar(&options.Stash, "stash-file", "", "master-key stash file")
 	fs.BoolVar(&options.Debug, "d", false, "debug")
 	fs.BoolVar(&options.NoDaemon, "D", false, "do not daemonize")
 	fs.BoolVar(&options.Standalone, "S", false, "standalone mode")
@@ -77,7 +80,7 @@ func parsePropdArgs(args []string) (propdOptions, error) {
 		return propdOptions{}, err
 	}
 	if fs.NArg() != 0 {
-		return propdOptions{}, errors.New("usage: gokpropd [-r realm] [-s keytab] [-d] [-D] [-S] [-f replica_file] [-F kerberos_db_file] [-p kdb5_util_pathname] [-x db_args] [-P port] [-a acl_file] [-A admin_server] [--pid-file=pid_file] [-t]")
+		return propdOptions{}, errors.New("usage: gokpropd [-r realm] [-s keytab] [-sf stash_file] [-d] [-D] [-S] [-f replica_file] [-F kerberos_db_file] [-p kdb5_util_pathname] [-x db_args] [-P port] [-a acl_file] [-A admin_server] [--pid-file=pid_file] [-t]")
 	}
 	if _, err := net.LookupPort("tcp", options.Port); err != nil {
 		return propdOptions{}, fmt.Errorf("invalid port %q: %w", options.Port, err)
