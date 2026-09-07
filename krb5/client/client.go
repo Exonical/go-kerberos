@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
@@ -29,6 +30,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/spake"
+	"github.com/Exonical/go-kerberos/krb5/trace"
 	"github.com/Exonical/go-kerberos/krb5/transport"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -55,6 +57,11 @@ type Client struct {
 	// PreauthModules contains compile-time registered client preauthentication
 	// modules. Built-in mechanisms retain precedence for their PA types.
 	PreauthModules []preauth.ClientPreauthModule
+	// Trace receives MIT-style diagnostic messages. When nil, KRB5_TRACE is
+	// consulted lazily.
+	Trace     trace.Callback
+	traceOnce *sync.Once
+	envTrace  trace.Callback
 }
 
 // Credentials contains the initial credentials returned by an AS exchange.
@@ -110,6 +117,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 	if clientPrincipal.Realm == "" || len(clientPrincipal.Components) == 0 {
 		return nil, fmt.Errorf("AS exchange: invalid client principal")
 	}
+	c.tracef("Getting initial credentials for %s", trace.Principal(clientPrincipal))
 	now := time.Now().UTC()
 	if c.Now != nil {
 		now = c.Now().UTC()
@@ -901,6 +909,7 @@ func retryPKINITDHParameters(value *krberrors.KRBError, retries int, client *pki
 
 // TGSExchange obtains a service ticket using an existing TGT.
 func (c *Client) TGSExchange(ctx context.Context, tgt *Credentials, service principal.Principal) (*Credentials, error) {
+	c.tracef("Requesting tickets for %s, referrals on", trace.Principal(service))
 	candidates, err := c.serviceCandidates(ctx, service)
 	if err != nil {
 		return nil, err
@@ -1591,21 +1600,26 @@ func (c *Client) ExchangeRaw(ctx context.Context, realm string, payload []byte) 
 }
 
 func (c *Client) exchangeRawPayload(ctx context.Context, realm string, payload []byte, label string) ([]byte, error) {
+	c.tracef("Sending request (%d bytes) to %s", len(payload), realm)
 	if c.Exchange != nil {
 		response, err := c.Exchange(ctx, realm, payload)
 		if err != nil {
+			c.tracef("KDC exchange error: %v", err)
 			return nil, fmt.Errorf("%s transport: %w", label, err)
 		}
+		c.tracef("Received answer (%d bytes) from %s", len(response), realm)
 		return response, nil
 	}
 	if c.Config == nil {
 		return nil, fmt.Errorf("%s: no configuration or exchange function", label)
 	}
+	c.tracef("Resolving hostname %s", realm)
 	endpoint, ok := configuredKDC(c.Config, realm)
 	if !ok {
 		return nil, fmt.Errorf("%s: no KDC configured for realm %q", label, realm)
 	}
 	if strings.HasPrefix(strings.ToLower(endpoint), "https://") {
+		c.tracef("Sending HTTPS request to %s", endpoint)
 		return c.kkdcpClient().Exchange(ctx, endpoint, realm, payload)
 	}
 	address, err := net.ResolveUDPAddr("udp", endpoint)
@@ -1623,8 +1637,38 @@ func (c *Client) exchangeRawPayload(ctx context.Context, realm string, payload [
 	if c.Config.UDPPreferenceLimit > 0 {
 		exchange.UDPPreferenceLimit = c.Config.UDPPreferenceLimit
 	}
-	return exchange.Request(ctx, conn, address, payload)
+	response, err := exchange.Request(ctx, conn, address, payload)
+	if err != nil {
+		c.tracef("KDC exchange error: %v", err)
+		return nil, err
+	}
+	c.tracef("Received answer (%d bytes) from %s", len(response), trace.RemoteAddress("udp", address))
+	return response, nil
 }
+
+func (c *Client) tracef(format string, args ...any) {
+	if c == nil {
+		return
+	}
+	callback := c.Trace
+	if callback == nil {
+		clientTraceMu.Lock()
+		if c.traceOnce == nil {
+			c.traceOnce = &sync.Once{}
+		}
+		once := c.traceOnce
+		clientTraceMu.Unlock()
+		once.Do(func() {
+			c.envTrace, _ = trace.FromEnv()
+		})
+		callback = c.envTrace
+	}
+	if callback != nil {
+		callback(fmt.Sprintf(format, args...))
+	}
+}
+
+var clientTraceMu sync.Mutex
 
 // BuildASRequest constructs an AS-REQ without sending it.
 func (c *Client) BuildASRequest(clientPrincipal principal.Principal, now time.Time) (protocol.ASReq, error) {
@@ -2030,16 +2074,20 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 	if err != nil {
 		return nil, fmt.Errorf("AS exchange request: %w", err)
 	}
+	c.tracef("Sending request (%d bytes) to %s", len(payload), realm)
 	if c.Exchange != nil {
 		response, err := c.Exchange(ctx, realm, payload)
 		if err != nil {
+			c.tracef("KDC exchange error: %v", err)
 			return nil, fmt.Errorf("AS exchange transport: %w", err)
 		}
+		c.tracef("Received answer (%d bytes) from %s", len(response), realm)
 		return response, nil
 	}
 	if c.Config == nil {
 		return nil, fmt.Errorf("AS exchange: no configuration or exchange function")
 	}
+	c.tracef("Resolving hostname %s", realm)
 	endpoint, ok := configuredKDC(c.Config, realm)
 	if !ok {
 		return nil, fmt.Errorf("AS exchange: no KDC configured for realm %q", realm)
@@ -2064,7 +2112,13 @@ func (c *Client) roundTrip(ctx context.Context, realm string, request protocol.A
 	if c.Config.UDPPreferenceLimit > 0 {
 		exchange.UDPPreferenceLimit = c.Config.UDPPreferenceLimit
 	}
-	return exchange.Request(ctx, conn, address, payload)
+	response, err := exchange.Request(ctx, conn, address, payload)
+	if err != nil {
+		c.tracef("KDC exchange error: %v", err)
+		return nil, err
+	}
+	c.tracef("Received answer (%d bytes) from %s", len(response), trace.RemoteAddress("udp", address))
+	return response, nil
 }
 
 func (c *Client) decodeASRep(data []byte, clientPrincipal principal.Principal, nonce uint32, etypeID int32, key []byte, now time.Time) (*Credentials, error) {

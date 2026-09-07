@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/klog"
 	"github.com/Exonical/go-kerberos/krb5/principal"
+	"github.com/Exonical/go-kerberos/krb5/trace"
 )
 
 const (
@@ -45,7 +47,9 @@ const (
 // the mutable in-memory implementation.  ACL, when non-nil, is consulted for
 // every operation; otherwise only AdminPrincipal is authorized.
 type Server struct {
-	Database       Backend
+	Database Backend
+	// Trace receives MIT-style diagnostic messages when non-nil.
+	Trace          trace.Callback
 	Keytab         *keytab.Keytab
 	AdminPrincipal principal.Principal
 	ACL            func(client principal.Principal, operation string, target principal.Principal) bool
@@ -76,6 +80,9 @@ type Server struct {
 func (s *Server) reportError(err error) {
 	if err == nil {
 		return
+	}
+	if s.Trace != nil {
+		s.Trace(fmt.Sprintf("kadm5: error: %v", err))
 	}
 	if s.Logger != nil {
 		s.Logger.Error("%v", err)
@@ -578,6 +585,10 @@ func principalEqual(a, b principal.Principal) bool {
 
 func (s *Server) dispatch(client principal.Principal, proc uint32, body []byte) []byte {
 	defer s.endAuth()
+	if s.Trace != nil {
+		s.Trace(fmt.Sprintf("kadm5: request from %s procedure %d",
+			trace.Principal(client), proc))
+	}
 	r := xdrReader{b: body}
 	api, err := r.u32()
 	if err != nil {

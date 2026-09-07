@@ -33,6 +33,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/spake"
+	"github.com/Exonical/go-kerberos/krb5/trace"
 	"github.com/Exonical/go-kerberos/krb5/transport"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
@@ -85,8 +86,10 @@ type OTPVerifier interface {
 
 // Server is a Kerberos KDC backed by a pluggable principal store.
 type Server struct {
-	Realm         string
-	DB            kdb.Store
+	Realm string
+	DB    kdb.Store
+	// Trace receives MIT-style diagnostic messages when non-nil.
+	Trace         trace.Callback
 	Logger        *klog.Logger
 	Now           func() time.Time
 	ClockSkew     time.Duration
@@ -253,18 +256,63 @@ func (s *Server) handleMessage(data []byte, remoteAddr string) []byte {
 	case 0x6a:
 		var request protocol.ASReq
 		if err := asn1.Unmarshal(data, &request); err != nil {
+			s.tracef("AS-REQ: malformed request")
 			return s.errorResponse(kdcErrGeneric, nil)
 		}
-		return s.handleASReq(request, data, remoteAddr)
+		client, service := traceRequestPrincipals(request.ReqBody.CName,
+			request.ReqBody.SName, request.ReqBody.Realm)
+		s.tracef("AS-REQ: client %s for %s", client, service)
+		if len(request.PAData) > 0 {
+			s.tracef("AS-REQ: received preauthentication data")
+		}
+		response := s.handleASReq(request, data, remoteAddr)
+		if isKRBErrorResponse(response) {
+			s.tracef("AS-REQ: error response")
+		} else {
+			s.tracef("AS-REQ: issuing ticket for %s", client)
+		}
+		return response
 	case 0x6c:
 		var request protocol.TGSReq
 		if err := asn1.Unmarshal(data, &request); err != nil {
+			s.tracef("TGS-REQ: malformed request")
 			return s.errorResponse(kdcErrGeneric, nil)
 		}
-		return s.handleTGSReq(request, data, remoteAddr)
+		_, service := traceRequestPrincipals(nil, request.ReqBody.SName, request.ReqBody.Realm)
+		s.tracef("TGS-REQ: service %s", service)
+		if len(request.PAData) > 0 {
+			s.tracef("TGS-REQ: received preauthentication data")
+		}
+		response := s.handleTGSReq(request, data, remoteAddr)
+		if isKRBErrorResponse(response) {
+			s.tracef("TGS-REQ: error response")
+		} else {
+			s.tracef("TGS-REQ: issuing ticket for %s", service)
+		}
+		return response
 	default:
+		s.tracef("KDC: unsupported message type")
 		return s.errorResponse(kdcErrGeneric, nil)
 	}
+}
+
+func (s *Server) tracef(format string, args ...any) {
+	if s != nil && s.Trace != nil {
+		s.Trace(fmt.Sprintf(format, args...))
+	}
+}
+
+func traceRequestPrincipals(clientName, serviceName *protocol.PrincipalName,
+	realm string) (string, string) {
+	client := "(unknown)"
+	if clientName != nil {
+		client = trace.Principal(principalFromProtocol(*clientName, realm))
+	}
+	service := "(unknown)"
+	if serviceName != nil {
+		service = trace.Principal(principalFromProtocol(*serviceName, realm))
+	}
+	return client, service
 }
 
 // ListenAndServe serves Kerberos requests on the supplied UDP and TCP
