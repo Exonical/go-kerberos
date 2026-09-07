@@ -863,9 +863,9 @@ func (s *Server) dispatch(client, service principal.Principal, proc uint32, body
 		}
 		if code := s.checkSelfKeyChangeWithInitial(client, p, initial); code != 0 {
 			return status(code)
+		}
 		if isChangePasswordService(service) && !principalEqual(client, p) {
 			return status(authChangePass)
-		}
 		}
 		record, ok, err := s.Database.Lookup(p)
 		if err != nil || !ok {
