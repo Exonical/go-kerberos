@@ -710,7 +710,21 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 		}
 		checksum, checksumType, err := state.checksum(ctx, nil)
 		if err != nil {
-			return nil, nil, err
+			alert, alertErr := state.append(NewNegoExVerifyNoKeyAlert(scheme))
+			if alertErr != nil {
+				return nil, nil, err
+			}
+			a.negoex = state
+			a.ctx = &Context{ctx: ctx}
+			a.mechTypes = append([]asn1.ObjectIdentifier(nil), init.MechTypes...)
+			out, encodeErr := encodeBareResp(NegTokenResp{
+				NegState: NegStateAcceptIncomplete, SupportedMech: negoexOID,
+				ResponseToken: alert,
+			})
+			if encodeErr != nil {
+				return nil, nil, encodeErr
+			}
+			return a.ctx, out, nil
 		}
 		outVerify, err := state.append(NegoExMessage{
 			Type: NegoExVerify, AuthScheme: scheme,
