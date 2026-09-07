@@ -116,6 +116,23 @@ func TestArmorRejectsReplyNonceAndFinishedChecksum(t *testing.T) {
 	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 1); err == nil {
 		t.Fatal("nonce mismatch unexpectedly accepted")
 	}
+	responseDER, err = asn1.Marshal(protocol.KrbFastResponse{Nonce: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err = etype.Encrypt(armor.Key, UsageRep, responseDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = asn1.Marshal(protocol.PAFXFastReply{ArmoredData: protocol.KrbFastArmoredRep{
+		EncFastRep: protocol.EncryptedData{EType: etype.ID(), Cipher: cipher},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := armor.UnwrapReply(protocol.MethodData{{PADataType: PAFXFast, PADataValue: value}}, []byte("ticket"), 1); err == nil {
+		t.Fatal("reply without finished message unexpectedly accepted")
+	}
 
 	ticketChecksum, err := etype.Checksum(armor.Key, UsageFinished, []byte("ticket"))
 	if err != nil {

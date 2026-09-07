@@ -89,7 +89,7 @@ func (h deletePolicyHook) Handle(event HookEvent) error {
 
 func dispatchStatus(t *testing.T, server *Server, client principal.Principal, proc uint32, body []byte) uint32 {
 	t.Helper()
-	reply := server.dispatch(client, proc, body)
+	reply := server.dispatch(client, principal.Principal{}, proc, body, true)
 	reader := xdrReader{b: reply}
 	_, err := reader.u32()
 	if err != nil {

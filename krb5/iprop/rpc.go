@@ -499,6 +499,7 @@ func (s *Server) Serve(listener net.Listener) error {
 type serverSession struct {
 	ctx       *gssapi.Context
 	client    principal.Principal
+	service   principal.Principal
 	handle    []byte
 	next      uint32
 	gssSeqSet bool
@@ -611,12 +612,16 @@ func (s *Server) handleGSS(call rpcCall, session *serverSession) ([]byte, *serve
 			}
 			return rpcError(call.xid, 1), nil, nil
 		}
+		servicePrincipal := ctx.TargetName()
+		if !validIpropService(servicePrincipal, s.Database.GetRealm()) {
+			return rpcError(call.xid, 1), nil, nil
+		}
 		if session == nil {
 			handle = make([]byte, 16)
 			if _, err := rand.Read(handle); err != nil {
 				return nil, nil, err
 			}
-			session = &serverSession{handle: handle, next: 1, client: clientName}
+			session = &serverSession{handle: handle, next: 1, client: clientName, service: servicePrincipal}
 		}
 		session.ctx = ctx
 		window := uint32(0x7fffffff)
@@ -653,8 +658,14 @@ func (s *Server) handleGSS(call rpcCall, session *serverSession) ([]byte, *serve
 	var plain []byte
 	if protectedSeq+1 == verifierSeq {
 		plain, err = session.ctx.Unwrap(protected)
-		if err == nil && len(plain) >= 4 && binary.BigEndian.Uint32(plain[:4]) == seq {
+		if err == nil {
 			err = session.ctx.VerifyMIC(call.prefix, call.verifier)
+		}
+		if err == nil && len(plain) < 4 {
+			err = errors.New("iprop: short GSS payload")
+		}
+		if err == nil && binary.BigEndian.Uint32(plain[:4]) != seq {
+			err = errors.New("iprop: bad sequence")
 		}
 	} else if verifierSeq+1 == protectedSeq {
 		err = session.ctx.VerifyMIC(call.prefix, call.verifier)
@@ -740,6 +751,11 @@ func (s *Server) dispatch(clientName principal.Principal, proc uint32, body []by
 		result.Updates = append(result.Updates, Update{PrincipalName: entry.Name.String(), EntrySno: entry.Serial, Time: timeValue(entry.Time), Entry: converted, Deleted: entry.Deleted, Commit: entry.Commit})
 	}
 	return result.MarshalXDR()
+}
+
+func validIpropService(service principal.Principal, realm string) bool {
+	return len(service.Components) == 2 && service.Realm == realm &&
+		service.Components[0] == "kiprop"
 }
 
 func (s *Server) authorized(clientName principal.Principal) bool {
@@ -836,7 +852,7 @@ type ReplicaClient interface {
 
 // KpropServer returns a kprop receiver which delegates loaded dumps to
 // Replica.LoadDump. A caller can run it on the replica's kprop listener.
-func (r *Replica) KpropServer(serviceKeytab *keytab.Keytab, authorize func(principal.Principal) error) (*kprop.Server, error) {
+func (r *Replica) KpropServer(serviceKeytab *keytab.Keytab, authorize func(principal.Principal, int32) error) (*kprop.Server, error) {
 	if r == nil || serviceKeytab == nil || r.LoadDump == nil {
 		return nil, errors.New("iprop: incomplete kprop replica")
 	}

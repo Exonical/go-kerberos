@@ -80,6 +80,12 @@ func TestContextExportImportPreservesMessageState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := initiator.Context(); err == nil {
+		t.Fatal("mutual context established before AP-REP")
+	}
+	if _, err := initiator.Wrap([]byte("premature"), true); err == nil {
+		t.Fatal("mutual context usable before AP-REP")
+	}
 	acceptorContext, mutual, err := NewAcceptor(kt).Accept(token, now)
 	if err != nil {
 		t.Fatal(err)

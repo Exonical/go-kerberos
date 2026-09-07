@@ -635,7 +635,7 @@ func TestCVE202339975MalformedDispatchDoesNotPanic(t *testing.T) {
 					t.Fatalf("dispatch panicked on malformed XDR: %v", recovered)
 				}
 			}()
-			if response := server.dispatch(principal.Principal{}, proc, body.bytes()); len(response) == 0 {
+			if response := server.dispatch(principal.Principal{}, principal.Principal{}, proc, body.bytes(), true); len(response) == 0 {
 				t.Fatal("dispatch returned an empty malformed-input response")
 			}
 		})

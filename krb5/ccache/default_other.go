@@ -4,11 +4,12 @@ package ccache
 
 import (
 	"errors"
-	"os"
+
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 )
 
 func osDefaultCCacheName() string {
-	return os.Getenv("KRB5CCNAME")
+	return secureenv.Get("KRB5CCNAME")
 }
 
 func setOSDefaultCCacheName(string) error {

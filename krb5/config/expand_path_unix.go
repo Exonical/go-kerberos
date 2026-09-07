@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+
+	"github.com/Exonical/go-kerberos/internal/secureenv"
 )
 
 func expandPathTemp() (string, error) {
-	if value := os.Getenv("TMPDIR"); value != "" {
+	if value := secureenv.Get("TMPDIR"); value != "" {
 		return value, nil
 	}
 	return os.TempDir(), nil

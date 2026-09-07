@@ -519,12 +519,20 @@ func (i *Initiator) Continue(token []byte) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		verified := false
 		for _, message := range messages {
 			if message.Type == NegoExVerify {
+				if message.AuthScheme != i.negoex.scheme {
+					return nil, fmt.Errorf("SPNEGO initiator: NegoEx verify: unexpected auth scheme")
+				}
 				if err := i.negoex.verify(ctx, message, resp.ResponseToken[:message.Offset]); err != nil {
 					return nil, fmt.Errorf("SPNEGO initiator: NegoEx verify: %w", err)
 				}
+				verified = true
 			}
+		}
+		if !verified {
+			return nil, fmt.Errorf("SPNEGO initiator: missing NegoEx verification")
 		}
 		if _, err := i.negoex.receive(resp.ResponseToken); err != nil {
 			return nil, err
@@ -547,6 +555,12 @@ func (i *Initiator) Continue(token []byte) ([]byte, error) {
 		})
 	}
 	i.needMIC = resp.NegState == NegStateRequestMIC || !selected.Equal(i.mechList[0])
+	if resp.NegState == NegStateAcceptCompleted && resp.ResponseToken == nil {
+		return nil, fmt.Errorf("SPNEGO initiator: missing mechanism response")
+	}
+	if i.needMIC && resp.MechListMIC == nil {
+		return nil, fmt.Errorf("SPNEGO initiator: missing required mechListMIC")
+	}
 	if resp.ResponseToken != nil {
 		if err := i.mech.VerifyToken(resp.ResponseToken); err != nil {
 			return nil, err
@@ -635,13 +649,21 @@ func (a *Acceptor) Accept(token []byte, now time.Time) (*Context, []byte, error)
 				return nil, nil, err
 			}
 			ctx := a.ctx.ctx
+			verified := false
 			for _, message := range messages {
 				if message.Type == NegoExVerify {
+					if message.AuthScheme != a.negoex.scheme {
+						return nil, nil, fmt.Errorf("SPNEGO acceptor: NegoEx verify: unexpected auth scheme")
+					}
 					prefix := resp.ResponseToken[:message.Offset]
 					if err := a.negoex.verify(ctx, message, prefix); err != nil {
 						return nil, nil, fmt.Errorf("SPNEGO acceptor: NegoEx verify: %w", err)
 					}
+					verified = true
 				}
+			}
+			if !verified {
+				return nil, nil, fmt.Errorf("SPNEGO acceptor: missing NegoEx verification")
 			}
 			if _, err := a.negoex.receive(resp.ResponseToken); err != nil {
 				return nil, nil, err

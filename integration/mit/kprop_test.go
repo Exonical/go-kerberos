@@ -60,7 +60,7 @@ func TestMITKpropToGoServer(t *testing.T) {
 	server := &kprop.Server{
 		Keytab: serviceKeytab,
 		Realm:  testenv.RealmName,
-		Authorize: func(p principal.Principal) error {
+		Authorize: func(p principal.Principal, _ int32) error {
 			if p.String() != "host/"+localHost+"@"+testenv.RealmName {
 				t.Fatalf("unexpected kprop client %s", p)
 			}

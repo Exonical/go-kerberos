@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"golang.org/x/sys/unix"
@@ -193,25 +194,64 @@ func addKey(ring int, kind, description string, payload []byte) error {
 	return err
 }
 
-func addCredentialKey(ring int, description string, payload []byte) error {
+func addCredentialKey(ring int, description string, payload []byte) (int, error) {
 	if err := validateKeyringName("credential", description); err != nil {
-		return err
+		return 0, err
 	}
 	// MIT prefers big_key because it permits duplicate descriptions; user is
 	// the compatibility fallback on kernels without big_key support.
 	keyringAddMu.Lock()
 	defer keyringAddMu.Unlock()
-	_, err := unix.AddKey("big_key", description, payload, ring)
+	id, err := unix.AddKey("big_key", description, payload, ring)
 	if err == nil {
-		return nil
+		return id, nil
 	}
 	if !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENODEV) {
-		return fmt.Errorf("add big_key credential: %w", err)
+		return 0, fmt.Errorf("add big_key credential: %w", err)
 	}
-	if err := addKey(ring, "user", description, payload); err != nil {
-		return fmt.Errorf("add user credential: %w", err)
+	id, err = unix.AddKey("user", description, payload, ring)
+	if err != nil {
+		return 0, fmt.Errorf("add user credential: %w", err)
 	}
-	return nil
+	return id, nil
+}
+
+func setKeyTimeout(id int, timeout uint32) {
+	_, _ = unix.KeyctlInt(unix.KEYCTL_SET_TIMEOUT, id, int(timeout), 0, 0)
+}
+
+func keyringCredentialTimeout(endTime, now uint32) (uint32, bool) {
+	if endTime <= now {
+		return 0, false
+	}
+	return endTime - now, true
+}
+
+func keyringExpirationTimeout(cache *Cache, now uint32) (uint32, bool) {
+	if cache == nil {
+		return 0, false
+	}
+	var endTime uint32
+	for _, credential := range cache.Credentials {
+		if credential.EndTime > endTime {
+			endTime = credential.EndTime
+		}
+	}
+	if endTime == 0 {
+		return 0, false
+	}
+	if endTime <= now {
+		return 1, true
+	}
+	return endTime - now, true
+}
+
+func updateKeyringExpiration(ring int, cache *Cache) {
+	timeout, ok := keyringExpirationTimeout(cache, uint32(time.Now().Unix()))
+	if !ok {
+		return
+	}
+	setKeyTimeout(ring, timeout)
 }
 
 func validateKeyringName(kind, name string) error {
@@ -220,6 +260,18 @@ func validateKeyringName(kind, name string) error {
 	}
 	if len(name) > keyringDescriptionLimit {
 		return fmt.Errorf("ccache: KEYRING %s name exceeds %d bytes", kind, keyringDescriptionLimit)
+	}
+	return nil
+}
+
+func validateCredentialPrincipal(p principal.Principal) error {
+	if strings.IndexByte(p.Realm, 0) >= 0 {
+		return errors.New("ccache: KEYRING credential name contains NUL")
+	}
+	for _, component := range p.Components {
+		if strings.IndexByte(component, 0) >= 0 {
+			return errors.New("ccache: KEYRING credential name contains NUL")
+		}
 	}
 	return nil
 }
@@ -324,6 +376,7 @@ func (h *keyringHandle) write(cache *Cache) error {
 	type payload struct {
 		description string
 		value       []byte
+		endTime     uint32
 	}
 	credentials := make([]payload, 0, len(cache.Credentials))
 	for _, credential := range cache.Credentials {
@@ -331,11 +384,16 @@ func (h *keyringHandle) write(cache *Cache) error {
 		if err != nil {
 			return err
 		}
+		if err := validateCredentialPrincipal(credential.Server); err != nil {
+			return err
+		}
 		description := credential.Server.String()
 		if err := validateKeyringName("credential", description); err != nil {
 			return err
 		}
-		credentials = append(credentials, payload{description: description, value: value})
+		credentials = append(credentials, payload{
+			description: description, value: value, endTime: credential.EndTime,
+		})
 	}
 	if _, err := unix.KeyctlInt(keyctlClear, h.ring, 0, 0, 0); err != nil {
 		return fmt.Errorf("ccache: clear KEYRING cache: %w", err)
@@ -344,10 +402,16 @@ func (h *keyringHandle) write(cache *Cache) error {
 		return fmt.Errorf("ccache: write KEYRING principal: %w", err)
 	}
 	for _, credential := range credentials {
-		if err := addCredentialKey(h.ring, credential.description, credential.value); err != nil {
+		id, err := addCredentialKey(h.ring, credential.description, credential.value)
+		if err != nil {
 			return fmt.Errorf("ccache: write KEYRING credential: %w", err)
 		}
+		if timeout, ok := keyringCredentialTimeout(
+			credential.endTime, uint32(time.Now().Unix())); ok {
+			setKeyTimeout(id, timeout)
+		}
 	}
+	updateKeyringExpiration(h.ring, cache)
 	return nil
 }
 
@@ -363,12 +427,23 @@ func (h *keyringHandle) store(credential Credential) error {
 	if err != nil {
 		return err
 	}
+	if err := validateCredentialPrincipal(credential.Server); err != nil {
+		return err
+	}
 	description := credential.Server.String()
 	if err := validateKeyringName("credential", description); err != nil {
 		return err
 	}
-	if err := addCredentialKey(h.ring, description, payload); err != nil {
+	id, err := addCredentialKey(h.ring, description, payload)
+	if err != nil {
 		return fmt.Errorf("ccache: store KEYRING credential: %w", err)
+	}
+	if timeout, ok := keyringCredentialTimeout(
+		credential.EndTime, uint32(time.Now().Unix())); ok {
+		setKeyTimeout(id, timeout)
+	}
+	if cache, err := h.read(); err == nil {
+		updateKeyringExpiration(h.ring, cache)
 	}
 	return nil
 }

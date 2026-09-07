@@ -81,6 +81,28 @@ func TestSelectETypeInfoFallsBackToDefaultSalt(t *testing.T) {
 	}
 }
 
+func TestSelectETypeHonorsOfferedPreference(t *testing.T) {
+	info := mustMarshal(t, protocol.ETypeInfo2{
+		{EType: crypto.EnctypeAES256SHA1},
+		{EType: crypto.EnctypeAES128SHA1},
+	})
+	methodData := protocol.MethodData{{PADataType: PADataETypeInfo2, PADataValue: info}}
+	etype, _, _, err := SelectEType(methodData, "REALM",
+		principal.Principal{Components: []string{"alice"}}, crypto.NewRegistry(),
+		[]int32{crypto.EnctypeAES128SHA1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etype != crypto.EnctypeAES128SHA1 {
+		t.Fatalf("selected enctype = %d, want %d", etype, crypto.EnctypeAES128SHA1)
+	}
+	if _, _, _, err := SelectEType(methodData, "REALM",
+		principal.Principal{Components: []string{"alice"}}, crypto.NewRegistry(),
+		[]int32{crypto.EnctypeCamellia128}); err == nil {
+		t.Fatal("selected an unoffered enctype")
+	}
+}
+
 func TestEncryptedChallengeRoundTrip(t *testing.T) {
 	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES256SHA1)
 	if err != nil {

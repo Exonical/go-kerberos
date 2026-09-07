@@ -168,7 +168,7 @@ func (c *Client) ASExchange(ctx context.Context, clientPrincipal principal.Princ
 			return nil, fmt.Errorf("AS exchange preauthentication: %w", err)
 		}
 		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
-		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -439,7 +439,7 @@ func (c *Client) asExchangeServiceOnceWithKey(ctx context.Context, clientPrincip
 			return nil, fmt.Errorf("AS service exchange preauthentication: %w", err)
 		}
 		methodData = c.sortPreferredPadata(clientPrincipal.Realm, methodData)
-		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(methodData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -560,7 +560,7 @@ func (c *Client) ASExchangeFAST(ctx context.Context, clientPrincipal principal.P
 			return nil, fmt.Errorf("FAST AS exchange preauthentication: %w", err)
 		}
 		fastReply.PAData = c.sortPreferredPadata(clientPrincipal.Realm, fastReply.PAData)
-		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry)
+		etypeID, salt, params, err := preauth.SelectEType(fastReply.PAData, clientPrincipal.Realm, clientPrincipal, registry, c.asRequestEnctypes())
 		if err != nil {
 			return nil, err
 		}
@@ -761,6 +761,18 @@ func (c *Client) decodeFASTASRep(data []byte, clientPrincipal principal.Principa
 	replyKey, err := armor.ReplyKey(protocol.EncryptionKey{KeyType: etypeID, KeyValue: key}, fastReply.StrengthenKey)
 	if err != nil {
 		return nil, err
+	}
+	if fastReply.Finished != nil {
+		clientPrincipal = principalFromProtocol(fastReply.Finished.CName)
+		clientPrincipal.Realm = fastReply.Finished.CRealm
+		reply.CRealm = fastReply.Finished.CRealm
+		reply.CName = fastReply.Finished.CName
+	}
+	if fastReply.Finished != nil {
+		data, err = asn1.Marshal(reply)
+		if err != nil {
+			return nil, fmt.Errorf("FAST AS exchange reply: %w", err)
+		}
 	}
 	return c.decodeASRep(data, clientPrincipal, nonce, replyKey.KeyType, replyKey.KeyValue, now)
 }
@@ -1509,6 +1521,12 @@ func (c *Client) decodeFASTTGSRep(data []byte, clientPrincipal, service, request
 	if err != nil {
 		return nil, false, err
 	}
+	if fastReply.Finished != nil {
+		clientPrincipal = principalFromProtocol(fastReply.Finished.CName)
+		clientPrincipal.Realm = fastReply.Finished.CRealm
+		reply.CRealm = fastReply.Finished.CRealm
+		reply.CName = fastReply.Finished.CName
+	}
 	rewrapped, err := asn1.Marshal(reply)
 	if err != nil {
 		return nil, false, fmt.Errorf("FAST TGS exchange reply: %w", err)
@@ -1554,13 +1572,11 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 	if part.Nonce != nonce {
 		return nil, false, fmt.Errorf("TGS exchange: TGS-REP nonce mismatch")
 	}
-	referral := isReferralPrincipal(reply.Ticket.SName, requestedService)
+	referral := isReferralPrincipal(part.SName, requestedService)
 	if !referral {
-		serviceNameMatches := sameProtocolPrincipal(reply.Ticket.SName, service) &&
-			sameProtocolPrincipal(part.SName, service)
-		canonicalizedService := c.canonicalizeEnabled() &&
-			sameProtocolPrincipal(reply.Ticket.SName, principalFromProtocol(part.SName))
-		if (serviceRealmKnown && (reply.Ticket.Realm != service.Realm || part.SRealm != service.Realm)) ||
+		serviceNameMatches := sameProtocolPrincipal(part.SName, service)
+		canonicalizedService := c.canonicalizeEnabled()
+		if (serviceRealmKnown && part.SRealm != service.Realm) ||
 			(!serviceNameMatches && !canonicalizedService) {
 			return nil, false, fmt.Errorf("TGS exchange: service principal mismatch")
 		}
@@ -1574,8 +1590,8 @@ func (c *Client) decodeTGSRepForExchangeWithUsage(data []byte, clientPrincipal, 
 	if err != nil {
 		return nil, false, fmt.Errorf("TGS exchange ticket: %w", err)
 	}
-	server := principalFromProtocol(reply.Ticket.SName)
-	server.Realm = reply.Ticket.Realm
+	server := principalFromProtocol(part.SName)
+	server.Realm = part.SRealm
 	return &Credentials{
 		Client: clientPrincipal, Server: server, Key: part.Key, Flags: part.Flags,
 		AuthTime: part.AuthTime, StartTime: part.StartTime, EndTime: part.EndTime,
@@ -1772,6 +1788,11 @@ func (c *Client) asRequestEnctypes() []int32 {
 		candidates = defaultRequestEnctypes
 	}
 	return c.supportedRequestEnctypes(candidates)
+}
+
+// RequestEnctypes returns the client's ordered AS request enctype list.
+func (c *Client) RequestEnctypes() []int32 {
+	return append([]int32(nil), c.asRequestEnctypes()...)
 }
 
 func (c *Client) tgsRequestEnctypes() []int32 {

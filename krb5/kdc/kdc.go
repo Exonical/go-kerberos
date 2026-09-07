@@ -2434,7 +2434,32 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 				return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
 			}
 		}
-		client := principalFromProtocol(evidencePart.CName, evidencePart.CRealm)
+		privKey, ok := s.pacPrivsvrKey()
+		if !ok {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		privEType, err := crypto.NewRegistry().Get(privKey.Enctype)
+		if err != nil {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		evidencePAC, err := pac.FromTicket(evidencePart,
+			pac.Key{EType: evidenceEType, Key: evidenceKey.Key},
+			&pac.Key{EType: privEType, Key: privKey.Key})
+		if err != nil {
+			if stderrors.Is(err, pac.ErrNotFound) {
+				return s.tgsErrorResponse(armor, kdcErrBadOption, request.ReqBody.SName)
+			}
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		_, clientName, err := evidencePAC.ClientInfo()
+		if err != nil {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		clientValue, err := principal.Parse(clientName)
+		if err != nil {
+			return s.tgsErrorResponse(armor, krbAPErrBadIntegrity, request.ReqBody.SName)
+		}
+		client := *clientValue
 		if clientRecord, found, lookupErr := s.DB.Lookup(client); lookupErr != nil {
 			return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
 		} else if found {
