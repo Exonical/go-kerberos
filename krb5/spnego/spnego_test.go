@@ -3,6 +3,7 @@ package spnego
 import (
 	"bytes"
 	"encoding/asn1"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -182,6 +183,170 @@ func TestKerberosSPNEGOMechListMICExchange(t *testing.T) {
 	}
 	if got, err := ctx.Unwrap(sealed); err != nil || !bytes.Equal(got, message) {
 		t.Fatalf("post-MIC unwrap = %q, %v", got, err)
+	}
+}
+
+func TestNegoExMessageRoundTrips(t *testing.T) {
+	scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
+	var conversation [16]byte
+	copy(conversation[:], []byte("negoex-conversation"))
+	messages := []NegoExMessage{
+		{Type: NegoExInitiatorNego, Sequence: 0, ConversationID: conversation,
+			AuthSchemes: []NegoExAuthScheme{scheme}},
+		{Type: NegoExInitiatorMetaData, Sequence: 1, ConversationID: conversation,
+			AuthScheme: scheme},
+		{Type: NegoExAPRequest, Sequence: 2, ConversationID: conversation,
+			AuthScheme: scheme, Token: []byte{1, 2, 3}},
+		{Type: NegoExAcceptorNego, Sequence: 3, ConversationID: conversation,
+			AuthSchemes: []NegoExAuthScheme{scheme}},
+		{Type: NegoExAcceptorMetaData, Sequence: 4, ConversationID: conversation,
+			AuthScheme: scheme},
+		{Type: NegoExChallenge, Sequence: 5, ConversationID: conversation,
+			AuthScheme: scheme, Token: []byte{4, 5}},
+		{Type: NegoExVerify, Sequence: 6, ConversationID: conversation,
+			AuthScheme: scheme, ChecksumType: uint32(crypto.ChecksumHMACSHA196AES256),
+			Checksum: bytes.Repeat([]byte{6}, 12)},
+		{Type: NegoExAlert, Sequence: 7, ConversationID: conversation, AlertCode: 3,
+			AuthScheme: scheme, Alerts: []NegoExAlertEntry{
+				{Type: NegoExAlertPulse, Value: []byte{8, 9}},
+			}},
+	}
+	wire, err := EncodeNegoEx(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeNegoEx(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != len(messages) || decoded[7].AlertCode != 3 || len(decoded[2].Token) != 3 ||
+		len(decoded[6].Checksum) != 12 || len(decoded[7].Alerts) != 1 {
+		t.Fatalf("decoded NegoEx messages = %#v", decoded)
+	}
+	if got := binary.LittleEndian.Uint32(wire[16:]); got != 96 {
+		t.Fatalf("NegoEx header length = %d, want 96", got)
+	}
+	alertWire, err := EncodeNegoEx([]NegoExMessage{{
+		Type: NegoExAlert, AuthScheme: scheme,
+		Alerts: NewNegoExVerifyNoKeyAlert(scheme).Alerts,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := DecodeNegoEx(alertWire)
+	if err != nil || !alerts[0].HasVerifyNoKeyAlert() {
+		t.Fatalf("NegoEx verify-no-key alert = %#v, %v", alerts, err)
+	}
+}
+
+func TestNegoExRejectsMalformedVectorsAndSignatures(t *testing.T) {
+	scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
+	wire, err := EncodeNegoEx([]NegoExMessage{{
+		Type: NegoExInitiatorNego, AuthSchemes: []NegoExAuthScheme{scheme},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append([]byte(nil), wire...)
+	bad[0] ^= 1
+	if _, err := DecodeNegoEx(bad); err == nil {
+		t.Fatal("invalid NegoEx signature accepted")
+	}
+	bad = append([]byte(nil), wire...)
+	binary.LittleEndian.PutUint32(bad[16:], 95)
+	if _, err := DecodeNegoEx(bad); err == nil {
+		t.Fatal("invalid NegoEx header length accepted")
+	}
+	bad = append([]byte(nil), wire...)
+	binary.LittleEndian.PutUint32(bad[80:], uint32(len(wire)+1))
+	if _, err := DecodeNegoEx(bad); err == nil {
+		t.Fatal("invalid NegoEx scheme vector accepted")
+	}
+}
+
+func TestNegoExKerberosHandshake(t *testing.T) {
+	creds, kt := syntheticCredentials(t)
+	now := time.Unix(1700000020, 0).UTC()
+	initiator, err := NewInitiatorWithOptions(creds, gssapiFlags(), InitiatorOptions{NegoEx: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptor := NewAcceptorWithOptions(kt, AcceptorOptions{NegoEx: true})
+	acceptorContext, reply, err := acceptor.Accept(first, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := initiator.Continue(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final) == 0 {
+		t.Fatal("NegoEx initiator did not send VERIFY")
+	}
+	if _, finalReply, err := acceptor.Accept(final, now); err != nil || finalReply != nil {
+		t.Fatalf("NegoEx final accept = %v, reply %x", err, finalReply)
+	}
+	message := []byte("NegoEx round trip")
+	wire, err := initiator.Context()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := wire.Wrap(message, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := acceptorContext.Unwrap(sealed); err != nil || !bytes.Equal(got, message) {
+		t.Fatalf("NegoEx unwrap = %q, %v", got, err)
+	}
+}
+
+func TestNegoExVerifyTamperAndSequenceRejection(t *testing.T) {
+	creds, kt := syntheticCredentials(t)
+	now := time.Unix(1700000030, 0).UTC()
+	initiator, err := NewInitiatorWithOptions(creds, gssapiFlags(), InitiatorOptions{NegoEx: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.InitialToken(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptor := NewAcceptorWithOptions(kt, AcceptorOptions{NegoEx: true})
+	_, reply, err := acceptor.Accept(first, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := initiator.Continue(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeToken(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Resp.ResponseToken[len(decoded.Resp.ResponseToken)-1] ^= 1
+	tampered, err := EncodeToken(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptor.Accept(tampered, now); err == nil {
+		t.Fatal("tampered NegoEx VERIFY accepted")
+	}
+
+	scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
+	sequenceToken, err := EncodeNegoEx([]NegoExMessage{
+		{Type: NegoExInitiatorNego, AuthSchemes: []NegoExAuthScheme{scheme}},
+		{Type: NegoExInitiatorMetaData, Sequence: 99, AuthScheme: scheme},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeNegoEx(sequenceToken); err == nil {
+		t.Fatal("out-of-sequence NegoEx message accepted")
 	}
 }
 

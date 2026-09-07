@@ -40,7 +40,7 @@ registry gate.
 | GSS IOV and PRF (RFC 4121 / RFC 4402) | Typed HEADER/DATA/PADDING/TRAILER/SIGN_ONLY IOV wrapping, STREAM unwrap, confidentiality and integrity-only tokens, nonzero RRC, explicit DCE framing, RFC 4402 full/partial-key PRF, AES-SHA1/AES-SHA2/Camellia vectors | `TestGoGSSIOVAgainstMIT` and `TestMITGSSIOVAgainstGo` use `/usr/bin/python3` `gssapi.raw.wrap_iov`/`unwrap_iov`; the peer derives header/trailer boundaries from the token rather than assuming an enctype-specific layout. The binding has no raw PRF API, so PRF uses MIT vectors | `krb5/gssapi` IOV layout, malformed-input, stream, RRC, SIGN_ONLY, DCE, and MIT PRF-vector coverage |
 | GSS credential/context features (MIT `acquire_cred.c`, `export_sec_context.c`, `lucid_context.c`) | Password AS acquisition, explicit/default keytab acceptors, S4U impersonation, established-context export/import, and version-1 lucid CFX state | Go unit coverage exercises keytab acquisition, context transfer, sequence preservation, and lucid state. No standalone Python/MIT gate is enabled yet because the installed 1.19 bindings do not expose stable credential-acquisition and context-transfer entry points. Exported context blobs contain raw key material; callers must protect them as sensitive secret data | `krb5/gssapi` credential and context-transfer coverage |
 | CAMMAC authorization data (RFC 7751) | Go KDC issuance and AP service-verifier acceptance | No live gate; the fixture does not configure MIT authentication indicators | CAMMAC golden DER, usage-64 KDC/service verification, protected-element extraction, and tamper rejection |
-| SPNEGO (RFC 4178) over Kerberos GSS | Go unit coverage, including DER, legacy OID, and mechListMIC negotiation | `TestGoSPNEGOInitiatorAgainstMIT` (Python GSSAPI linked to MIT) | `TestMITSPNEGOInitiatorAgainstGo` (Python GSSAPI linked to MIT) |
+| SPNEGO (RFC 4178) over Kerberos GSS | Go unit coverage, including DER, legacy OID, mechListMIC negotiation, and opt-in MS-NEGOEX framing with transcript VERIFY checksums | `TestGoSPNEGOInitiatorAgainstMIT` (Python GSSAPI linked to MIT) | `TestMITSPNEGOInitiatorAgainstGo` (Python GSSAPI linked to MIT) |
 | PKINIT (RFC 4556), RFC 8636 agility, and anonymous PKINIT (RFC 6112/8062) | client and Go KDC implemented; SHA-256, SHA-1, and SHA-512 KDF identifiers are advertised in MIT preference order | KDF vectors, wire goldens, Go↔Go, Go client ↔ MIT KDC, and MIT client ↔ Go KDC coverage; MIT trace asserts SHA-256 negotiation | MIT pass |
 | PA-OTP (RFC 6560) | Go client + Go KDC FAST unit coverage | Go client ↔ MIT KDC with MIT OTP module and RADIUS stub; MIT `kinit` ↔ Go KDC | Both live directions pass when `krb5-otp` is installed |
 | RFC 3244 kpasswd change/set-password | Go client + live MIT kadmind | MIT `kadmind` | Go client ↔ Go kpasswd server; MIT `kpasswd` ↔ Go kpasswd server |
@@ -532,6 +532,18 @@ current protocol return `KRB5_BAD_MSIZE` and are skipped by the gate; the
 CI image installs the MIT GSS Python binding. Reverse MIT acceptor/proxy
 interoperability is not enabled.
 SPNEGO remains unchanged: callers select IAKERB directly by mechanism OID.
+
+## MS-NEGOEX
+
+The SPNEGO package includes an opt-in MS-NEGOEX codec and Kerberos-backed
+negotiation path. It implements the eight little-endian message forms,
+conversation and sequence validation, extension and vector bounds checks, and
+RFC 3961 transcript VERIFY checksums. NegoEx is disabled by default, so the
+classic SPNEGO token stream remains unchanged unless the initiator and
+acceptor explicitly enable it. The installed MIT runtime does not ship the
+test-only `negoextest` mechanism plugin used by MIT's `t_negoex.py`, so a
+live MIT NegoEx gate is not enabled; codec and in-process Go handshake tests
+cover the available behavior.
 
 ## Go command-line tools
 
