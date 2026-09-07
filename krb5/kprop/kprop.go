@@ -18,6 +18,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -286,7 +287,7 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("kprop AP authentication response: %w", err)
 	}
 	var serverSeqBytes [4]byte
-	if _, err := io.ReadFull(crypto.RandomSource, serverSeqBytes[:]); err != nil {
+	if _, err := io.ReadFull(random.Reader(), serverSeqBytes[:]); err != nil {
 		return fmt.Errorf("kprop AP-REP sequence: %w", err)
 	}
 	serverSeq := binary.BigEndian.Uint32(serverSeqBytes[:]) & 0x7fffffff

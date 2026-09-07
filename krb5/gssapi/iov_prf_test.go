@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 )
 
@@ -26,7 +27,7 @@ func testPRFContextWithType(etype int32, partial, full []byte) *Context {
 func TestWrapIOVMatchesFlatWrap(t *testing.T) {
 	key, _ := hex.DecodeString("6c742096eb896230312b73972fa28b5d")
 	data := []byte("iov data split over buffers")
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
 	defer restore()
 	flatCtx := testPRFContext(key)
 	want, err := flatCtx.Wrap(data, true)
@@ -249,7 +250,7 @@ func standardSealedNonzeroECToken(t *testing.T) []byte {
 	header := messageHeader([]byte{0x05, 0x04}, tokenFlagSealed, 16, 0, 0)
 	input := append([]byte("payload"), bytes.Repeat([]byte{0xff}, 16)...)
 	input = append(input, header...)
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 16)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 16)))
 	encrypted, err := etype.Encrypt(key, 24, input)
 	restore()
 	if err != nil {
@@ -335,7 +336,7 @@ func TestCVE202437371RejectsInvalidRRCAndShortPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	header := messageHeader([]byte{0x05, 0x04}, tokenFlagSealed, 0, 0, 0)
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
 	ciphertext, err := etype.Encrypt(key, 24, []byte{0x42})
 	restore()
 	if err != nil {
@@ -366,7 +367,7 @@ func reencryptSealedTokenWithEC(t *testing.T, token []byte, outer, inner uint16)
 	binary.BigEndian.PutUint16(plain[len(plain)-12:], inner)
 	header := append([]byte(nil), token[:16]...)
 	binary.BigEndian.PutUint16(header[4:6], outer)
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 32)))
 	ciphertext, err := etype.Encrypt(key, 24, plain)
 	restore()
 	if err != nil {

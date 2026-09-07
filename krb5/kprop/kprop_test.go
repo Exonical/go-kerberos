@@ -13,6 +13,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	internalrandom "github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -160,7 +161,7 @@ func TestGoClientServerTransfer(t *testing.T) {
 	random := append([]byte{0, 0, 0, 1}, bytes.Repeat([]byte{0xa5}, 16)...)
 	random = append(random, []byte{0x12, 0x34, 0x56, 0x78}...)
 	random = append(random, bytes.Repeat([]byte{0x42}, 1<<20)...)
-	restoreRandom := crypto.SetRandomSource(bytes.NewReader(random))
+	restoreRandom := internalrandom.SetSource(bytes.NewReader(random))
 	defer restoreRandom()
 	var loaded []byte
 	server := &Server{

@@ -15,6 +15,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -744,7 +745,7 @@ func TestTGSExchangeRejectsTamperedReply(t *testing.T) {
 }
 
 func TestRequestNonceFitsKerberosInteger(t *testing.T) {
-	restore := crypto.SetRandomSource(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
+	restore := random.SetSource(bytes.NewReader([]byte{0xff, 0xff, 0xff, 0xff}))
 	defer restore()
 	request, err := (&Client{}).newASReq(
 		principal.Principal{Realm: testRealm, NameType: principal.NTPrincipal, Components: []string{"alice"}},

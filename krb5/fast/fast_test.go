@@ -7,13 +7,14 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
 func TestArmorWrapAndUnwrapRoundTrip(t *testing.T) {
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x42}, 256)))
 	defer restore()
 	etype, err := crypto.NewRegistry().Get(crypto.EnctypeAES128SHA256)
 	if err != nil {

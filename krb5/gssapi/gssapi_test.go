@@ -17,6 +17,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -903,7 +904,7 @@ func TestRFC4121PerMessageTokenLayouts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0xa5}, 16)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0xa5}, 16)))
 	defer restore()
 
 	sealedContext := &Context{
