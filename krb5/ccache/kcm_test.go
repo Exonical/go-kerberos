@@ -25,6 +25,10 @@ func kcmRequest(op uint16, args ...[]byte) []byte {
 	return request
 }
 
+func dispatch(server *KCMServer, request []byte) ([]byte, int32) {
+	return server.dispatchPeer(request, 0)
+}
+
 func TestKCMRoundTripAndCollection(t *testing.T) {
 	skipWindowsUnixSocket(t)
 	socket := shortKCMSocket(t)
@@ -172,7 +176,7 @@ func TestKCMMatchingFlagsCompareFullServerAndAuthData(t *testing.T) {
 func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 	server := NewKCMServer("")
 	name := "cache"
-	if _, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetPrincipal)}, cstring(name)...)); code != kcmErrNoFile {
+	if _, code := dispatch(server, append([]byte{2, 0, 0, byte(kcmOpGetPrincipal)}, cstring(name)...)); code != kcmErrNoFile {
 		t.Fatalf("missing principal status = %d", code)
 	}
 	if len(server.shared.caches) != 0 {
@@ -184,11 +188,11 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	initRequest := append([]byte{2, 0, 0, byte(kcmOpInitialize)}, append(cstring(name), principalBytes...)...)
-	if _, code := server.dispatch(initRequest); code != 0 {
+	if _, code := dispatch(server, initRequest); code != 0 {
 		t.Fatalf("initialize status = %d", code)
 	}
 	badStore := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), 1, 2, 3)...)
-	if _, code := server.dispatch(badStore); code != kcmErrInternal {
+	if _, code := dispatch(server, badStore); code != kcmErrInternal {
 		t.Fatalf("malformed store status = %d", code)
 	}
 	for _, credential := range cache.Credentials[:1] {
@@ -197,11 +201,11 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 			t.Fatal(err)
 		}
 		storeRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
-		if _, code := server.dispatch(storeRequest); code != 0 {
+		if _, code := dispatch(server, storeRequest); code != 0 {
 			t.Fatalf("store status = %d", code)
 		}
 		duplicateRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
-		if _, code := server.dispatch(duplicateRequest); code != 0 {
+		if _, code := dispatch(server, duplicateRequest); code != 0 {
 			t.Fatalf("duplicate store status = %d", code)
 		}
 	}
@@ -212,10 +216,10 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	storeRequest := append([]byte{2, 0, 0, byte(kcmOpStore)}, append(cstring(name), raw...)...)
-	if _, code := server.dispatch(storeRequest); code != 0 {
+	if _, code := dispatch(server, storeRequest); code != 0 {
 		t.Fatalf("second store status = %d", code)
 	}
-	uuids, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
+	uuids, code := dispatch(server, append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
 	if code != 0 || len(uuids) != 3*kcmUUIDLen {
 		t.Fatalf("UUID list = %x, status %d", uuids, code)
 	}
@@ -226,10 +230,10 @@ func TestKCMServerStableCredentialUUIDsAndMissingReads(t *testing.T) {
 	removeArgs := append(cstring(name), make([]byte, 4)...)
 	removeArgs = append(removeArgs, match...)
 	removeRequest := append([]byte{2, 0, 0, byte(kcmOpRemoveCred)}, removeArgs...)
-	if _, code := server.dispatch(removeRequest); code != 0 {
+	if _, code := dispatch(server, removeRequest); code != 0 {
 		t.Fatalf("remove status = %d", code)
 	}
-	remaining, code := server.dispatch(append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
+	remaining, code := dispatch(server, append([]byte{2, 0, 0, byte(kcmOpGetCredUUIDList)}, cstring(name)...))
 	if code != 0 || !bytes.Equal(remaining, uuids[2*kcmUUIDLen:]) {
 		t.Fatalf("remaining UUID list = %x, want %x (status %d)", remaining, uuids[2*kcmUUIDLen:], code)
 	}
@@ -325,11 +329,11 @@ func TestKCMServerPeerNamespaces(t *testing.T) {
 }
 
 func TestKCMServerZeroValueIsSafe(t *testing.T) {
-	var server KCMServer
-	if _, code := server.dispatch(kcmRequest(kcmOpGetDefaultCache)); code != 0 {
+	server := &KCMServer{}
+	if _, code := dispatch(server, kcmRequest(kcmOpGetDefaultCache)); code != 0 {
 		t.Fatalf("zero-value default status = %d", code)
 	}
-	if _, code := server.dispatch(kcmRequest(kcmOpGetPrincipal, cstring("zero"))); code != kcmErrNoFile {
+	if _, code := dispatch(server, kcmRequest(kcmOpGetPrincipal, cstring("zero"))); code != kcmErrNoFile {
 		t.Fatalf("zero-value missing principal status = %d", code)
 	}
 	cache := testCache()
@@ -337,7 +341,7 @@ func TestKCMServerZeroValueIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, code := server.dispatch(kcmRequest(kcmOpInitialize,
+	if _, code := dispatch(server, kcmRequest(kcmOpInitialize,
 		append(cstring("zero"), principalBytes...))); code != 0 {
 		t.Fatalf("zero-value initialize status = %d", code)
 	}
@@ -396,7 +400,7 @@ func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cacheUUIDs, code := server.dispatch(kcmRequest(kcmOpGetCacheUUIDList))
+	cacheUUIDs, code := dispatch(server, kcmRequest(kcmOpGetCacheUUIDList))
 	if code != 0 || len(cacheUUIDs) != (replacements+generated)*kcmUUIDLen {
 		t.Fatalf("cache UUID list length=%d status=%d", len(cacheUUIDs), code)
 	}
@@ -408,14 +412,14 @@ func TestKCMServerConcurrentReplaceAndCreation(t *testing.T) {
 			t.Fatalf("duplicate cache UUID %x", uuid)
 		}
 		seenCaches[uuid] = true
-		if _, code := server.dispatch(kcmRequest(kcmOpGetCacheByUUID, uuid[:])); code != 0 {
+		if _, code := dispatch(server, kcmRequest(kcmOpGetCacheByUUID, uuid[:])); code != 0 {
 			t.Fatalf("cache UUID %x lookup status=%d", uuid, code)
 		}
 	}
 	seenCreds := make(map[[16]byte]bool)
 	for i := 0; i < replacements; i++ {
 		name := fmt.Sprintf("replace-%d", i)
-		uuids, code := server.dispatch(kcmRequest(kcmOpGetCredUUIDList, cstring(name)))
+		uuids, code := dispatch(server, kcmRequest(kcmOpGetCredUUIDList, cstring(name)))
 		if code != 0 || len(uuids) != kcmUUIDLen {
 			t.Fatalf("%s credential UUID list length=%d status=%d", name, len(uuids), code)
 		}

@@ -6,16 +6,20 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Exonical/go-kerberos/krb5/internal/binfmt"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 )
 
+// Version is the MIT FILE credential-cache format version.
 const Version uint16 = 0x0504
 
+// Header mirrors the MIT FILE ccache header's time-offset fields.
 type Header struct {
 	TimeOffset int32
 	Usec       int32
 }
 
+// Credential mirrors an MIT FILE ccache credential record.
 type Credential struct {
 	Client       principal.Principal
 	Server       principal.Principal
@@ -33,22 +37,26 @@ type Credential struct {
 	SecondTicket []byte
 }
 
+// Address mirrors an MIT ccache network-address record.
 type Address struct {
 	Type uint16
 	Data []byte
 }
 
+// AuthData mirrors an MIT ccache authorization-data record.
 type AuthData struct {
 	Type uint16
 	Data []byte
 }
 
+// Cache mirrors the MIT FILE ccache collection header and credential records.
 type Cache struct {
 	Header           Header
 	DefaultPrincipal principal.Principal
 	Credentials      []Credential
 }
 
+// Read decodes an MIT FILE ccache from r.
 func Read(r io.Reader) (*Cache, error) {
 	if r == nil {
 		return nil, fmt.Errorf("read ccache: nil reader")
@@ -57,19 +65,19 @@ func Read(r io.Reader) (*Cache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ccache: %w", err)
 	}
-	d := ccacheDecoder{data: data}
-	version, err := d.u16()
+	d := ccacheDecoder{Reader: binfmt.NewReader(data)}
+	version, err := d.U16()
 	if err != nil {
 		return nil, fmt.Errorf("read ccache version: %w", err)
 	}
 	if version != Version {
 		return nil, fmt.Errorf("read ccache: unsupported version")
 	}
-	headerLength, err := d.u16()
+	headerLength, err := d.U16()
 	if err != nil {
 		return nil, fmt.Errorf("read ccache header length: %w", err)
 	}
-	header, err := d.bytes(int(headerLength))
+	header, err := d.Bytes(int(headerLength))
 	if err != nil {
 		return nil, fmt.Errorf("read ccache header: %w", err)
 	}
@@ -81,7 +89,7 @@ func Read(r io.Reader) (*Cache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read ccache default principal: %w", err)
 	}
-	for d.remaining() > 0 {
+	for d.Remaining() > 0 {
 		credential, err := d.credential()
 		if err != nil {
 			return nil, fmt.Errorf("read ccache credential: %w", err)
@@ -91,6 +99,7 @@ func Read(r io.Reader) (*Cache, error) {
 	return result, nil
 }
 
+// Write encodes cache in the MIT FILE ccache format.
 func Write(w io.Writer, cache *Cache) error {
 	if w == nil {
 		return fmt.Errorf("write ccache: nil writer")
@@ -132,81 +141,28 @@ func Write(w io.Writer, cache *Cache) error {
 }
 
 type ccacheDecoder struct {
-	data []byte
-	off  int
-}
-
-func (d *ccacheDecoder) remaining() int {
-	return len(d.data) - d.off
-}
-
-func (d *ccacheDecoder) bytes(n int) ([]byte, error) {
-	if n < 0 || n > d.remaining() {
-		return nil, fmt.Errorf("truncated field")
-	}
-	value := d.data[d.off : d.off+n]
-	d.off += n
-	return value, nil
-}
-
-func (d *ccacheDecoder) u8() (uint8, error) {
-	value, err := d.bytes(1)
-	if err != nil {
-		return 0, err
-	}
-	return value[0], nil
-}
-
-func (d *ccacheDecoder) u16() (uint16, error) {
-	value, err := d.bytes(2)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint16(value), nil
-}
-
-func (d *ccacheDecoder) u32() (uint32, error) {
-	value, err := d.bytes(4)
-	if err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(value), nil
-}
-
-func (d *ccacheDecoder) counted32() ([]byte, error) {
-	length, err := d.u32()
-	if err != nil {
-		return nil, err
-	}
-	if uint64(length) > uint64(d.remaining()) {
-		return nil, fmt.Errorf("truncated counted field")
-	}
-	value, err := d.bytes(int(length))
-	if err != nil {
-		return nil, err
-	}
-	return value, nil
+	*binfmt.Reader
 }
 
 func (d *ccacheDecoder) principal() (principal.Principal, error) {
-	nameType, err := d.u32()
+	nameType, err := d.U32()
 	if err != nil {
 		return principal.Principal{}, err
 	}
-	count, err := d.u32()
+	count, err := d.U32()
 	if err != nil {
 		return principal.Principal{}, err
 	}
-	realm, err := d.counted32()
+	realm, err := d.Counted32()
 	if err != nil {
 		return principal.Principal{}, err
 	}
-	if uint64(count) > uint64(d.remaining()/4) {
+	if uint64(count) > uint64(d.Remaining()/4) {
 		return principal.Principal{}, fmt.Errorf("invalid principal component count")
 	}
 	components := make([]string, 0, int(count))
 	for i := uint32(0); i < count; i++ {
-		component, err := d.counted32()
+		component, err := d.Counted32()
 		if err != nil {
 			return principal.Principal{}, err
 		}
@@ -228,29 +184,29 @@ func (d *ccacheDecoder) credential() (Credential, error) {
 	if err != nil {
 		return Credential{}, err
 	}
-	enctype, err := d.u16()
+	enctype, err := d.U16()
 	if err != nil {
 		return Credential{}, err
 	}
-	key, err := d.counted32()
+	key, err := d.Counted32()
 	if err != nil {
 		return Credential{}, err
 	}
 	times := make([]uint32, 4)
 	for i := range times {
-		times[i], err = d.u32()
+		times[i], err = d.U32()
 		if err != nil {
 			return Credential{}, err
 		}
 	}
-	isSKey, err := d.u8()
+	isSKey, err := d.U8()
 	if err != nil {
 		return Credential{}, err
 	}
 	if isSKey > 1 {
 		return Credential{}, fmt.Errorf("invalid is_skey value")
 	}
-	flags, err := d.u32()
+	flags, err := d.U32()
 	if err != nil {
 		return Credential{}, err
 	}
@@ -262,11 +218,11 @@ func (d *ccacheDecoder) credential() (Credential, error) {
 	if err != nil {
 		return Credential{}, err
 	}
-	ticket, err := d.counted32()
+	ticket, err := d.Counted32()
 	if err != nil {
 		return Credential{}, err
 	}
-	secondTicket, err := d.counted32()
+	secondTicket, err := d.Counted32()
 	if err != nil {
 		return Credential{}, err
 	}
@@ -289,20 +245,20 @@ func (d *ccacheDecoder) credential() (Credential, error) {
 }
 
 func (d *ccacheDecoder) addresses() ([]Address, error) {
-	count, err := d.u32()
+	count, err := d.U32()
 	if err != nil {
 		return nil, err
 	}
-	if uint64(count) > uint64(d.remaining()/6) {
+	if uint64(count) > uint64(d.Remaining()/6) {
 		return nil, fmt.Errorf("invalid address count")
 	}
 	addresses := make([]Address, 0, int(count))
 	for i := uint32(0); i < count; i++ {
-		addressType, err := d.u16()
+		addressType, err := d.U16()
 		if err != nil {
 			return nil, err
 		}
-		data, err := d.counted32()
+		data, err := d.Counted32()
 		if err != nil {
 			return nil, err
 		}
@@ -312,20 +268,20 @@ func (d *ccacheDecoder) addresses() ([]Address, error) {
 }
 
 func (d *ccacheDecoder) authData() ([]AuthData, error) {
-	count, err := d.u32()
+	count, err := d.U32()
 	if err != nil {
 		return nil, err
 	}
-	if uint64(count) > uint64(d.remaining()/6) {
+	if uint64(count) > uint64(d.Remaining()/6) {
 		return nil, fmt.Errorf("invalid authdata count")
 	}
 	authData := make([]AuthData, 0, int(count))
 	for i := uint32(0); i < count; i++ {
-		authType, err := d.u16()
+		authType, err := d.U16()
 		if err != nil {
 			return nil, err
 		}
-		data, err := d.counted32()
+		data, err := d.Counted32()
 		if err != nil {
 			return nil, err
 		}
@@ -335,17 +291,17 @@ func (d *ccacheDecoder) authData() ([]AuthData, error) {
 }
 
 func parseHeader(data []byte, header *Header) error {
-	d := ccacheDecoder{data: data}
-	for d.remaining() > 0 {
-		tag, err := d.u16()
+	d := ccacheDecoder{Reader: binfmt.NewReader(data)}
+	for d.Remaining() > 0 {
+		tag, err := d.U16()
 		if err != nil {
 			return err
 		}
-		length, err := d.u16()
+		length, err := d.U16()
 		if err != nil {
 			return err
 		}
-		value, err := d.bytes(int(length))
+		value, err := d.Bytes(int(length))
 		if err != nil {
 			return err
 		}
@@ -373,26 +329,15 @@ func encodePrincipal(w io.Writer, p principal.Principal) error {
 	if err := binary.Write(w, binary.BigEndian, uint32(len(p.Components))); err != nil {
 		return err
 	}
-	if err := writeCounted32(w, []byte(p.Realm)); err != nil {
+	if err := binfmt.WriteCounted32(w, []byte(p.Realm)); err != nil {
 		return err
 	}
 	for _, component := range p.Components {
-		if err := writeCounted32(w, []byte(component)); err != nil {
+		if err := binfmt.WriteCounted32(w, []byte(component)); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func writeCounted32(w io.Writer, value []byte) error {
-	if uint64(len(value)) > uint64(^uint32(0)) {
-		return fmt.Errorf("field is too long")
-	}
-	if err := binary.Write(w, binary.BigEndian, uint32(len(value))); err != nil {
-		return err
-	}
-	_, err := w.Write(value)
-	return err
 }
 
 func encodeCredential(w io.Writer, credential Credential) error {
@@ -408,7 +353,7 @@ func encodeCredential(w io.Writer, credential Credential) error {
 	if err := binary.Write(w, binary.BigEndian, uint16(credential.Enctype)); err != nil {
 		return err
 	}
-	if err := writeCounted32(w, credential.Key); err != nil {
+	if err := binfmt.WriteCounted32(w, credential.Key); err != nil {
 		return err
 	}
 	for _, timestamp := range []uint32{credential.AuthTime, credential.StartTime, credential.EndTime, credential.RenewTill} {
@@ -432,10 +377,10 @@ func encodeCredential(w io.Writer, credential Credential) error {
 	if err := writeAuthData(w, credential.AuthData); err != nil {
 		return err
 	}
-	if err := writeCounted32(w, credential.Ticket); err != nil {
+	if err := binfmt.WriteCounted32(w, credential.Ticket); err != nil {
 		return err
 	}
-	return writeCounted32(w, credential.SecondTicket)
+	return binfmt.WriteCounted32(w, credential.SecondTicket)
 }
 
 func writeAddresses(w io.Writer, addresses []Address) error {
@@ -449,7 +394,7 @@ func writeAddresses(w io.Writer, addresses []Address) error {
 		if err := binary.Write(w, binary.BigEndian, address.Type); err != nil {
 			return err
 		}
-		if err := writeCounted32(w, address.Data); err != nil {
+		if err := binfmt.WriteCounted32(w, address.Data); err != nil {
 			return err
 		}
 	}
@@ -467,7 +412,7 @@ func writeAuthData(w io.Writer, values []AuthData) error {
 		if err := binary.Write(w, binary.BigEndian, value.Type); err != nil {
 			return err
 		}
-		if err := writeCounted32(w, value.Data); err != nil {
+		if err := binfmt.WriteCounted32(w, value.Data); err != nil {
 			return err
 		}
 	}

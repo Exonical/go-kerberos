@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// Config mirrors the MIT libkrb5 profile-derived client configuration.
 type Config struct {
 	DefaultRealm            string
 	DNSLookupKDC            bool
@@ -130,11 +131,6 @@ func (cfg *Config) RealmPath(client, server string) ([]string, bool, error) {
 
 // Parse parses a krb5.conf profile, including nested include directives.
 func Parse(data []byte) (*Config, error) {
-	// Keep the established parser on ordinary profiles; the recursive parser
-	// is needed only when include directives can alter parser state.
-	if !strings.Contains(string(data), "include") {
-		return parseLegacy(data)
-	}
 	cfg := newConfig()
 	if err := parseProfileContent(cfg, data, map[string]bool{}, new(int)); err != nil {
 		return nil, err
@@ -379,148 +375,7 @@ func validIncludedFilename(name string) bool {
 	return true
 }
 
-func parseLegacy(data []byte) (*Config, error) {
-	const maxConfigSize = 16 << 20
-	if len(data) > maxConfigSize {
-		return nil, fmt.Errorf("parse krb5.conf: input exceeds %d bytes", maxConfigSize)
-	}
-	cfg := &Config{
-		Realms:                  make(map[string][]string),
-		DomainRealm:             make(map[string]string),
-		Capaths:                 make(map[string][]string),
-		RealmLibDefaults:        make(map[string]map[string][]string),
-		RealmOptions:            make(map[string]map[string][]string),
-		CapathOptions:           make(map[string]map[string][]string),
-		RealmAuthToLocal:        make(map[string][]string),
-		RealmAuthToLocalNames:   make(map[string]map[string][]string),
-		Options:                 make(map[string]map[string][]string),
-		SubsectionOptions:       make(map[string]map[string]map[string][]string),
-		DNSURILookup:            true,
-		RDNS:                    true,
-		DNSCanonicalizeHostname: "fallback",
-	}
-	section := ""
-	subsection := ""
-	nestedSubsection := ""
-	pendingSubsection := ""
-	pendingNestedSubsection := ""
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 1024), maxConfigSize)
-	lineNumber := 0
-	for scanner.Scan() {
-		lineNumber++
-		line := strings.TrimSpace(stripComment(scanner.Text()))
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			if subsection != "" || nestedSubsection != "" || pendingSubsection != "" ||
-				pendingNestedSubsection != "" {
-				return nil, fmt.Errorf("parse krb5.conf line %d: unclosed subsection", lineNumber)
-			}
-			if !strings.HasSuffix(line, "]") || strings.Count(line, "[") != 1 ||
-				strings.Count(line, "]") != 1 {
-				return nil, fmt.Errorf("parse krb5.conf line %d: malformed section", lineNumber)
-			}
-			section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
-			if section == "" {
-				return nil, fmt.Errorf("parse krb5.conf line %d: empty section", lineNumber)
-			}
-			continue
-		}
-		if section == "" {
-			return nil, fmt.Errorf("parse krb5.conf line %d: relation before section", lineNumber)
-		}
-		if line == "{" {
-			if pendingNestedSubsection != "" {
-				nestedSubsection = pendingNestedSubsection
-				pendingNestedSubsection = ""
-				continue
-			}
-			if pendingSubsection == "" {
-				return nil, fmt.Errorf("parse krb5.conf line %d: unexpected opening brace", lineNumber)
-			}
-			subsection = pendingSubsection
-			pendingSubsection = ""
-			continue
-		}
-		if line == "}" {
-			if nestedSubsection != "" {
-				nestedSubsection = ""
-				continue
-			}
-			if subsection == "" {
-				return nil, fmt.Errorf("parse krb5.conf line %d: unexpected closing brace", lineNumber)
-			}
-			subsection = ""
-			continue
-		}
-		key, value, ok := splitRelation(line)
-		if !ok {
-			return nil, fmt.Errorf("parse krb5.conf line %d: malformed relation", lineNumber)
-		}
-		rawKey := key
-		key = strings.ToLower(key)
-		if key == "" {
-			return nil, fmt.Errorf("parse krb5.conf line %d: empty relation key", lineNumber)
-		}
-		if pendingSubsection != "" {
-			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
-		}
-		if pendingNestedSubsection != "" {
-			return nil, fmt.Errorf("parse krb5.conf line %d: expected opening brace", lineNumber)
-		}
-		if strings.HasSuffix(value, "{") {
-			if strings.TrimSpace(strings.TrimSuffix(value, "{")) != "" {
-				return nil, fmt.Errorf("parse krb5.conf line %d: malformed subsection", lineNumber)
-			}
-			if subsection != "" {
-				if strings.ToLower(strings.TrimSpace(rawKey)) != "auth_to_local_names" {
-					return nil, fmt.Errorf("parse krb5.conf line %d: nested subsection %q unsupported", lineNumber, rawKey)
-				}
-				nestedSubsection = strings.TrimSpace(rawKey)
-			} else {
-				subsection = strings.TrimSpace(rawKey)
-			}
-			continue
-		}
-		if value == "" {
-			if subsection != "" {
-				if nestedSubsection == "" &&
-					strings.EqualFold(rawKey, "auth_to_local_names") {
-					pendingNestedSubsection = rawKey
-					continue
-				}
-				return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
-			}
-			pendingSubsection = strings.TrimSpace(rawKey)
-			continue
-		}
-		values := splitValues(value)
-		if len(values) == 0 {
-			return nil, fmt.Errorf("parse krb5.conf line %d: empty relation value", lineNumber)
-		}
-		if nestedSubsection != "" {
-			addNestedSubsection(cfg, subsection, nestedSubsection, rawKey, values)
-			continue
-		}
-		if subsection != "" {
-			addSubsection(cfg, section, subsection, key, values)
-			continue
-		}
-		if err := applyOption(cfg, section, key, values); err != nil {
-			return nil, fmt.Errorf("parse krb5.conf line %d: %w", lineNumber, err)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("parse krb5.conf: %w", err)
-	}
-	if subsection != "" || pendingSubsection != "" || pendingNestedSubsection != "" {
-		return nil, fmt.Errorf("parse krb5.conf: unclosed subsection")
-	}
-	return cfg, nil
-}
-
+// ParseDuration parses the MIT profile duration syntax.
 func ParseDuration(value string) (time.Duration, error) {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "" {

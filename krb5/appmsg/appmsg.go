@@ -20,7 +20,7 @@ const (
 	defaultSkew  = 5 * time.Minute
 )
 
-// Options controls application-message protection and validation.
+// Options controls RFC 4120 KRB-SAFE and KRB-PRIV protection and validation.
 type Options struct {
 	Key            protocol.EncryptionKey
 	LocalAddress   *protocol.HostAddress
@@ -32,6 +32,7 @@ type Options struct {
 	Now            func() time.Time
 }
 
+// MakeSafe encodes a KRB-SAFE message using opts.
 func MakeSafe(data []byte, opts *Options) ([]byte, error) {
 	etype, err := validateOptions(opts, true)
 	if err != nil {
@@ -57,6 +58,7 @@ func MakeSafe(data []byte, opts *Options) ([]byte, error) {
 	return asn1.Marshal(message)
 }
 
+// ReadSafe verifies and decodes a KRB-SAFE message using opts.
 func ReadSafe(der []byte, opts *Options) ([]byte, error) {
 	etype, err := validateOptions(opts, false)
 	if err != nil {
@@ -93,6 +95,7 @@ func ReadSafe(der []byte, opts *Options) ([]byte, error) {
 	return append([]byte(nil), message.SafeBody.UserData...), nil
 }
 
+// MakePriv encodes a KRB-PRIV message using opts.
 func MakePriv(data []byte, opts *Options) ([]byte, error) {
 	etype, err := validateOptions(opts, true)
 	if err != nil {
@@ -113,6 +116,7 @@ func MakePriv(data []byte, opts *Options) ([]byte, error) {
 	})
 }
 
+// ReadPriv verifies and decodes a KRB-PRIV message using opts.
 func ReadPriv(der []byte, opts *Options) ([]byte, error) {
 	etype, err := validateOptions(opts, false)
 	if err != nil {
