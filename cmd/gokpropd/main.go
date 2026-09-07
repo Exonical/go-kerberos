@@ -260,8 +260,8 @@ func loadReceivedDump(reader io.Reader, size uint64, options propdOptions) error
 		return writeFileAtomic(options.Database, data)
 	}
 	args := buildLoadArgs(options)
-	command := exec.Command(options.KDBUtil, args...)
-	if output, err := command.CombinedOutput(); err != nil { // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.dangerous-exec-command -- -p intentionally selects an administrator-configured kdb5_util-compatible loader
+	command := exec.Command(options.KDBUtil, args...) // nosemgrep: tmp.opengrep-rules.go.lang.security.audit.dangerous-exec-command -- -p intentionally selects an administrator-configured kdb5_util-compatible loader
+	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s load: %w: %s", options.KDBUtil, err, strings.TrimSpace(string(output)))
 	}
 	return nil
