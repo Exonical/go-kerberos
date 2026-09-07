@@ -45,6 +45,8 @@ const (
 	KRBAPErrBadIntegrity ErrorCode = 31
 	// KRBAPErrTktNYV is KRB_AP_ERR_TKT_NYV.
 	KRBAPErrTktNYV ErrorCode = 33
+	// KRBAPErrRepeat is KRB_AP_ERR_REPEAT.
+	KRBAPErrRepeat ErrorCode = 34
 	// KRBAPErrSkew is KRB_AP_ERR_SKEW.
 	KRBAPErrSkew ErrorCode = 37
 	// KRBAPErrBadAddr is KRB_AP_ERR_BADADDR.
@@ -103,6 +105,8 @@ func (e *KRBError) Is(target error) bool {
 		return target == ErrTicketExpired
 	case KRBAPErrTktNYV:
 		return target == ErrTicketNotYetValid
+	case KRBAPErrRepeat:
+		return target == ErrReplay
 	case KDCErrEtypeNosp:
 		return target == ErrUnsupportedEType
 	case KRBAPErrBadIntegrity, KDCErrPreauthFailed:

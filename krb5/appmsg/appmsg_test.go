@@ -9,6 +9,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -206,6 +207,107 @@ func TestMakeRequiresLocalAddress(t *testing.T) {
 	if _, err := MakePriv([]byte("payload"), opts); !errors.As(err, &typed) ||
 		typed.Code != krberrors.KRBAPErrBadAddr {
 		t.Fatalf("MakePriv error = %v, want KRB_AP_ERR_BADADDR", err)
+	}
+}
+
+func TestReplayCacheRejectsDuplicateSafeAndPriv(t *testing.T) {
+	makeOpts := messageOptions(true, false, testSender, nil, 0, testNow)
+	safe, err := MakeSafe([]byte("replayed safe"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, err := MakePriv([]byte("replayed priv"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		read func(*Options) error
+	}{
+		{
+			name: "safe",
+			read: func(opts *Options) error {
+				_, err := ReadSafe(safe, opts)
+				return err
+			},
+		},
+		{
+			name: "priv",
+			read: func(opts *Options) error {
+				_, err := ReadPriv(priv, opts)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			opts := messageOptions(true, false, nil, testSender, 0, testNow)
+			opts.ReplayCache = &rcache.Memory{}
+			if err := test.read(opts); err != nil {
+				t.Fatal(err)
+			}
+			var typed *krberrors.KRBError
+			if err := test.read(opts); !errors.As(err, &typed) ||
+				typed.Code != krberrors.KRBAPErrRepeat {
+				t.Fatalf("duplicate error = %v, want KRB_AP_ERR_REPEAT", err)
+			}
+		})
+	}
+}
+
+func TestReplayCacheAllowsDistinctMessagesAndDisabledChecks(t *testing.T) {
+	makeOpts := messageOptions(true, false, testSender, nil, 0, testNow)
+	cache := &rcache.Memory{}
+	readOpts := messageOptions(true, false, nil, testSender, 0, testNow)
+	readOpts.ReplayCache = cache
+	first, err := MakeSafe([]byte("first"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := MakeSafe([]byte("second"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSafe(first, readOpts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSafe(second, readOpts); err != nil {
+		t.Fatal(err)
+	}
+	privFirst, err := MakePriv([]byte("first private"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privSecond, err := MakePriv([]byte("second private"), makeOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privCache := &rcache.Memory{}
+	privRead := messageOptions(true, false, nil, testSender, 0, testNow)
+	privRead.ReplayCache = privCache
+	if _, err := ReadPriv(privFirst, privRead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPriv(privSecond, privRead); err != nil {
+		t.Fatal(err)
+	}
+
+	plainMake := messageOptions(false, false, testSender, nil, 0, testNow)
+	plain, err := MakeSafe([]byte("plain"), plainMake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainRead := messageOptions(false, false, nil, testSender, 0, testNow)
+	plainRead.ReplayCache = &rcache.Memory{}
+	for i := 0; i < 2; i++ {
+		if _, err := ReadSafe(plain, plainRead); err != nil {
+			t.Fatalf("plain read %d: %v", i, err)
+		}
+	}
+	noCacheRead := messageOptions(true, false, nil, testSender, 0, testNow)
+	for i := 0; i < 2; i++ {
+		if _, err := ReadSafe(first, noCacheRead); err != nil {
+			t.Fatalf("no-cache read %d: %v", i, err)
+		}
 	}
 }
 

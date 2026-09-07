@@ -3,6 +3,7 @@ package appmsg
 
 import (
 	"bytes"
+	stderrors "errors"
 	"fmt"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
+	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -30,6 +32,8 @@ type Options struct {
 	SequenceNumber uint32
 	ClockSkew      time.Duration
 	Now            func() time.Time
+	// ReplayCache is consulted only when DoTime is set.
+	ReplayCache rcache.Cache
 }
 
 func MakeSafe(data []byte, opts *Options) ([]byte, error) {
@@ -90,6 +94,9 @@ func ReadSafe(der []byte, opts *Options) ([]byte, error) {
 		message.SafeBody.SeqNumber, opts); err != nil {
 		return nil, err
 	}
+	if err := checkReplay(rcache.TagFromChecksum(received), message.SafeBody.Timestamp, opts); err != nil {
+		return nil, err
+	}
 	return append([]byte(nil), message.SafeBody.UserData...), nil
 }
 
@@ -141,6 +148,10 @@ func ReadPriv(der []byte, opts *Options) ([]byte, error) {
 		return nil, err
 	}
 	if err := validateReplayFields(body.Timestamp, body.Usec, body.SeqNumber, opts); err != nil {
+		return nil, err
+	}
+	if err := checkReplay(rcache.TagFromCiphertext(message.EncPart.Cipher, etype.ChecksumSize()),
+		body.Timestamp, opts); err != nil {
 		return nil, err
 	}
 	return append([]byte(nil), body.UserData...), nil
@@ -219,10 +230,7 @@ func validateReplayFields(timestamp *types.KerberosTime, usec *int32, seq *uint3
 		if timestamp == nil || !timestamp.Present {
 			return appError(krberrors.KRBAPErrSkew, "missing timestamp")
 		}
-		skew := opts.ClockSkew
-		if skew == 0 {
-			skew = defaultSkew
-		}
+		skew := effectiveSkew(opts)
 		messageTime := timestamp.Time
 		if usec != nil {
 			messageTime = messageTime.Add(time.Duration(*usec) * time.Microsecond)
@@ -241,6 +249,29 @@ func validateReplayFields(timestamp *types.KerberosTime, usec *int32, seq *uint3
 		}
 	}
 	return nil
+}
+
+func checkReplay(tag []byte, timestamp *types.KerberosTime, opts *Options) error {
+	if !opts.DoTime || opts.ReplayCache == nil {
+		return nil
+	}
+	if timestamp == nil || !timestamp.Present {
+		return appError(krberrors.KRBAPErrSkew, "missing timestamp")
+	}
+	if err := opts.ReplayCache.Store(tag, timestamp.Time, effectiveSkew(opts)); err != nil {
+		if stderrors.Is(err, rcache.ErrReplay) {
+			return appError(krberrors.KRBAPErrRepeat, "replayed application message")
+		}
+		return fmt.Errorf("appmsg: replay cache: %w", err)
+	}
+	return nil
+}
+
+func effectiveSkew(opts *Options) time.Duration {
+	if opts.ClockSkew == 0 {
+		return defaultSkew
+	}
+	return opts.ClockSkew
 }
 
 func sameAddress(left, right protocol.HostAddress) bool {
