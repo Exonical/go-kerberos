@@ -22,6 +22,14 @@ type AuthorizationDataEntry struct {
 
 type AuthorizationData []AuthorizationDataEntry
 
+// KDCIssued is the RFC 4120 AD-KDC-ISSUED authorization-data payload.
+type KDCIssued struct {
+	Checksum Checksum          `krb5:"tag:0"`
+	IRealm   *string           `krb5:"tag:1,optional"`
+	IName    *PrincipalName    `krb5:"tag:2,optional"`
+	Elements AuthorizationData `krb5:"tag:3"`
+}
+
 // VerifierMAC is the RFC 7751 CAMMAC verifier-mac structure.
 type VerifierMAC struct {
 	Princ    *PrincipalName `krb5:"tag:0,optional"`
@@ -582,9 +590,11 @@ const (
 
 // Authorization-data type numbers used by RFC 7751 and RFC 4120.
 const (
-	ADIfRelevant    int32 = 1
-	ADCAMMAC        int32 = 96
-	ADAuthIndicator int32 = 97
+	ADIfRelevant      int32 = 1
+	ADKDCIssued       int32 = 4
+	ADMandatoryForKDC int32 = 8
+	ADCAMMAC          int32 = 96
+	ADAuthIndicator   int32 = 97
 )
 
 // PKINIT padata types defined by RFC 4556.

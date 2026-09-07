@@ -44,20 +44,26 @@ func (testDialer) DialContext(ctx context.Context, network, address string) (net
 
 func listenUDPAndTCP(t *testing.T) (*net.UDPConn, net.Listener) {
 	t.Helper()
-	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("ListenUDP: %v", err)
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("ListenUDP: %v", err)
+		}
+		tcp, err := net.Listen("tcp", udp.LocalAddr().String())
+		if err != nil {
+			lastErr = err
+			udp.Close()
+			continue
+		}
+		t.Cleanup(func() {
+			udp.Close()
+			tcp.Close()
+		})
+		return udp, tcp
 	}
-	tcp, err := net.Listen("tcp", udp.LocalAddr().String())
-	if err != nil {
-		udp.Close()
-		t.Fatalf("ListenTCP: %v", err)
-	}
-	t.Cleanup(func() {
-		udp.Close()
-		tcp.Close()
-	})
-	return udp, tcp
+	t.Fatalf("ListenTCP after retries: %v", lastErr)
+	return nil, nil
 }
 
 func readFrame(r io.Reader) ([]byte, error) {

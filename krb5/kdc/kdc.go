@@ -121,6 +121,9 @@ type Server struct {
 	// CertAuthModules are additional PKINIT certificate authorization modules.
 	// Built-in modules always run before these modules.
 	CertAuthModules []CertAuthModule
+	// AuthDataModules add MIT-shaped KDC authorization data to issued tickets.
+	// A nil list leaves authorization-data module handling disabled.
+	AuthDataModules []AuthDataModule
 	// PKINITRequireFreshness requires RFC 8070 freshness tokens on signed
 	// PKINIT requests. Clients which advertise freshness receive an opaque
 	// token in PREAUTH_REQUIRED and must echo it in PKAuthenticator.
@@ -1554,6 +1557,15 @@ func (s *Server) buildASRepWithHWAuth(request protocol.ASReq, clientName princip
 		CName:    protocol.PrincipalName{NameType: int32(clientName.NameType), NameString: clientName.Components},
 		AuthTime: authTime, StartTime: &startTime, EndTime: endTime, RenewTill: renewTill,
 	}
+	s.handleAuthData(&AuthDataRequest{
+		Flags:     AuthDataASReq,
+		Client:    clientName,
+		Server:    serviceName,
+		ClientKey: &clientKey,
+		ServerKey: &serviceKey,
+		Request:   request,
+		Reply:     &ticketPart,
+	})
 	if err := s.issueCAMMAC(&ticketPart, serviceKey, nil, assertedIndicators); err != nil {
 		return s.errorResponse(kdcErrGeneric, request.ReqBody.SName)
 	}
@@ -2323,7 +2335,7 @@ func (s *Server) handleTGSReqCore(request protocol.TGSReq, raw []byte, auditStat
 		}
 		auditState.Stage = AuditIssueTicket
 	}
-	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey)
+	return s.buildTGSRep(request, ticketPart, apRequest.Ticket, ticketKey, serviceName, serviceRecord, etypeID, serviceKey, replyKey, replyUsage, armor, issuedClient, s4uReplyPA, delegationEvidence, verifiedCAMMACElements, pacVerifyKey, u2uTicketKey, authenticator.SubKey)
 }
 
 func samePrincipalIdentity(left, right principal.Principal) bool {
@@ -2469,7 +2481,7 @@ func (s *Server) unwrapFASTTGSReq(request protocol.TGSReq, checksummedData []byt
 	return request, armor, 0
 }
 
-func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key) []byte {
+func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTicketPart, headerTicket protocol.Ticket, headerKey kdb.Key, serviceName principal.Principal, serviceRecord kdb.PrincipalRecord, etypeID int32, serviceKey kdb.Key, replyKey protocol.EncryptionKey, replyUsage uint32, armor *fastContext, issuedClient *principal.Principal, replyPA *protocol.PAData, delegationEvidence *principal.Principal, verifiedCAMMACElements protocol.AuthorizationData, pacVerifyKey *kdb.Key, u2uTicketKey *kdb.Key, authenticatorSubKeys ...*protocol.EncryptionKey) []byte {
 	etype, err := crypto.NewRegistry().Get(etypeID)
 	if err != nil {
 		return s.tgsErrorResponse(armor, 14, request.ReqBody.SName)
@@ -2555,13 +2567,26 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 	if request.ReqBody.KDCOptions&(types.KDCForwarded|types.KDCProxy) != 0 {
 		addresses = append(protocol.HostAddresses(nil), request.ReqBody.Addresses...)
 	}
+	tgtPart := ticketPart
+	tgtAuthData := append(protocol.AuthorizationData(nil), ticketPart.AuthorizationData...)
+	var authenticatorSubKey *protocol.EncryptionKey
+	if len(authenticatorSubKeys) > 0 {
+		authenticatorSubKey = authenticatorSubKeys[0]
+	}
+	requestAuthData, err := decryptTGSRequestAuthData(request, ticketPart.Key, authenticatorSubKey)
+	if err != nil {
+		return s.tgsErrorResponse(armor, kdcErrGeneric, request.ReqBody.SName)
+	}
+	if hasMandatoryKDCAuthData(requestAuthData) {
+		return s.tgsErrorResponse(armor, kdcErrPolicy, request.ReqBody.SName)
+	}
 	ticketPart = protocol.EncTicketPart{
 		Flags:  flags,
 		Key:    protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionValue},
 		CRealm: ticketPart.CRealm, CName: ticketPart.CName,
 		Transited: ticketPart.Transited,
 		AuthTime:  authTime, StartTime: startTime, EndTime: endTime, RenewTill: renewTill,
-		CAddr: addresses, AuthorizationData: ticketPart.AuthorizationData,
+		CAddr: addresses, AuthorizationData: requestAuthData,
 	}
 	if issuedClient != nil {
 		ticketPart.CRealm = issuedClient.Realm
@@ -2583,6 +2608,19 @@ func (s *Server) buildTGSRep(request protocol.TGSReq, ticketPart protocol.EncTic
 		flags |= types.TicketTransited
 	}
 	ticketPart.Flags = flags
+	s.handleAuthData(&AuthDataRequest{
+		Flags:         AuthDataTGSReq,
+		Client:        principalFromProtocol(ticketPart.CName, ticketPart.CRealm),
+		Server:        serviceName,
+		SubjectServer: delegationEvidence,
+		ClientKey:     nil,
+		ServerKey:     &serviceKey,
+		SubjectKey:    pacVerifyKey,
+		Request:       request,
+		TGT:           &tgtPart,
+		Reply:         &ticketPart,
+	})
+	ticketPart.AuthorizationData = append(ticketPart.AuthorizationData, tgtAuthData...)
 	ticketEncryptionKey := serviceKey
 	ticketKVNO := serviceKey.KVNO
 	var ticketKVNOPtr = &ticketKVNO

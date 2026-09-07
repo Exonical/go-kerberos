@@ -746,3 +746,26 @@ and follows MIT default-realm selection, rejecting ambiguous multi-realm
 profiles without an explicit default. The Go iprop master remains in-memory;
 ulogs can be inspected when produced by MIT or explicitly created with the Go
 API.
+
+## Authorization-data plugin parity
+
+The KDC exposes MIT-shaped `kdcauthdata` modules through the compile-time
+`kdc.AuthDataModule` interface. Modules can inspect AS and TGS request context
+and append authorization data to the mutable reply ticket; module failures are
+logged and ignored as in MIT. The client `krb5/authdata` package provides a
+compile-time registered context with recursive AD-IF-RELEVANT processing,
+AD-KDC-ISSUED checksum verification, CAMMAC protection handling, and optional
+attribute operations. Go interfaces are used instead of MIT's dynamic shared
+object loading.
+
+The sample greeting behavior follows MIT's
+`src/kdc/kdc_authdata.c`,
+`src/include/krb5/kdcauthdata_plugin.h`,
+`src/plugins/authdata/greet_server`,
+`src/lib/krb5/krb/authdata.c`,
+`src/include/krb5/authdata_plugin.h`, and
+`src/plugins/authdata/greet_client`. Unit tests cover wrapping, checksum
+verification, module dispatch, authenticated attributes, and anonymous-ticket
+suppression. No live MIT plugin-loading gate is provided because the Go
+registration model is static and the fixture does not configure MIT shared
+authdata modules.
