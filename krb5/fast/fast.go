@@ -10,6 +10,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -66,7 +67,7 @@ func NewArmor(tgt TGT, now time.Time) (*Armor, error) {
 		return nil, fmt.Errorf("FAST armor ticket: %w", err)
 	}
 	subkeyValue := make([]byte, etype.KeySize())
-	if _, err := io.ReadFull(crypto.RandomSource, subkeyValue); err != nil {
+	if _, err := io.ReadFull(random.Reader(), subkeyValue); err != nil {
 		return nil, fmt.Errorf("FAST armor subkey: %w", err)
 	}
 	authenticator, err := asn1.Marshal(protocol.Authenticator{
@@ -282,7 +283,7 @@ func ChecksumType(id int32) int32 {
 
 func randomNonce() uint32 {
 	var value [4]byte
-	if _, err := io.ReadFull(crypto.RandomSource, value[:]); err != nil {
+	if _, err := io.ReadFull(random.Reader(), value[:]); err != nil {
 		return 0
 	}
 	return binary.BigEndian.Uint32(value[:]) & 0x7fffffff

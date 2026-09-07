@@ -133,7 +133,7 @@ func Field(data []byte, path ...int) ([]byte, error) {
 		}
 		current = found
 	}
-	return append([]byte(nil), current...), nil
+	panic("unreachable")
 }
 
 // FieldContent returns the contents of the raw DER element selected by Field.
@@ -518,24 +518,8 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 		if nextTag != expectedTag {
 			if tag.implicit && (nextTag == 0x80|byte(tag.number) ||
 				nextTag == expectedTag) {
-				implicitTag := tagForImplicitField(destination.Field(i))
-				if implicitTag == 0 {
-					return fmt.Errorf("field %s cannot use implicit tagging", field.Name)
-				}
-				_, implicitContent, implicitEnd, err := readTLV(content[position : position+end])
-				if err != nil || implicitEnd != end {
-					return fmt.Errorf("invalid implicit field")
-				}
-				if implicitTag == tagInteger {
-					if err := decodeImplicitInteger(implicitContent, destination.Field(i), tag.signed); err != nil {
-						return fmt.Errorf("field %s: %w", field.Name, err)
-					}
-					position += end
-					continue
-				}
-				implicit := encodeTLV(implicitTag, implicitContent)
-				if err := decodeValue(implicit, destination.Field(i), depth+1); err != nil {
-					return fmt.Errorf("field %s: %w", field.Name, err)
+				if err := decodeImplicitField(content[position:position+end], destination.Field(i), tag, depth, field.Name); err != nil {
+					return err
 				}
 				position += end
 				continue
@@ -547,24 +531,8 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 			return fmt.Errorf("unexpected or out-of-order field tag 0x%x, want 0x%x", nextTag, expectedTag)
 		}
 		if tag.implicit {
-			implicitTag := tagForImplicitField(destination.Field(i))
-			if implicitTag == 0 {
-				return fmt.Errorf("field %s cannot use implicit tagging", field.Name)
-			}
-			_, implicitContent, implicitEnd, err := readTLV(content[position : position+end])
-			if err != nil || implicitEnd != end {
-				return fmt.Errorf("invalid implicit field")
-			}
-			if implicitTag == tagInteger {
-				if err := decodeImplicitInteger(implicitContent, destination.Field(i), tag.signed); err != nil {
-					return fmt.Errorf("field %s: %w", field.Name, err)
-				}
-				position += end
-				continue
-			}
-			implicit := encodeTLV(implicitTag, implicitContent)
-			if err := decodeValue(implicit, destination.Field(i), depth+1); err != nil {
-				return fmt.Errorf("field %s: %w", field.Name, err)
+			if err := decodeImplicitField(content[position:position+end], destination.Field(i), tag, depth, field.Name); err != nil {
+				return err
 			}
 			position += end
 			continue
@@ -587,6 +555,28 @@ func decodeStruct(content []byte, destination reflect.Value, depth int) error {
 	}
 	if position != len(content) {
 		return fmt.Errorf("unknown trailing field")
+	}
+	return nil
+}
+
+func decodeImplicitField(data []byte, destination reflect.Value, tag fieldTag, depth int, fieldName string) error {
+	implicitTag := tagForImplicitField(destination)
+	if implicitTag == 0 {
+		return fmt.Errorf("field %s cannot use implicit tagging", fieldName)
+	}
+	_, implicitContent, implicitEnd, err := readTLV(data)
+	if err != nil || implicitEnd != len(data) {
+		return fmt.Errorf("invalid implicit field")
+	}
+	if implicitTag == tagInteger {
+		if err := decodeImplicitInteger(implicitContent, destination, tag.signed); err != nil {
+			return fmt.Errorf("field %s: %w", fieldName, err)
+		}
+		return nil
+	}
+	implicit := encodeTLV(implicitTag, implicitContent)
+	if err := decodeValue(implicit, destination, depth+1); err != nil {
+		return fmt.Errorf("field %s: %w", fieldName, err)
 	}
 	return nil
 }
@@ -821,10 +811,6 @@ func tagForImplicitType(typ reflect.Type) byte {
 	}
 }
 
-func isContextSpecificTag(tag byte) bool {
-	return tag&0xc0 == 0x80
-}
-
 func isLaterContextSpecificTag(typ reflect.Type, index int, nextTag byte) bool {
 	for i := index + 1; i < typ.NumField(); i++ {
 		field := typ.Field(i)
@@ -918,12 +904,6 @@ func decodeImplicitInteger(data []byte, destination reflect.Value, signed bool) 
 		destination = destination.Elem()
 	}
 	if signed {
-		if destination.Kind() == reflect.Pointer {
-			if destination.IsNil() {
-				destination.Set(reflect.New(destination.Type().Elem()))
-			}
-			destination = destination.Elem()
-		}
 		if destination.Kind() < reflect.Uint || destination.Kind() > reflect.Uint64 {
 			return fmt.Errorf("implicit INTEGER destination is not unsigned")
 		}

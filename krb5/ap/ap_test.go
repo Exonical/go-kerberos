@@ -12,6 +12,7 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
 	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/internal/random"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -27,7 +28,7 @@ const (
 func TestAPReqRoundTripAndMutualAuth(t *testing.T) {
 	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x33}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x33}, 256)))
 	defer restore()
 
 	request, der, err := BuildAPReq(creds, types.APMutualRequired, now)
@@ -136,7 +137,7 @@ func TestVerifyAPReqWithSessionKeyRequiresOption(t *testing.T) {
 func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 	now := time.Date(2025, 2, 3, 4, 5, 6, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x44}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x44}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -151,7 +152,7 @@ func TestVerifyAPReqRejectsWrongKey(t *testing.T) {
 func TestVerifyAPReqRejectsExpiredTicket(t *testing.T) {
 	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(-6*time.Minute))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x55}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x55}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -288,7 +289,7 @@ func TestTicketValidMatchesMIT(t *testing.T) {
 func TestVerifyAPReqRejectsClockSkew(t *testing.T) {
 	now := time.Date(2025, 4, 5, 6, 7, 8, 0, time.UTC)
 	creds, kt := apFixture(t, now.Add(-time.Hour), now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x66}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x66}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now.Add(-time.Hour))
 	if err != nil {
@@ -302,7 +303,7 @@ func TestVerifyAPReqRejectsClockSkew(t *testing.T) {
 func TestVerifyAPReqRejectsClientMismatchAndReplay(t *testing.T) {
 	now := time.Date(2025, 5, 6, 7, 8, 9, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x77}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x77}, 256)))
 	defer restore()
 	_, der, err := BuildAPReq(creds, 0, now)
 	if err != nil {
@@ -489,7 +490,7 @@ func TestVerifyAPReqReplayCacheRemainsBounded(t *testing.T) {
 func TestVerifyAPRepRejectsCTimeMismatch(t *testing.T) {
 	now := time.Date(2025, 6, 7, 8, 9, 10, 0, time.UTC)
 	creds, kt := apFixture(t, now, now.Add(time.Hour))
-	restore := crypto.SetRandomSource(bytes.NewReader(bytes.Repeat([]byte{0x88}, 256)))
+	restore := random.SetSource(bytes.NewReader(bytes.Repeat([]byte{0x88}, 256)))
 	defer restore()
 	request, der, err := BuildAPReq(creds, types.APMutualRequired, now)
 	if err != nil {
@@ -545,14 +546,14 @@ func apFixture(t *testing.T, start, end time.Time) (*client.Credentials, *keytab
 		EncPart: protocol.EncryptedData{EType: apEtype, KVNO: &kvno, Cipher: ticketCipher},
 	}
 	return &client.Credentials{
-		Client: clientPrincipal, Server: service,
-		Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
-		Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
-		StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
-		Ticket: mustMarshalAP(t, ticket),
-	}, &keytab.Keytab{Entries: []keytab.Entry{{
-		Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
-	}}}
+			Client: clientPrincipal, Server: service,
+			Key:   protocol.EncryptionKey{KeyType: apEtype, KeyValue: sessionKey},
+			Flags: types.TicketForwardable, AuthTime: ticketPart.AuthTime,
+			StartTime: ticketPart.StartTime, EndTime: ticketPart.EndTime,
+			Ticket: mustMarshalAP(t, ticket),
+		}, &keytab.Keytab{Entries: []keytab.Entry{{
+			Principal: service, KVNO: 1, Enctype: apEtype, Key: serviceKey,
+		}}}
 }
 
 func encryptTicket(t *testing.T, key []byte, part protocol.EncTicketPart) []byte {
