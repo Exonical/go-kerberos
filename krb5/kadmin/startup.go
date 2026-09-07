@@ -269,18 +269,31 @@ func RunRemote(ctx context.Context, opts StartupOptions, in io.Reader, out, errO
 		if keytabErr != nil {
 			return keytabErr
 		}
-		entries, keytabErr := kt.LookupPrincipal(admin)
-		if keytabErr != nil {
-			return keytabErr
-		}
-		if len(entries) == 0 {
-			return fmt.Errorf("keytab %s has no entry for %s", keytabName, admin)
-		}
-		entry := entries[0]
-		for _, candidate := range entries[1:] {
-			if candidate.KVNO > entry.KVNO {
-				entry = candidate
+		var entry keytab.Entry
+		found := false
+		for _, candidate := range kt.Entries() {
+			if candidate.Principal.Realm != admin.Realm ||
+				candidate.Principal.NameType != admin.NameType ||
+				len(candidate.Principal.Components) != len(admin.Components) {
+				continue
 			}
+			matches := true
+			for i := range admin.Components {
+				if candidate.Principal.Components[i] != admin.Components[i] {
+					matches = false
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+			if !found || candidate.KVNO > entry.KVNO {
+				entry = candidate
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("keytab %s has no entry for %s", keytabName, admin)
 		}
 		creds, err = kerberos.ASExchangeServiceWithKey(ctx, admin, entry, *service)
 		if err != nil {

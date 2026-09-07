@@ -10,8 +10,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -244,8 +244,8 @@ func TestRequiredPreauthModuleRejectsBuiltinOnly(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
-		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberrors.KDCErrPreauthFailed)
+	if response.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberr.KDCErrPreauthFailed)
 	}
 }
 
@@ -326,8 +326,8 @@ func TestRequiredPreauthModulesMissingAnswerRejects(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
-		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberrors.KDCErrPreauthFailed)
+	if response.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberr.KDCErrPreauthFailed)
 	}
 }
 
@@ -397,8 +397,8 @@ func TestKeylessCustomPreauthRequiresReplacementKey(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
-		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberrors.KDCErrPreauthFailed)
+	if response.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberr.KDCErrPreauthFailed)
 	}
 }
 
@@ -484,7 +484,7 @@ func TestRequiresHardwareAuthRejectsNonHardwareCustomPreauth(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
 		t.Fatal(err)
 	}
-	if failure.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
+	if failure.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
 		t.Fatalf("error code = %d, want preauth failed", failure.ErrorCode)
 	}
 }
@@ -582,7 +582,7 @@ func TestKeylessCustomPreauthWithoutReplacementKeyFailsPreauth(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &failure); err != nil {
 		t.Fatal(err)
 	}
-	if failure.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
+	if failure.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
 		t.Fatalf("keyless non-replacement error = %d, want preauth failed", failure.ErrorCode)
 	}
 }
@@ -627,7 +627,7 @@ func TestPreauthModuleVerifyFailure(t *testing.T) {
 	if err := asn1.Unmarshal(server.HandleMessage(mustMarshal(t, request)), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ErrorCode != int32(krberrors.KDCErrPreauthFailed) {
-		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberrors.KDCErrPreauthFailed)
+	if response.ErrorCode != int32(krberr.KDCErrPreauthFailed) {
+		t.Fatalf("error code = %d, want %d", response.ErrorCode, krberr.KDCErrPreauthFailed)
 	}
 }

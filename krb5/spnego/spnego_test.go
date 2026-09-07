@@ -547,7 +547,7 @@ func syntheticCredentials(t *testing.T) (*client.Credentials, *keytab.Keytab) {
 			Client: clientPrincipal, Server: servicePrincipal,
 			Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionKey},
 			AuthTime: types.KerberosTime{Time: now, Present: true}, EndTime: end, Ticket: ticket,
-		}, &keytab.Keytab{Entries: []keytab.Entry{{
+		}, keytab.New(keytab.Entry{
 			Principal: servicePrincipal, KVNO: kvno, Enctype: etypeID, Key: serviceKey,
-		}}}
+		})
 }

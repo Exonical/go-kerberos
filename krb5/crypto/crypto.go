@@ -15,7 +15,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/crypto/aescts"
 	"github.com/Exonical/go-kerberos/krb5/crypto/camellia"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/types"
 )
 
@@ -190,7 +190,7 @@ func (e camelliaEType) decryptWithAssociatedData(key []byte, usage uint32, ciphe
 		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, err)
 	}
 	if len(iv) != camellia.BlockSize || len(ciphertext) < camellia.BlockSize+camellia.BlockSize {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	encrypted := ciphertext[:len(ciphertext)-camellia.BlockSize]
 	supplied := ciphertext[len(ciphertext)-camellia.BlockSize:]
@@ -204,12 +204,12 @@ func (e camelliaEType) decryptWithAssociatedData(key []byte, usage uint32, ciphe
 	}
 	plain, nextIV, err := camelliaCTS(ke, iv, encrypted, true)
 	if err != nil || len(plain) < camellia.BlockSize {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	macInput := append(append([]byte(nil), plain...), associated...)
 	expected, err := camelliaCMACKey(ki, macInput)
 	if err != nil || !hmac.Equal(expected, supplied) {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	return plain[camellia.BlockSize:], nextIV, nil
 }
@@ -233,7 +233,7 @@ func (e camelliaEType) VerifyChecksum(key []byte, usage uint32, data, checksum [
 		return err
 	}
 	if !hmac.Equal(expected, checksum) {
-		return fmt.Errorf("etype %d verify checksum: %w", e.id, krberrors.ErrIntegrity)
+		return fmt.Errorf("etype %d verify checksum: %w", e.id, krberr.ErrIntegrity)
 	}
 	return nil
 }
@@ -553,7 +553,7 @@ func (e aesEType) decryptWithAssociatedData(key []byte, usage uint32, ciphertext
 		return nil, nil, fmt.Errorf("etype %d decrypt: invalid IV length %d", e.id, len(iv))
 	}
 	if len(ciphertext) < 16+e.checksumSize {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	encrypted := ciphertext[:len(ciphertext)-e.checksumSize]
 	suppliedMAC := ciphertext[len(ciphertext)-e.checksumSize:]
@@ -571,19 +571,19 @@ func (e aesEType) decryptWithAssociatedData(key []byte, usage uint32, ciphertext
 	} else {
 		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)
 		if err != nil {
-			return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+			return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 		}
 		macInput = append(append([]byte(nil), plain...), associated...)
 	}
 	expectedMAC := hmacDigest(e.hash, ki, macInput)[:e.checksumSize]
 	if !hmac.Equal(expectedMAC, suppliedMAC) {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	if plain == nil {
 		plain, nextIV, err = aescts.DecryptWithState(ke, iv, encrypted)
 	}
 	if err != nil || len(plain) < 16 {
-		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberrors.ErrIntegrity)
+		return nil, nil, fmt.Errorf("etype %d decrypt: %w", e.id, krberr.ErrIntegrity)
 	}
 	return plain[16:], nextIV, nil
 }
@@ -658,7 +658,7 @@ func (e aesEType) VerifyChecksum(key []byte, usage uint32, data, checksum []byte
 		return err
 	}
 	if !hmac.Equal(expected, checksum) {
-		return fmt.Errorf("etype %d verify checksum: %w", e.id, krberrors.ErrIntegrity)
+		return fmt.Errorf("etype %d verify checksum: %w", e.id, krberr.ErrIntegrity)
 	}
 	return nil
 }
@@ -680,7 +680,7 @@ func PRF(etype EType, key, input []byte) ([]byte, error) {
 			}
 			return camelliaCMACKey(dkey, input)
 		}
-		return nil, krberrors.ErrUnsupportedEType
+		return nil, krberr.ErrUnsupportedEType
 	}
 	if err := validateKey(key, aes.keySize); err != nil {
 		return nil, err
@@ -825,16 +825,16 @@ func (r *Registry) Get(id int32) (EType, error) {
 		return aesEType{id: id, keySize: 32, checksumSize: 24, sha2: true, hash: sha512.New384, etypeName: "aes256-cts-hmac-sha384-192", defaultRounds: 32768}, nil
 	case EnctypeCamellia128:
 		if fipsEnabled() {
-			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberr.ErrUnsupportedEType)
 		}
 		return camelliaEType{id: id, keySize: 16}, nil
 	case EnctypeCamellia256:
 		if fipsEnabled() {
-			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberrors.ErrUnsupportedEType)
+			return nil, fmt.Errorf("Camellia enctype %d disabled in FIPS mode: %w", id, krberr.ErrUnsupportedEType)
 		}
 		return camelliaEType{id: id, keySize: 32}, nil
 	default:
-		return nil, krberrors.ErrUnsupportedEType
+		return nil, krberr.ErrUnsupportedEType
 	}
 }
 

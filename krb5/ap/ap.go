@@ -14,8 +14,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/cammac"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
@@ -255,7 +255,7 @@ func VerifyAPReqWithSessionKeyWithOptions(key protocol.EncryptionKey, der []byte
 		return nil, fmt.Errorf("verify AP-REQ with session key: APUseSessionKey not set")
 	}
 	if request.Ticket.EncPart.EType != key.KeyType {
-		return nil, fmt.Errorf("verify AP-REQ with session key: %w", krberrors.ErrIntegrity)
+		return nil, fmt.Errorf("verify AP-REQ with session key: %w", krberr.ErrIntegrity)
 	}
 	backend, err := resolveReplayCache(options)
 	if err != nil {
@@ -292,7 +292,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	}
 	var ticketPart protocol.EncTicketPart
 	if err := asn1.Unmarshal(ticketPlain, &ticketPart); err != nil {
-		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrIntegrity)
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberr.ErrIntegrity)
 	}
 	var protectedAuthData protocol.AuthorizationData
 	protectedAuthData, err = cammac.VerifyService(ticketPart.AuthorizationData, ticketKey)
@@ -303,14 +303,14 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		protectedAuthData = nil
 	}
 	if ticketPart.Flags&types.TicketInvalid != 0 {
-		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberrors.ErrTicketInvalid)
+		return nil, fmt.Errorf("verify AP-REQ ticket: %w", krberr.ErrTicketInvalid)
 	}
 	now = now.UTC()
 	if err := ticketValid(ticketPart, now, skew); err != nil {
 		return nil, fmt.Errorf("verify AP-REQ ticket: %w", err)
 	}
 	if request.Authenticator.EType != ticketPart.Key.KeyType {
-		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrIntegrity)
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberr.ErrIntegrity)
 	}
 	sessionEType, err := crypto.NewRegistry().Get(ticketPart.Key.KeyType)
 	if err != nil {
@@ -322,7 +322,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	}
 	var authenticator protocol.Authenticator
 	if err := asn1.Unmarshal(authPlain, &authenticator); err != nil {
-		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrIntegrity)
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberr.ErrIntegrity)
 	}
 	if authenticator.AuthenticatorVNO != 5 ||
 		authenticator.CRealm != ticketPart.CRealm ||
@@ -336,13 +336,13 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 	sweepReplayCache(now, skew)
 	replayCache.Unlock()
 	if !withinSkew(authenticator.Ctime.Time, now, skew) {
-		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberrors.ErrClockSkew)
+		return nil, fmt.Errorf("verify AP-REQ authenticator: %w", krberr.ErrClockSkew)
 	}
 	if persistentCache != nil {
 		tag := rcache.TagFromCiphertext(request.Authenticator.Cipher, sessionEType.ChecksumSize())
 		if err := persistentCache.Store(tag, authenticator.Ctime.Time, skew); err != nil {
-			if errors.Is(err, krberrors.ErrReplay) {
-				return nil, fmt.Errorf("verify AP-REQ: %w", krberrors.ErrReplay)
+			if errors.Is(err, krberr.ErrReplay) {
+				return nil, fmt.Errorf("verify AP-REQ: %w", krberr.ErrReplay)
 			}
 			return nil, fmt.Errorf("verify AP-REQ replay cache: %w", err)
 		}
@@ -355,7 +355,7 @@ func verifyAPReqWithTicketKey(request protocol.APReq, ticketKey protocol.Encrypt
 		}
 		replayCache.Unlock()
 		if replayed {
-			return nil, fmt.Errorf("verify AP-REQ: %w", krberrors.ErrReplay)
+			return nil, fmt.Errorf("verify AP-REQ: %w", krberr.ErrReplay)
 		}
 	}
 	var authChecksum *protocol.Checksum
@@ -464,7 +464,7 @@ func VerifyAPRepWithDetails(request *APReq, der []byte) (APRepDetails, error) {
 		return APRepDetails{}, fmt.Errorf("verify AP-REP: %w", err)
 	}
 	if reply.PVNO != 5 || reply.MsgType != 15 || reply.EncPart.EType != request.SessionKey.KeyType {
-		return APRepDetails{}, fmt.Errorf("verify AP-REP: %w", krberrors.ErrIntegrity)
+		return APRepDetails{}, fmt.Errorf("verify AP-REP: %w", krberr.ErrIntegrity)
 	}
 	etype, err := crypto.NewRegistry().Get(request.SessionKey.KeyType)
 	if err != nil {
@@ -476,7 +476,7 @@ func VerifyAPRepWithDetails(request *APReq, der []byte) (APRepDetails, error) {
 	}
 	var part protocol.EncAPRepPart
 	if err := asn1.Unmarshal(plain, &part); err != nil {
-		return APRepDetails{}, fmt.Errorf("verify AP-REP encrypted part: %w", krberrors.ErrIntegrity)
+		return APRepDetails{}, fmt.Errorf("verify AP-REP encrypted part: %w", krberr.ErrIntegrity)
 	}
 	if !part.Ctime.Present || !part.Ctime.Time.Equal(request.AuthenticatorTime.Truncate(time.Second)) ||
 		part.Cusec != request.Cusec {
@@ -522,10 +522,10 @@ func ticketValid(part protocol.EncTicketPart, now time.Time, skew time.Duration)
 		start = part.StartTime.Time
 	}
 	if now.Before(start.Add(-skew)) {
-		return krberrors.ErrTicketNotYetValid
+		return krberr.ErrTicketNotYetValid
 	}
 	if now.After(part.EndTime.Time.Add(skew)) {
-		return krberrors.ErrTicketExpired
+		return krberr.ErrTicketExpired
 	}
 	return nil
 }

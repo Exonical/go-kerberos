@@ -8,7 +8,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -76,7 +76,7 @@ func TestClientExchangeRawAndHelpers(t *testing.T) {
 	if _, err := client.ExchangeRaw(context.Background(), "EXAMPLE.COM", []byte("request")); err != nil {
 		t.Fatal(err)
 	}
-	if !isUnknownServiceError(&krberrors.KRBError{Code: krberrors.KDCErrSPrincipalUnknown}) {
+	if !isUnknownServiceError(&krberr.KRBError{Code: krberr.KDCErrSPrincipalUnknown}) {
 		t.Fatal("unknown service helper returned false")
 	}
 	if isUnknownServiceError(errors.New("other")) || isKRBError(errors.New("other")) {

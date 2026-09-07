@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 )
 
 // IOVBufferType identifies the role of a buffer in an RFC 4121 IOV
@@ -282,7 +282,7 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 			payload = append(payload, iov[parts.trailer].Buffer...)
 			payload, err = rotateLeft(payload, rrc)
 			if err != nil {
-				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+				return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 			}
 			if len(payload) < trailerLen {
 				return fmt.Errorf("GSS IOV unwrap: invalid trailer")
@@ -302,18 +302,18 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 			}
 			plain, err := crypto.DecryptWithAssociatedData(etype, c.key.KeyValue, usage, body, associated)
 			if err != nil || len(plain) < 16 {
-				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+				return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 			}
 			expected := plain[len(plain)-16:]
 			expectedHeader := append([]byte(nil), header...)
 			expectedHeader[6], expectedHeader[7] = 0, 0
 			if !equalBytes(expected, expectedHeader) {
-				return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+				return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 			}
 			body = plain[:len(plain)-16]
 			if !c.dceStyle {
 				if ec > len(body) {
-					return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+					return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 				}
 				body = body[:len(body)-ec]
 			}
@@ -324,7 +324,7 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 			return nil
 		}
 		if ec != etype.ChecksumSize() || len(iov[parts.trailer].Buffer) != ec {
-			return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+			return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 		}
 		payload := append([]byte(nil), iov[parts.header].Buffer[16:]...)
 		for _, index := range parts.data {
@@ -336,7 +336,7 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 		payload = append(payload, iov[parts.trailer].Buffer...)
 		payload, err = rotateLeft(payload, rrc)
 		if err != nil || len(payload) < ec {
-			return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+			return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 		}
 		mac := payload[len(payload)-ec:]
 		canonicalData := payload[:len(payload)-ec]
@@ -380,7 +380,7 @@ func (c *Context) UnwrapIOV(iov []IOVBuffer) error {
 	rrc := int(binary.BigEndian.Uint16(header[6:8]))
 	payload, err = rotateLeft(payload, rrc)
 	if err != nil {
-		return fmt.Errorf("GSS IOV unwrap: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("GSS IOV unwrap: %w", krberr.ErrIntegrity)
 	}
 	if header[2]&tokenFlagSealed != 0 {
 		ec := int(binary.BigEndian.Uint16(header[4:6]))

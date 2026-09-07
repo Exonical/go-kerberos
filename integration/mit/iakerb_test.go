@@ -51,7 +51,7 @@ func TestMITIAKERBInitiatorAgainstGo(t *testing.T) {
 		})
 	}
 	acceptor, err := gssapi.NewIAKERBAcceptor(
-		&keytab.Keytab{Entries: entries},
+		keytab.New(entries...),
 		&client.Client{Config: cfg},
 		goKDCRealm,
 	)

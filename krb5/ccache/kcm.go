@@ -598,16 +598,12 @@ func (h *Handle) Retrieve(match Credential, flags uint32) (Credential, error) {
 		if err != nil {
 			return Credential{}, err
 		}
-		if flags&MITMatchSupportedKTypes != 0 {
-			return retrieveCredentialsWithOrder(cache.Credentials, match, flags, supportedEnctypeOrder(h))
+		credential, err := retrieveCredentialsWithOrder(
+			cache.Credentials, match, flags, supportedEnctypeOrder(h))
+		if errors.Is(err, errCredentialNotFound) {
+			return Credential{}, errors.New("ccache: KEYRING credential not found")
 		}
-		wireFlags := MapTCFlags(flags)
-		for _, candidate := range cache.Credentials {
-			if credentialMatches(candidate, match, wireFlags) {
-				return candidate, nil
-			}
-		}
-		return Credential{}, errors.New("ccache: KEYRING credential not found")
+		return credential, err
 	}
 	if h != nil && h.typ == TypeMSLSA {
 		cache, err := h.Read()

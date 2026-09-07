@@ -9,8 +9,8 @@ import (
 
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
 	"github.com/Exonical/go-kerberos/krb5/types"
@@ -76,7 +76,7 @@ func ReadSafe(der []byte, opts *Options) ([]byte, error) {
 	expectedType := fast.ChecksumType(opts.Key.KeyType)
 	if expectedType == 0 || message.Checksum.ChecksumType != expectedType ||
 		len(message.Checksum.Checksum) == 0 {
-		return nil, appError(krberrors.KRBAPErrInappCksum, "invalid KRB-SAFE checksum type")
+		return nil, appError(krberr.KRBAPErrInappCksum, "invalid KRB-SAFE checksum type")
 	}
 	received := append([]byte(nil), message.Checksum.Checksum...)
 	message.Checksum = protocol.Checksum{}
@@ -162,7 +162,7 @@ func validateOptions(opts *Options, requireLocal bool) (crypto.EType, error) {
 		return nil, fmt.Errorf("appmsg: nil options")
 	}
 	if requireLocal && opts.LocalAddress == nil {
-		return nil, appError(krberrors.KRBAPErrBadAddr, "local address is required")
+		return nil, appError(krberr.KRBAPErrBadAddr, "local address is required")
 	}
 	if len(opts.Key.KeyValue) == 0 {
 		return nil, fmt.Errorf("appmsg: missing encryption key")
@@ -217,10 +217,10 @@ func privBody(data []byte, opts *Options) protocol.EncKRBPrivPart {
 
 func validateAddresses(sender protocol.HostAddress, receiver *protocol.HostAddress, opts *Options) error {
 	if opts.RemoteAddress != nil && !sameAddress(sender, *opts.RemoteAddress) {
-		return appError(krberrors.KRBAPErrBadAddr, "sender address mismatch")
+		return appError(krberr.KRBAPErrBadAddr, "sender address mismatch")
 	}
 	if receiver != nil && opts.LocalAddress != nil && !sameAddress(*receiver, *opts.LocalAddress) {
-		return appError(krberrors.KRBAPErrBadAddr, "receiver address mismatch")
+		return appError(krberr.KRBAPErrBadAddr, "receiver address mismatch")
 	}
 	return nil
 }
@@ -228,7 +228,7 @@ func validateAddresses(sender protocol.HostAddress, receiver *protocol.HostAddre
 func validateReplayFields(timestamp *types.KerberosTime, usec *int32, seq *uint32, opts *Options) error {
 	if opts.DoTime {
 		if timestamp == nil || !timestamp.Present {
-			return appError(krberrors.KRBAPErrSkew, "missing timestamp")
+			return appError(krberr.KRBAPErrSkew, "missing timestamp")
 		}
 		skew := effectiveSkew(opts)
 		messageTime := timestamp.Time
@@ -240,12 +240,12 @@ func validateReplayFields(timestamp *types.KerberosTime, usec *int32, seq *uint3
 			delta = -delta
 		}
 		if delta > skew {
-			return appError(krberrors.KRBAPErrSkew, "timestamp outside clock skew")
+			return appError(krberr.KRBAPErrSkew, "timestamp outside clock skew")
 		}
 	}
 	if opts.DoSequence {
 		if seq == nil || *seq != opts.SequenceNumber {
-			return appError(krberrors.KRBAPErrBadOrder, "unexpected sequence number")
+			return appError(krberr.KRBAPErrBadOrder, "unexpected sequence number")
 		}
 	}
 	return nil
@@ -256,11 +256,11 @@ func checkReplay(tag []byte, timestamp *types.KerberosTime, opts *Options) error
 		return nil
 	}
 	if timestamp == nil || !timestamp.Present {
-		return appError(krberrors.KRBAPErrSkew, "missing timestamp")
+		return appError(krberr.KRBAPErrSkew, "missing timestamp")
 	}
 	if err := opts.ReplayCache.Store(tag, timestamp.Time, effectiveSkew(opts)); err != nil {
 		if stderrors.Is(err, rcache.ErrReplay) {
-			return appError(krberrors.KRBAPErrRepeat, "replayed application message")
+			return appError(krberr.KRBAPErrRepeat, "replayed application message")
 		}
 		return fmt.Errorf("appmsg: replay cache: %w", err)
 	}
@@ -292,7 +292,7 @@ func nowFunc(opts *Options) func() time.Time {
 	return time.Now
 }
 
-func appError(code krberrors.ErrorCode, message string) error {
+func appError(code krberr.ErrorCode, message string) error {
 	return fmt.Errorf("appmsg: %s: %w", message,
-		krberrors.NewKRBError(code, "", "", time.Time{}, 0, nil))
+		krberr.NewKRBError(code, "", "", time.Time{}, 0, nil))
 }

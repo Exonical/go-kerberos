@@ -18,11 +18,11 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/gssapi"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/otp"
 	"github.com/Exonical/go-kerberos/krb5/pac"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
@@ -65,10 +65,10 @@ func TestGSSPasswordCredentialAgainstServer(t *testing.T) {
 		t.Fatalf("service lookup: %v, %v", err, ok)
 	}
 	key := record.Keys[crypto.EnctypeAES256SHA1]
-	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+	kt := keytab.New(keytab.Entry{
 		Principal: service, KVNO: key.KVNO, Enctype: key.Enctype,
 		Key: append([]byte(nil), key.Key...),
-	}}}
+	})
 
 	credential, err := gssapi.AcquireInitiatorCredentialWithPassword(
 		context.Background(), kclient, user, "alice-password")
@@ -175,10 +175,10 @@ func TestGSSImpersonatedCredentialAgainstServer(t *testing.T) {
 		t.Fatalf("backend lookup: %v, %v", err, ok)
 	}
 	key := record.Keys[crypto.EnctypeAES256SHA1]
-	acceptor, err := gssapi.AcquireAcceptorCredential(&keytab.Keytab{Entries: []keytab.Entry{{
+	acceptor, err := gssapi.AcquireAcceptorCredential(keytab.New(keytab.Entry{
 		Principal: backend, KVNO: key.KVNO, Enctype: key.Enctype,
 		Key: append([]byte(nil), key.Key...),
-	}}}, &backend)
+	}), &backend)
 	if err != nil {
 		t.Fatalf("acquire backend credential: %v", err)
 	}
@@ -223,12 +223,12 @@ func TestServerVerifyInitCreds(t *testing.T) {
 		t.Fatalf("service lookup: %v, %v", err, ok)
 	}
 	serviceKey := record.Keys[crypto.EnctypeAES256SHA1]
-	kt := &keytab.Keytab{Entries: []keytab.Entry{{
+	kt := keytab.New(keytab.Entry{
 		Principal: service,
 		KVNO:      serviceKey.KVNO,
 		Enctype:   serviceKey.Enctype,
 		Key:       append([]byte(nil), serviceKey.Key...),
-	}}}
+	})
 	if err := kclient.VerifyInitCreds(context.Background(), tgt, kt,
 		client.VerifyInitCredsOptions{Server: &service, NoFailSet: true, NoFail: true}); err != nil {
 		t.Fatalf("VerifyInitCreds: %v", err)
@@ -243,11 +243,13 @@ func TestServerVerifyInitCreds(t *testing.T) {
 		t.Fatalf("ASExchangeWithOptions VerifyInitCreds: %v", err)
 	}
 
-	wrong := *kt
-	wrong.Entries = append([]keytab.Entry(nil), kt.Entries...)
-	wrong.Entries[0].Key = append([]byte(nil), wrong.Entries[0].Key...)
-	wrong.Entries[0].Key[0] ^= 0xff
-	if err := kclient.VerifyInitCreds(context.Background(), tgt, &wrong,
+	wrong := keytab.New(kt.Entries()...)
+	wrongEntries := kt.Entries()
+	wrongEntries[0].Key[0] ^= 0xff
+	if err := wrong.SetEntry(0, wrongEntries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := kclient.VerifyInitCreds(context.Background(), tgt, wrong,
 		client.VerifyInitCredsOptions{Server: &service, NoFailSet: true, NoFail: true}); err == nil {
 		t.Fatal("VerifyInitCreds accepted wrong service key")
 	}
@@ -474,9 +476,9 @@ func TestServerGSSCredentialDelegation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitialToken: %v", err)
 	}
-	acceptor := gssapi.NewAcceptor(&keytab.Keytab{Entries: []keytab.Entry{{
+	acceptor := gssapi.NewAcceptor(keytab.New(keytab.Entry{
 		Principal: service, KVNO: record.KVNO, Enctype: serviceTicket.Key.KeyType, Key: serviceKey.Key,
-	}}})
+	}))
 	gssContext, reply, err := acceptor.Accept(token, now)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
@@ -658,18 +660,18 @@ func TestServerAuthorizationHookMapsKRBErrorCodes(t *testing.T) {
 	}{
 		{
 			name: "wrapped policy",
-			err:  fmt.Errorf("wrapped: %w", krberrors.NewKRBError(12, "", "TEST.REALM", now, 0, nil)),
+			err:  fmt.Errorf("wrapped: %w", krberr.NewKRBError(12, "", "TEST.REALM", now, 0, nil)),
 			want: kdcErrPolicy,
 		},
 		{
 			name: "wrapped client revoked",
-			err:  fmt.Errorf("wrapped: %w", krberrors.NewKRBError(18, "", "TEST.REALM", now, 0, nil)),
+			err:  fmt.Errorf("wrapped: %w", krberr.NewKRBError(18, "", "TEST.REALM", now, 0, nil)),
 			want: kdcErrClientRevoked,
 		},
 		{name: "plain error", err: errors.New("plain authorization denial"), want: kdcErrPolicy},
 		{
 			name: "out of range",
-			err:  krberrors.NewKRBError(129, "", "TEST.REALM", now, 0, nil),
+			err:  krberr.NewKRBError(129, "", "TEST.REALM", now, 0, nil),
 			want: kdcErrGeneric,
 		},
 	}
@@ -2101,7 +2103,7 @@ func TestASRequiresPreauthenticationAndMapsFailures(t *testing.T) {
 		},
 	}
 	_, err := badClient.ASExchange(context.Background(), user, "wrong-password")
-	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+	if err == nil || !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("wrong password error = %v, want integrity", err)
 	}
 	unknown := user
@@ -2721,7 +2723,7 @@ func TestTGSRejectsTamperedAuthenticatorChecksum(t *testing.T) {
 	}
 	_, err = (&client.Client{Now: func() time.Time { return now }, Exchange: exchange}).TGSExchange(
 		context.Background(), tgt, service)
-	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+	if err == nil || !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("tampered checksum error = %v, want integrity", err)
 	}
 }
@@ -2797,7 +2799,7 @@ func mustMarshal(t *testing.T, value any) []byte {
 }
 
 func hasKRBCode(err error, code int32) bool {
-	var kerberosError *krberrors.KRBError
+	var kerberosError *krberr.KRBError
 	if !errors.As(err, &kerberosError) {
 		return false
 	}

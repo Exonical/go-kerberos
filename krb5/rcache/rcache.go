@@ -16,7 +16,7 @@ import (
 
 	"github.com/Exonical/go-kerberos/internal/secureenv"
 	"github.com/Exonical/go-kerberos/krb5/config"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 )
 
 const (
@@ -29,7 +29,7 @@ const (
 
 var (
 	// ErrReplay indicates that an authenticator tag was already stored.
-	ErrReplay = krberrors.ErrReplay
+	ErrReplay = krberr.ErrReplay
 	// ErrOverflow indicates that a replay-cache file cannot grow further.
 	ErrOverflow = errors.New("replay cache file size overflow")
 )

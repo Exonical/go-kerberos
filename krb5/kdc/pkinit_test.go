@@ -14,9 +14,9 @@ import (
 
 	krb5asn1 "github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
 	"github.com/Exonical/go-kerberos/krb5/kdb"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
@@ -64,13 +64,13 @@ func TestPKINITDHPolicyErrorUsesTypedData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := server.errorResponseWithData(int32(krberrors.KDCErrDHKeyParameters), nil, eData)
+	response := server.errorResponseWithData(int32(krberr.KDCErrDHKeyParameters), nil, eData)
 	var outer protocol.KRBError
 	if err := krb5asn1.Unmarshal(response, &outer); err != nil {
 		t.Fatal(err)
 	}
-	if outer.ErrorCode != int32(krberrors.KDCErrDHKeyParameters) {
-		t.Fatalf("KDC error code = %d, want %d", outer.ErrorCode, krberrors.KDCErrDHKeyParameters)
+	if outer.ErrorCode != int32(krberr.KDCErrDHKeyParameters) {
+		t.Fatalf("KDC error code = %d, want %d", outer.ErrorCode, krberr.KDCErrDHKeyParameters)
 	}
 	var typed protocol.TypedData
 	if err := krb5asn1.Unmarshal(outer.EData, &typed); err != nil {
@@ -394,7 +394,7 @@ func TestClientAnonymousRejectsMissingPKINITKX(t *testing.T) {
 		return krb5asn1.Marshal(reply)
 	}
 	_, err := kclient.AnonymousASExchange(context.Background(), "TEST.REALM", roots)
-	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+	if err == nil || !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("missing PA-PKINIT-KX error = %v, want integrity", err)
 	}
 }

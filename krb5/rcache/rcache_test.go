@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/Exonical/go-kerberos/krb5/config"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 )
 
 func TestSipHashMITVectors(t *testing.T) {
@@ -123,7 +123,7 @@ func TestFile2SeedAndExactRecordLayout(t *testing.T) {
 	if got := binary.BigEndian.Uint32(data[offset+tagLen : offset+recordLen]); got != 0x01020304 {
 		t.Fatalf("record timestamp = %#x", got)
 	}
-	if err := (&File2{Path: path}).Store(tag, now, time.Minute); !errors.Is(err, krberrors.ErrReplay) {
+	if err := (&File2{Path: path}).Store(tag, now, time.Minute); !errors.Is(err, krberr.ErrReplay) {
 		t.Fatalf("second store error = %v, want replay", err)
 	}
 }
@@ -264,7 +264,7 @@ func TestFile2ConcurrentSameTagHasOneWinner(t *testing.T) {
 				mu.Lock()
 				winners++
 				mu.Unlock()
-			} else if !errors.Is(err, krberrors.ErrReplay) {
+			} else if !errors.Is(err, krberr.ErrReplay) {
 				t.Errorf("store: %v", err)
 			}
 		}()

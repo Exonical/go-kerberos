@@ -154,6 +154,24 @@ func TestKeyringRetrieveMapsMITMatchFlags(t *testing.T) {
 	if got.Server.Realm != value.Server.Realm {
 		t.Fatalf("retrieved credential realm = %q, want %q", got.Server.Realm, value.Server.Realm)
 	}
+
+	value.AuthTime = 10
+	value.EndTime = 20
+	if err := writeKeyringForTest(t, cache, &Cache{
+		DefaultPrincipal: value.Client,
+		Credentials:      []Credential{value},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	match = value
+	match.AuthTime = 30
+	got, err = cache.Retrieve(match, MITMatchTimes)
+	if err != nil {
+		t.Fatalf("Retrieve with MIT time flags: %v", err)
+	}
+	if got.EndTime != value.EndTime {
+		t.Fatalf("retrieved credential end time = %d, want %d", got.EndTime, value.EndTime)
+	}
 }
 
 func TestKeyringRemoveUnlinksMatchingCredentials(t *testing.T) {

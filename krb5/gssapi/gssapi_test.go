@@ -16,8 +16,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
@@ -268,7 +268,11 @@ func TestAcquireDefaultMemoryAcceptorCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	memory.Entries = append([]keytab.Entry(nil), source.Entries...)
+	for _, entry := range source.Entries() {
+		if err := memory.AddEntry(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("KRB5_KTNAME", name)
 	acquired, err := AcquireDefaultAcceptorCredential(&creds.Server)
 	if err != nil {
@@ -997,9 +1001,9 @@ func syntheticCredentials(t *testing.T, etypeID int32) (*client.Credentials, *ke
 			Client: clientPrincipal, Server: servicePrincipal,
 			Key:      protocol.EncryptionKey{KeyType: etypeID, KeyValue: sessionKey},
 			AuthTime: types.KerberosTime{Time: now, Present: true}, EndTime: end, Ticket: ticket,
-		}, &keytab.Keytab{Entries: []keytab.Entry{{
+		}, keytab.New(keytab.Entry{
 			Principal: servicePrincipal, KVNO: kvno, Enctype: etypeID, Key: serviceKey,
-		}}}
+		})
 }
 
 func rotateTokenData(t *testing.T, token []byte, rrc int) []byte {
@@ -1016,7 +1020,7 @@ func rotateTokenData(t *testing.T, token []byte, rrc int) []byte {
 }
 
 func isIntegrity(err error) bool {
-	return errors.Is(err, krberrors.ErrIntegrity)
+	return errors.Is(err, krberr.ErrIntegrity)
 }
 
 func cryptoName(id int32) string {

@@ -13,8 +13,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/asn1"
 	"github.com/Exonical/go-kerberos/krb5/config"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/fast"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/pkinit"
 	"github.com/Exonical/go-kerberos/krb5/preauth"
 	"github.com/Exonical/go-kerberos/krb5/principal"
@@ -215,7 +215,7 @@ func TestASExchangeServiceKeepsClientRealmForRealmlessService(t *testing.T) {
 				t.Fatalf("AS request realm = %q, want %q", request.ReqBody.Realm, testRealm)
 			}
 			return mustMarshal(t, protocol.KRBError{
-				PVNO: 5, MsgType: 30, ErrorCode: int32(krberrors.KDCErrSPrincipalUnknown),
+				PVNO: 5, MsgType: 30, ErrorCode: int32(krberr.KDCErrSPrincipalUnknown),
 				STime: kerberosTime(now), Susec: 0,
 				Realm: testRealm, SName: *request.ReqBody.SName,
 			}), nil
@@ -446,7 +446,7 @@ func testASExchangeFASTEchoesKDCookie(t *testing.T, encryptedChallenge bool) {
 
 func TestAnonymousASExchangeRejectsMissingTicketFlag(t *testing.T) {
 	err := requireAnonymousTicketFlag(&Credentials{})
-	if err == nil || !errors.Is(err, krberrors.ErrIntegrity) {
+	if err == nil || !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("missing anonymous ticket flag error = %v, want integrity", err)
 	}
 }
@@ -458,12 +458,12 @@ func TestFindPKINITDHParametersUsesTypedDataAndCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := &krberrors.KRBError{Code: krberrors.KDCErrDHKeyParameters, EData: payload}
+	value := &krberr.KRBError{Code: krberr.KDCErrDHKeyParameters, EData: payload}
 	if got := findPKINITDHParameters(value); !bytes.Equal(got, []byte{1, 2, 3}) {
 		t.Fatalf("TD-DH-PARAMETERS = %x, want 010203", got)
 	}
-	for _, code := range []krberrors.ErrorCode{krberrors.KDCErrPreauthFailed, 25} {
-		value := &krberrors.KRBError{Code: code, EData: payload}
+	for _, code := range []krberr.ErrorCode{krberr.KDCErrPreauthFailed, 25} {
+		value := &krberr.KRBError{Code: code, EData: payload}
 		if got := findPKINITDHParameters(value); got != nil {
 			t.Fatalf("error code %d yielded TD-DH-PARAMETERS %x", code, got)
 		}
@@ -481,7 +481,7 @@ func TestRetryPKINITDHParametersRegeneratesAnonymousState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := &krberrors.KRBError{Code: krberrors.KDCErrDHKeyParameters, EData: payload}
+	value := &krberr.KRBError{Code: krberr.KDCErrDHKeyParameters, EData: payload}
 	client, err := pkinit.NewAnonymousClient()
 	if err != nil {
 		t.Fatal(err)
@@ -671,7 +671,7 @@ func TestKRBErrorMapsClockSkew(t *testing.T) {
 		return payload, nil
 	}}
 	_, err := client.ASExchange(context.Background(), principal.Principal{Realm: testRealm, Components: []string{"alice"}}, "password")
-	if !errors.Is(err, krberrors.ErrClockSkew) {
+	if !errors.Is(err, krberr.ErrClockSkew) {
 		t.Fatalf("error = %v, want clock skew", err)
 	}
 }
@@ -814,7 +814,7 @@ func TestTGSExchangeRejectsTamperedReply(t *testing.T) {
 		context.Background(), tgt,
 		principal.Principal{Realm: testRealm, NameType: principal.NTSrvHst, Components: []string{"host", "service.test"}},
 	)
-	if !errors.Is(err, krberrors.ErrIntegrity) {
+	if !errors.Is(err, krberr.ErrIntegrity) {
 		t.Fatalf("error = %v, want integrity", err)
 	}
 }
@@ -1040,7 +1040,7 @@ func TestTGSExchangeFallsBackAfterReferralError(t *testing.T) {
 				t.Fatal("initial request is not a referral request")
 			}
 			return mustMarshal(t, protocol.KRBError{
-				PVNO: 5, MsgType: 30, ErrorCode: int32(krberrors.KDCErrSPrincipalUnknown),
+				PVNO: 5, MsgType: 30, ErrorCode: int32(krberr.KDCErrSPrincipalUnknown),
 				STime: kerberosTime(now), Susec: 0,
 				Realm: "HOME", SName: protocol.PrincipalName{
 					NameType: int32(principal.NTSrvInstance), NameString: []string{"krbtgt", "HOME"},

@@ -686,10 +686,10 @@ func WriteStash(w io.Writer, realm string, enctype int32, kvno uint32, masterKey
 		Realm: realm, NameType: principal.NTPrincipal,
 		Components: []string{"K", "M"},
 	}
-	return keytab.Write(w, &keytab.Keytab{Entries: []keytab.Entry{{
+	return keytab.Write(w, keytab.New(keytab.Entry{
 		Principal: name, KVNO: kvno, Enctype: enctype,
 		Key: append([]byte(nil), masterKey...),
-	}}})
+	}))
 }
 
 // WriteStashFile writes a modern FILE keytab-format MIT stash to path.

@@ -170,11 +170,11 @@ func installMITChangePasswordKeys(t *testing.T, db *kdb.Database, path string) {
 		crypto.EnctypeAES128SHA256, crypto.EnctypeAES256SHA384,
 	} {
 		var selected *keytab.Entry
-		for i := range kt.Entries {
-			entry := &kt.Entries[i]
+		for _, candidate := range kt.Entries() {
+			entry := candidate
 			if entry.Enctype == enctype && entry.Principal.String() == service.String() &&
 				(selected == nil || entry.KVNO > selected.KVNO) {
-				selected = entry
+				selected = &entry
 			}
 		}
 		if selected != nil {

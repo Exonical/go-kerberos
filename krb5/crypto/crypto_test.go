@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 )
 
 func TestPRFRFC8009Vectors(t *testing.T) {
@@ -66,7 +66,7 @@ func TestCamelliaRegistryFIPSGate(t *testing.T) {
 
 	for _, id := range []int32{EnctypeCamellia128, EnctypeCamellia256} {
 		_, err := NewRegistry().Get(id)
-		if !errors.Is(err, krberrors.ErrUnsupportedEType) {
+		if !errors.Is(err, krberr.ErrUnsupportedEType) {
 			t.Fatalf("registry.Get(%d) error = %v, want ErrUnsupportedEType", id, err)
 		}
 		if !strings.Contains(err.Error(), "FIPS") {
@@ -82,7 +82,7 @@ func TestCamelliaFIPSGateSubprocess(t *testing.T) {
 			t.Fatal("FIPS mode was not enabled in subprocess")
 		}
 		for _, id := range []int32{EnctypeCamellia128, EnctypeCamellia256} {
-			if _, err := NewRegistry().Get(id); !errors.Is(err, krberrors.ErrUnsupportedEType) {
+			if _, err := NewRegistry().Get(id); !errors.Is(err, krberr.ErrUnsupportedEType) {
 				t.Fatalf("registry.Get(%d) error = %v, want ErrUnsupportedEType", id, err)
 			}
 		}
@@ -210,7 +210,7 @@ func TestRegistrySupportsModernEnctypes(t *testing.T) {
 
 func TestRegistryRejectsLegacyAndUnknownEnctypes(t *testing.T) {
 	for _, id := range []int32{1, 2, 23, 9999} {
-		if _, err := NewRegistry().Get(id); !errors.Is(err, krberrors.ErrUnsupportedEType) {
+		if _, err := NewRegistry().Get(id); !errors.Is(err, krberr.ErrUnsupportedEType) {
 			t.Fatalf("registry.Get(%d) error = %v, want ErrUnsupportedEType", id, err)
 		}
 	}

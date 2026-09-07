@@ -1,4 +1,4 @@
-package errors
+package krberr
 
 import (
 	stderrors "errors"
@@ -35,8 +35,8 @@ const (
 	KDCErrPreauthFailed ErrorCode = 24
 	// KDCErrPreauthExpired is KDC_ERR_PREAUTH_EXPIRED.
 	KDCErrPreauthExpired ErrorCode = 90
-	// KDCErrEtypeNosp is KDC_ERR_ETYPE_NOSUPP.
-	KDCErrEtypeNosp ErrorCode = 14
+	// KDCErrEtypeNosupp is KDC_ERR_ETYPE_NOSUPP.
+	KDCErrEtypeNosupp ErrorCode = 14
 	// KDCErrDHKeyParameters is KDC_ERR_DH_KEY_PARAMETERS_NOT_ACCEPTED.
 	KDCErrDHKeyParameters ErrorCode = 65
 	// KDCErrSPrincipalUnknown is KDC_ERR_S_PRINCIPAL_UNKNOWN.
@@ -107,7 +107,7 @@ func (e *KRBError) Is(target error) bool {
 		return target == ErrTicketNotYetValid
 	case KRBAPErrRepeat:
 		return target == ErrReplay
-	case KDCErrEtypeNosp:
+	case KDCErrEtypeNosupp:
 		return target == ErrUnsupportedEType
 	case KRBAPErrBadIntegrity, KDCErrPreauthFailed:
 		return target == ErrIntegrity

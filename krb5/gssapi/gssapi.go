@@ -12,8 +12,8 @@ import (
 	"github.com/Exonical/go-kerberos/krb5/authdata"
 	"github.com/Exonical/go-kerberos/krb5/client"
 	"github.com/Exonical/go-kerberos/krb5/crypto"
-	krberrors "github.com/Exonical/go-kerberos/krb5/errors"
 	"github.com/Exonical/go-kerberos/krb5/keytab"
+	"github.com/Exonical/go-kerberos/krb5/krberr"
 	"github.com/Exonical/go-kerberos/krb5/principal"
 	"github.com/Exonical/go-kerberos/krb5/protocol"
 	"github.com/Exonical/go-kerberos/krb5/rcache"
@@ -762,16 +762,16 @@ func (c *Context) unwrapToken(token []byte, dceStyle bool) ([]byte, error) {
 			return nil, fmt.Errorf("GSS unwrap: %w", err)
 		}
 		if len(plain) < 16 {
-			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+			return nil, fmt.Errorf("GSS unwrap: %w", krberr.ErrIntegrity)
 		}
 		expectedHeader := messageHeader(header[:2], header[2], ec, 0, binary.BigEndian.Uint64(header[8:]))
 		if !equalBytes(plain[len(plain)-16:], expectedHeader) {
-			return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+			return nil, fmt.Errorf("GSS unwrap: %w", krberr.ErrIntegrity)
 		}
 		body := plain[:len(plain)-16]
 		if !dceStyle {
 			if ec > len(body) {
-				return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+				return nil, fmt.Errorf("GSS unwrap: %w", krberr.ErrIntegrity)
 			}
 			body = body[:len(body)-ec]
 		}
@@ -780,7 +780,7 @@ func (c *Context) unwrapToken(token []byte, dceStyle bool) ([]byte, error) {
 	}
 	ec := int(binary.BigEndian.Uint16(header[4:6]))
 	if ec != etype.ChecksumSize() || len(payload) < ec {
-		return nil, fmt.Errorf("GSS unwrap: %w", krberrors.ErrIntegrity)
+		return nil, fmt.Errorf("GSS unwrap: %w", krberr.ErrIntegrity)
 	}
 	data, mac := payload[:len(payload)-ec], payload[len(payload)-ec:]
 	signUsage := uint32(24)
@@ -840,7 +840,7 @@ func (c *Context) verifyMIC(data, token []byte) error {
 	}
 	for _, value := range header[3:8] {
 		if value != 0xff {
-			return fmt.Errorf("GSS MIC: %w", krberrors.ErrIntegrity)
+			return fmt.Errorf("GSS MIC: %w", krberr.ErrIntegrity)
 		}
 	}
 	etype, err := crypto.NewRegistry().Get(c.key.KeyType)
@@ -848,7 +848,7 @@ func (c *Context) verifyMIC(data, token []byte) error {
 		return err
 	}
 	if len(payload) != etype.ChecksumSize() {
-		return fmt.Errorf("GSS MIC: %w", krberrors.ErrIntegrity)
+		return fmt.Errorf("GSS MIC: %w", krberr.ErrIntegrity)
 	}
 	canonical := micHeader(header[2], binary.BigEndian.Uint64(header[8:]))
 	usage := uint32(25)

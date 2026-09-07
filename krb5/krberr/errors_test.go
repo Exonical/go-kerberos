@@ -1,4 +1,4 @@
-package errors
+package krberr
 
 import (
 	"errors"
@@ -29,7 +29,7 @@ func TestKRBErrorClassificationCodes(t *testing.T) {
 	}{
 		{KDCErrTktExpired, ErrTicketExpired},
 		{KRBAPErrTktNYV, ErrTicketNotYetValid},
-		{KDCErrEtypeNosp, ErrUnsupportedEType},
+		{KDCErrEtypeNosupp, ErrUnsupportedEType},
 		{KRBAPErrBadIntegrity, ErrIntegrity},
 		{KDCErrPreauthFailed, ErrIntegrity},
 		{KRBAPErrSkew, ErrClockSkew},

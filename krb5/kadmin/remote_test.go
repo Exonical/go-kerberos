@@ -107,9 +107,9 @@ func remoteTestCredentials(t *testing.T, realm string) (*keytab.Keytab, *client.
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &keytab.Keytab{Entries: []keytab.Entry{{
+	return keytab.New(keytab.Entry{
 			Principal: service, KVNO: kvno, Enctype: enctype, Key: serviceKey,
-		}}}, &client.Credentials{
+		}), &client.Credentials{
 			Client: admin, Server: service,
 			Key:      protocol.EncryptionKey{KeyType: enctype, KeyValue: sessionKey},
 			AuthTime: types.KerberosTime{Time: now, Present: true},
