@@ -52,11 +52,16 @@ func ParseMethodData(data []byte) (protocol.MethodData, error) {
 	return methodData, nil
 }
 
-// SelectEType selects the first supported enctype advertised by the KDC.
-// It returns the enctype, salt, and string-to-key parameters.
-func SelectEType(methodData protocol.MethodData, realm string, name principal.Principal, registry *crypto.Registry) (int32, []byte, []byte, error) {
+// SelectEType selects a supported enctype advertised by the KDC. If offered
+// is supplied, its order is the client's preference and entries outside that
+// list are ignored. It returns the enctype, salt, and string-to-key parameters.
+func SelectEType(methodData protocol.MethodData, realm string, name principal.Principal, registry *crypto.Registry, offered ...[]int32) (int32, []byte, []byte, error) {
 	if registry == nil {
 		registry = crypto.NewRegistry()
+	}
+	preference := make([]int32, 0)
+	if len(offered) > 0 {
+		preference = append(preference, offered[0]...)
 	}
 	defaultSalt := []byte(realm + strings.Join(name.Components, ""))
 	for _, pa := range methodData {
@@ -83,7 +88,18 @@ func SelectEType(methodData protocol.MethodData, realm string, name principal.Pr
 		default:
 			continue
 		}
-		for _, entry := range entries {
+		candidates := entries
+		if len(preference) > 0 {
+			candidates = make(protocol.ETypeInfo2, 0, len(preference))
+			for _, preferred := range preference {
+				for _, entry := range entries {
+					if entry.EType == preferred {
+						candidates = append(candidates, entry)
+					}
+				}
+			}
+		}
+		for _, entry := range candidates {
 			if _, err := registry.Get(entry.EType); err != nil {
 				continue
 			}

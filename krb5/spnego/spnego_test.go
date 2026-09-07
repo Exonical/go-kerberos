@@ -187,6 +187,58 @@ func TestKerberosSPNEGOMechListMICExchange(t *testing.T) {
 	}
 }
 
+func TestSPNEGORejectsIncompleteAcceptorCompletion(t *testing.T) {
+	creds, _ := syntheticCredentials(t)
+	initiator, err := NewInitiator(creds, gssapiFlags())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.InitialToken(time.Unix(1700000011, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	token, err := encodeBareResp(NegTokenResp{
+		NegState:      NegStateAcceptCompleted,
+		SupportedMech: kerberosOID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.Continue(token); err == nil {
+		t.Fatal("acceptor completion without mechanism response accepted")
+	}
+}
+
+func TestSPNEGORequiresAcceptorMICWhenRequested(t *testing.T) {
+	creds, kt := syntheticCredentials(t)
+	initiator, err := NewInitiatorWithMechs(creds, gssapiFlags(), []asn1.ObjectIdentifier{
+		{1, 3, 6, 1, 5, 5, 7},
+		kerberosOID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := initiator.InitialToken(time.Unix(1700000012, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, reply, err := NewAcceptor(kt).Accept(first, time.Unix(1700000012, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeToken(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded.Resp.MechListMIC = nil
+	reply, err = EncodeToken(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initiator.Continue(reply); err == nil {
+		t.Fatal("missing acceptor mechListMIC accepted")
+	}
+}
+
 func TestNegoExMessageRoundTrips(t *testing.T) {
 	scheme := NegoExSchemeForOID(oidBytes(kerberosOID))
 	var conversation [16]byte
@@ -342,6 +394,29 @@ func TestNegoExVerifyTamperAndSequenceRejection(t *testing.T) {
 	final, err := initiator.Continue(reply)
 	if err != nil {
 		t.Fatal(err)
+	}
+	finalDecoded, err := DecodeToken(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, err := DecodeNegoEx(finalDecoded.Resp.ResponseToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) == 0 || messages[len(messages)-1].Type != NegoExVerify {
+		t.Fatal("NegoEx final token did not contain VERIFY")
+	}
+	missingVerify, err := EncodeNegoEx(messages[:len(messages)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalDecoded.Resp.ResponseToken = missingVerify
+	missingToken, err := EncodeToken(finalDecoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := acceptor.Accept(missingToken, now); err == nil {
+		t.Fatal("missing NegoEx VERIFY accepted")
 	}
 	decoded, err := DecodeToken(final)
 	if err != nil {

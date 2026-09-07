@@ -396,7 +396,7 @@ func (i *IAKERBInitiator) Step(input []byte, now time.Time) ([]byte, error) {
 				return nil, err
 			}
 			var salt, params []byte
-			i.etype, salt, params, err = preauth.SelectEType(methodData, i.realm, i.Client, crypto.NewRegistry())
+			i.etype, salt, params, err = preauth.SelectEType(methodData, i.realm, i.Client, crypto.NewRegistry(), i.KDC.RequestEnctypes())
 			if err != nil {
 				return nil, err
 			}
